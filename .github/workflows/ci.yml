@@ -53,4 +53,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker compose config --quiet
-      - run: docker build -t ai-ops-platform:ci .
+      - run: docker compose up -d --build --wait --wait-timeout 180
+      - run: docker compose exec -T web python -m app.bootstrap
+      - run: curl --fail http://127.0.0.1:8088/healthz
+      - run: docker compose exec -T web python - write < tests/container_smoke.py
+      - run: docker compose restart web
+      - run: docker compose up -d --wait --wait-timeout 120
+      - run: docker compose exec -T web python - read < tests/container_smoke.py
+      - run: docker compose ps && docker compose logs --tail=60
+        if: failure()
+      - run: docker compose --profile feishu down -v
+        if: always()
