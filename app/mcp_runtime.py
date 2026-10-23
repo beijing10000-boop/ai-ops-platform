@@ -124,7 +124,9 @@ def search_tool_catalog(tools, query, limit=8):
 
 
 def event_clock(event):
-    prefixes = ["recovery", "event"] if str(event.get("event_value")) == "0" else ["event"]
+    prefixes = (
+        ["recovery", "event"] if str(event.get("event_value")) == "0" else ["event"]
+    )
     for prefix in prefixes:
         try:
             stamp = event[prefix + "_date"] + " " + event[prefix + "_time"]
@@ -203,6 +205,13 @@ async def run(
     asset_revision = asset["revision"] if asset else None
     host_id = str(event.get("host_id") or (asset or {}).get("zabbix_hostid") or "")
     effective_type = (asset or {}).get("device_type", "unknown")
+    asset_matches_event = (
+        not asset
+        or not event.get("host_id")
+        or str(asset.get("zabbix_hostid") or "") == str(event["host_id"])
+    )
+    if not asset_matches_event:
+        gaps.append("资产 Host ID 已变更，仅查询原事件监控，停止本次 SSH 补查")
     deadline = began + limits["seconds"]
     secret_values = [
         v
@@ -249,7 +258,8 @@ async def run(
     def usage_snapshot():
         return {
             **totals,
-            "available": usage_complete and any(d["kind"] == "round" for d in telemetry),
+            "available": usage_complete
+            and any(d["kind"] == "round" for d in telemetry),
             "task_id": task_id,
             "trace_id": task["trace_id"],
         }
@@ -581,6 +591,7 @@ async def run(
                     asset
                     and asset["enabled"]
                     and asset["device_type"] == "linux"
+                    and asset_matches_event
                     and effective_type == "linux"
                     and profile_name != "quick"
                 )

@@ -385,16 +385,20 @@ def test_connection_retry_after_asset_change_uses_current_revision(monkeypatch):
     old = client.post(f"/api/v1/platform/assets/{asset['id']}/test").json()
     tasks.finish(old["task_id"], {"message": "old failure"}, status="failed")
     body["username"] = "new-diagnostic"
-    assert client.put(
-        f"/api/v1/platform/assets/{asset['id']}", json=body
-    ).status_code == 200
+    assert (
+        client.put(f"/api/v1/platform/assets/{asset['id']}", json=body).status_code
+        == 200
+    )
     retry = client.post(f"/api/v1/platform/tasks/{old['task_id']}/retry")
     assert retry.status_code == 202
     new = tasks.get(retry.json()["task_id"], private=True)
-    assert new["request"]["asset_revision"] == inventory.get_asset(asset["id"])["revision"]
-    assert new["request"]["asset_revision"] != tasks.get(
-        old["task_id"], private=True
-    )["request"]["asset_revision"]
+    assert (
+        new["request"]["asset_revision"] == inventory.get_asset(asset["id"])["revision"]
+    )
+    assert (
+        new["request"]["asset_revision"]
+        != tasks.get(old["task_id"], private=True)["request"]["asset_revision"]
+    )
     diagnostic_worker.process(new["task_id"])
     assert tasks.get(new["task_id"])["status"] == "success"
     assert inventory.get_asset(asset["id"])["last_test_status"] == "success"
@@ -408,9 +412,12 @@ def test_connection_retry_rejects_unavailable_target(monkeypatch, change):
     asset = client.post("/api/v1/platform/assets", json=body).json()
     old = client.post(f"/api/v1/platform/assets/{asset['id']}/test").json()
     tasks.finish(old["task_id"], {}, status="failed")
-    assert client.put(
-        f"/api/v1/platform/assets/{asset['id']}", json={**body, **change}
-    ).status_code == 200
+    assert (
+        client.put(
+            f"/api/v1/platform/assets/{asset['id']}", json={**body, **change}
+        ).status_code
+        == 200
+    )
     response = client.post(f"/api/v1/platform/tasks/{old['task_id']}/retry")
     assert response.status_code == 422
     assert tasks.page()["total"] == 1

@@ -13,6 +13,15 @@ from playwright.sync_api import sync_playwright
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "docs/screenshots"
 OUT.mkdir(exist_ok=True)
+# Failed runs must not upload the checked-in results of an older successful run.
+(ROOT / "docs/UI-TEST-RESULTS.json").unlink(missing_ok=True)
+for name in (
+    "overview-1440.png",
+    "assets-1440.png",
+    "diagnosis-1440.png",
+    "diagnosis-dark-1440.png",
+):
+    (OUT / name).unlink(missing_ok=True)
 with socket.socket() as sock:
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
@@ -116,14 +125,16 @@ try:
         page.locator('dialog input[name="username"]').fill("ai-diagnostic")
         page.locator('dialog button[type="submit"]').click()
         page.locator("#editor").wait_for(state="hidden")
-        checks.append({"workflow": "asset create + inline error + corrected save", "ok": True})
+        checks.append(
+            {"workflow": "asset create + inline error + corrected save", "ok": True}
+        )
         # Exercise both group names in table cells and asset-editor help text.
         payload = '<img src=x onerror="window.__storedXss=1">'
         page.locator('[data-action="new-group"]').click()
         assert page.locator("#editor-feedback").is_hidden(), "新弹窗不应显示旧错误"
         page.locator('dialog input[name="name"]').fill(payload)
         page.locator('dialog button[type="submit"]').click()
-        page.get_by_text(payload, exact=True).wait_for()
+        page.get_by_role("cell", name=payload, exact=True).wait_for()
         page.locator('[data-action="new-asset"]').click()
         page.locator('dialog input[name="name"]').wait_for()
         assert page.evaluate("window.__storedXss || 0") == 0
@@ -141,28 +152,37 @@ try:
         page.locator("tr").filter(has_text="分组选择验证").wait_for()
         assert page.locator('[data-action="edit-asset"]').count() == 1
         assert page.locator('[data-action="asset-next"]').is_disabled()
-        assert "仅监控分析" in page.locator("tr").filter(
-            has_text="分组选择验证"
-        ).inner_text()
+        assert (
+            "仅监控分析"
+            in page.locator("tr").filter(has_text="分组选择验证").inner_text()
+        )
         assert page.locator('[data-action="test-asset"]').count() == 0
         row = page.locator("tr").filter(has_text="分组选择验证")
         row.locator('[data-action="edit-asset"]').click()
-        assert page.locator('dialog select[name="device_type"]').input_value() == "windows"
+        assert (
+            page.locator('dialog select[name="device_type"]').input_value() == "windows"
+        )
         assert page.locator("dialog").get_by_label(payload, exact=True).is_checked()
         page.locator('dialog input[name="enabled"]').uncheck()
         page.locator('dialog button[type="submit"]').click()
-        page.locator("tr").filter(has_text="分组选择验证").get_by_text("已禁用").wait_for()
+        page.locator("tr").filter(has_text="分组选择验证").get_by_text(
+            "已禁用"
+        ).wait_for()
         assert page.locator('[data-action="diagnose-asset"]').count() == 0
-        checks.append({"workflow": "group assignment/filter + device-aware editing", "ok": True})
+        checks.append(
+            {"workflow": "group assignment/filter + device-aware editing", "ok": True}
+        )
         group = page.locator("tr").filter(has_text=payload)
         group.locator('[data-action="edit-group"]').click()
         page.locator('dialog input[name="name"]').fill("浏览器验证组")
         page.locator('dialog button[type="submit"]').click()
-        page.get_by_text("浏览器验证组", exact=True).wait_for()
+        page.get_by_role("cell", name="浏览器验证组", exact=True).wait_for()
         page.locator("tr").filter(has_text="浏览器验证组").locator(
             '[data-action="delete-group"]'
         ).click()
-        page.get_by_text("浏览器验证组", exact=True).wait_for(state="detached")
+        page.get_by_role("cell", name="浏览器验证组", exact=True).wait_for(
+            state="detached"
+        )
         checks.append(
             {"workflow": "group create/edit/delete + stored HTML escaping", "ok": True}
         )
@@ -175,8 +195,14 @@ try:
         page.locator('dialog button[type="submit"]').click()
         member = page.locator("tr").filter(has_text="ou_browser_member")
         member.locator('[data-action="edit-member"]').click()
-        assert page.locator('dialog input[name="open_id"]').input_value() == "ou_browser_member"
-        assert page.locator('dialog input[name="open_id"]').get_attribute("readonly") is not None
+        assert (
+            page.locator('dialog input[name="open_id"]').input_value()
+            == "ou_browser_member"
+        )
+        assert (
+            page.locator('dialog input[name="open_id"]').get_attribute("readonly")
+            is not None
+        )
         page.locator('dialog select[name="role"]').select_option("auditor")
         page.locator('dialog input[name="enabled"]').uncheck()
         page.locator('dialog button[type="submit"]').click()
@@ -186,7 +212,9 @@ try:
         assert page.locator('dialog select[name="role"]').input_value() == "auditor"
         assert not page.locator('dialog input[name="enabled"]').is_checked()
         page.locator("#close-editor").click()
-        checks.append({"workflow": "member create/edit/disable persistence", "ok": True})
+        checks.append(
+            {"workflow": "member create/edit/disable persistence", "ok": True}
+        )
         page.locator('#mute-form input[name="host_id"]').fill("991")
         page.locator('#mute-form input[name="trigger_id"]').fill("992")
         page.locator('#mute-form button[type="submit"]').click()
@@ -204,7 +232,9 @@ try:
         page.locator(".pagination").get_by_text("第 1 页 / 1 页").wait_for()
         assert page.locator('[data-action="task-prev"]').is_disabled()
         assert page.locator('[data-action="task-next"]').is_disabled()
-        checks.append({"workflow": "history pagination + filter resets page", "ok": True})
+        checks.append(
+            {"workflow": "history pagination + filter resets page", "ok": True}
+        )
         page.locator("#task-status").select_option("all")
         page.locator(".pagination").get_by_text("第 1 页 / 2 页").wait_for()
         # A response completing after navigation must not write into a removed form.

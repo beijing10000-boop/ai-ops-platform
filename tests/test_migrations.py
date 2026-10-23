@@ -172,7 +172,7 @@ def test_long_nested_report_import_preserves_json_and_redacts_secrets(legacy):
     report = {
         "output": "x" * 120000,
         "nested": [
-            {"password": "space quote \" and slash \\ secret"},
+            {"password": 'space quote " and slash \\ secret'},
             {"text": "token=abc", "token_total": 15},
             {"private_key": "private material", "enabled": True, "missing": None},
         ],

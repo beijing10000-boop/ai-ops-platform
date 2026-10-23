@@ -312,7 +312,9 @@ def test_mcp_error_result_cannot_produce_success(rig, monkeypatch):
     assert task["status"] == "partial"
     assert any("返回错误" in gap for gap in task["report"]["limitations"])
     evidence = tasks.evidence_page(task["task_id"], True)
-    assert any(e["provider"] == "zabbix_mcp" and e["status"] == "failed" for e in evidence)
+    assert any(
+        e["provider"] == "zabbix_mcp" and e["status"] == "failed" for e in evidence
+    )
 
 
 @pytest.mark.parametrize("final_only", [False, True])
@@ -350,7 +352,9 @@ def test_interrupted_model_run_keeps_reported_usage_once(rig, failure):
         with pytest.raises(failure):
             run(rig)
         task = tasks.page()["items"][0]
-        assert task["status"] == ("cancelled" if failure is tasks.Cancelled else "failed")
+        assert task["status"] == (
+            "cancelled" if failure is tasks.Cancelled else "failed"
+        )
     assert task["token_total"] == 15
     with main.connection() as db:
         rows = db.execute(
@@ -381,6 +385,28 @@ def test_recovery_history_uses_recovery_time(state):
         "recovery_time": "12:00:00",
     }
     original = mcp_runtime.event_clock({**event, "event_value": "1"})
-    assert mcp_runtime.event_clock(event) == original + (7200 if str(state) == "0" else 0)
+    assert mcp_runtime.event_clock(event) == original + (
+        7200 if str(state) == "0" else 0
+    )
     event["recovery_time"] = "invalid"
     assert mcp_runtime.event_clock(event) == original
+
+
+def test_queued_analysis_does_not_mix_original_event_with_rebound_asset(rig):
+    event = {"event_id": "1000", "host_id": "10", "event_name": "CPU usage high"}
+    task, _ = tasks.create(
+        {"event": event},
+        asset_id=rig[5]["id"],
+        event_id="1000",
+        diagnostic_type="cpu",
+    )
+    with main.connection() as db:
+        db.execute(
+            "UPDATE assets SET zabbix_hostid='11',revision=revision+1 WHERE id=?",
+            (rig[5]["id"],),
+        )
+    _, result = run(rig, task_id=task["task_id"])
+    assert not any(kind == "ssh" for kind, name in rig[1])
+    assert result["status"] == "partial"
+    assert any("Host ID" in gap for gap in result["report"]["limitations"])
+    assert all(t["name"] != "diagnose_linux_host" for t in rig[2][0]["tools"])
