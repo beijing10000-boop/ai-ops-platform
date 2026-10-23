@@ -695,6 +695,17 @@ dialog textarea[name="private_key"] {
   font-family: ui-monospace, Consolas, monospace;
   min-height: 130px;
 }
+.editor-feedback {
+  margin-top: 16px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--red) 30%, var(--line));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--red) 8%, var(--surface));
+  color: var(--red);
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
 .setup-screen {
   padding: 50px;
 }
