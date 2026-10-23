@@ -1,4 +1,3 @@
-import os
 from fastapi.testclient import TestClient
 from app.main import app
 
@@ -104,7 +103,6 @@ def test_default_http_and_ui_https_switch(monkeypatch):
     with pytest.raises(HTTPException) as err:
         feishu_auth._secure_cookie()
     assert err.value.status_code == 503
-    from cryptography.fernet import Fernet
 
     with connection() as db:
         db.execute(

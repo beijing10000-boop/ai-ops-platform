@@ -1,4 +1,3 @@
-import os
 from app.alert_mute import action_signature, handle_mute_action
 
 

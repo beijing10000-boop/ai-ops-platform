@@ -6,7 +6,6 @@ import subprocess
 import socket
 import tempfile
 import time
-import json
 from pathlib import Path
 import pytest
 from redis import Redis

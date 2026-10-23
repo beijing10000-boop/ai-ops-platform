@@ -803,3 +803,33 @@ code {
   background: var(--blue-soft);
   color: var(--blue);
 }
+
+.group-picker,
+.ssh-fields {
+  min-width: 0;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px;
+}
+.group-picker legend,
+.ssh-fields legend {
+  font-size: 12px;
+  padding: 0 6px;
+}
+.group-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 16px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.group-options span {
+  overflow-wrap: anywhere;
+}
+.group-options input {
+  flex-shrink: 0;
+}
+.ssh-fields[hidden] {
+  display: none;
+}

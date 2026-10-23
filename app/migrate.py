@@ -6,7 +6,6 @@ import json
 import os
 import sqlite3
 import stat
-import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -87,7 +86,7 @@ def import_zabbix(source, source_key_file, destination, target_key):
 
 def import_linux(source, key_file):
     from .main import connection, cipher
-    from .security.redact import redact
+    from .security.redact import redact, redact_data
 
     source = Path(source).resolve(strict=True)
     old = Fernet(read_key(key_file))
@@ -132,7 +131,7 @@ def import_linux(source, key_file):
             else []
         )
         for r in runs:
-            r["result"] = json.loads(redact(dec(r["result"]), 100000))
+            r["result"] = redact_data(json.loads(dec(r["result"])))
         audits = (
             [dict(r) for r in snapshot.execute("SELECT * FROM audit")]
             if "audit" in tables

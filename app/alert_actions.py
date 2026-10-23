@@ -168,7 +168,7 @@ def handle_analyze_action(value, operator_open_id, message_id=None, chat_id=None
 
 def card_after_mute(value, operator_open_id):
     """Render the updated shared source card with auditable mute metadata."""
-    from datetime import datetime, timedelta
+    from datetime import datetime
     from zoneinfo import ZoneInfo
     from .worker import make_card
     from .main import connection

@@ -4,7 +4,6 @@ import json
 import secrets
 import time
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 
 import paramiko
 import pytest
@@ -99,6 +98,8 @@ def test_csrf_is_enforced_on_new_apis():
             "diagnostic_mode": "privileged",
         },
         {"name": "bad", "device_type": "windows", "host_key": "invalid"},
+        {"name": "bad", "device_type": "network", "proxy_id": 1},
+        {"name": "bad", "device_type": "windows", "diagnostic_paths": ["/data"]},
         {"name": "bad", "device_type": "linux", "address": "172.20.1.1;id"},
     ],
 )
@@ -369,3 +370,55 @@ def test_group_crud_preserves_synced_groups():
     )
     assert client.delete(f"/api/v1/platform/groups/{sync_id}").status_code == 409
     assert client.delete(f"/api/v1/platform/groups/{gid}").status_code == 200
+
+
+def test_connection_retry_after_asset_change_uses_current_revision(monkeypatch):
+    from app.diagnostics import ssh
+
+    monkeypatch.setattr(tasks, "enqueue", lambda _: None)
+    monkeypatch.setattr(
+        ssh, "execute", lambda *a, **k: {"status": "success", "duration_ms": 1}
+    )
+    client = client_for()
+    body = {"name": "retry-target", "device_type": "linux"}
+    asset = client.post("/api/v1/platform/assets", json=body).json()
+    old = client.post(f"/api/v1/platform/assets/{asset['id']}/test").json()
+    tasks.finish(old["task_id"], {"message": "old failure"}, status="failed")
+    body["username"] = "new-diagnostic"
+    assert client.put(
+        f"/api/v1/platform/assets/{asset['id']}", json=body
+    ).status_code == 200
+    retry = client.post(f"/api/v1/platform/tasks/{old['task_id']}/retry")
+    assert retry.status_code == 202
+    new = tasks.get(retry.json()["task_id"], private=True)
+    assert new["request"]["asset_revision"] == inventory.get_asset(asset["id"])["revision"]
+    assert new["request"]["asset_revision"] != tasks.get(
+        old["task_id"], private=True
+    )["request"]["asset_revision"]
+    diagnostic_worker.process(new["task_id"])
+    assert tasks.get(new["task_id"])["status"] == "success"
+    assert inventory.get_asset(asset["id"])["last_test_status"] == "success"
+
+
+@pytest.mark.parametrize("change", [{"enabled": False}, {"device_type": "windows"}])
+def test_connection_retry_rejects_unavailable_target(monkeypatch, change):
+    monkeypatch.setattr(tasks, "enqueue", lambda _: None)
+    client = client_for()
+    body = {"name": "retry-target", "device_type": "linux"}
+    asset = client.post("/api/v1/platform/assets", json=body).json()
+    old = client.post(f"/api/v1/platform/assets/{asset['id']}/test").json()
+    tasks.finish(old["task_id"], {}, status="failed")
+    assert client.put(
+        f"/api/v1/platform/assets/{asset['id']}", json={**body, **change}
+    ).status_code == 200
+    response = client.post(f"/api/v1/platform/tasks/{old['task_id']}/retry")
+    assert response.status_code == 422
+    assert tasks.page()["total"] == 1
+
+
+def test_imported_history_cannot_be_retried():
+    old, _ = tasks.create({"legacy_id": 1}, kind="legacy")
+    tasks.finish(old["task_id"], {}, status="failed")
+    response = client_for().post(f"/api/v1/platform/tasks/{old['task_id']}/retry")
+    assert response.status_code == 409
+    assert tasks.page()["total"] == 1

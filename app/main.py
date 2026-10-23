@@ -1,6 +1,5 @@
 """Zabbix AI Ops unified management API and webhook ingress."""
 
-import hashlib
 import hmac
 import json
 import os
@@ -14,7 +13,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet
 from redis import Redis
 from rq import Queue
 

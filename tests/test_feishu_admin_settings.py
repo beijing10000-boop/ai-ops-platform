@@ -1,7 +1,7 @@
 """Web-configured Feishu admin allowlist is shared across web login and card actions."""
 
 from app import feishu_auth, alert_actions, alert_mute
-from app.main import connection, read_setting
+from app.main import connection
 
 
 def test_admin_open_ids_read_database_only(monkeypatch):

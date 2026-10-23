@@ -1,4 +1,5 @@
-from app.mcp_runtime import PROFILES, compact_result, native_tools
+from app.mcp_runtime import compact_result, native_tools
+from app.orchestrator.budgets import PROFILES
 from types import SimpleNamespace
 
 

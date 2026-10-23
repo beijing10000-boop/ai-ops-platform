@@ -4,7 +4,6 @@ import os
 import secrets
 import tempfile
 import time
-from pathlib import Path
 from cryptography.fernet import Fernet
 
 if os.getenv("AIOPS_UI_TEST") != "1":
@@ -20,6 +19,14 @@ from fastapi.responses import RedirectResponse
 with connection() as db:
     db.execute("INSERT INTO settings VALUES ('feishu_admin_open_ids','ou_ui_test',0)")
     db.execute("INSERT INTO settings VALUES ('web_public_host','127.0.0.1:8765',0)")
+# Enough real rows to exercise page boundaries and status filtering.
+for index in range(28):
+    inventory.save_asset(
+        inventory.AssetInput(name=f"分页样本 {index + 1}", device_type="other"),
+        "ui-test",
+    )
+    previous, _ = tasks.create({"question": "分页验证"}, source="ui_test")
+    tasks.finish(previous["task_id"], {"answer": "分页验证记录"})
 asset = inventory.save_asset(
     inventory.AssetInput(
         name="UI 测试 · Linux 资产", device_type="linux", zabbix_hostid="10001"

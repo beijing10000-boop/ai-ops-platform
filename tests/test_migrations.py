@@ -1,7 +1,6 @@
 import json
 import sqlite3
 import hashlib
-from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 import pytest
 from app import main, migrate
@@ -166,3 +165,30 @@ def test_initial_bootstrap_secrets_are_atomic_and_not_world_readable(tmp_path):
     assert len(set(results)) == 1
     Fernet(results[0])
     assert path.stat().st_mode & 0o077 == 0
+
+
+def test_long_nested_report_import_preserves_json_and_redacts_secrets(legacy):
+    source, keyfile = legacy
+    report = {
+        "output": "x" * 120000,
+        "nested": [
+            {"password": "space quote \" and slash \\ secret"},
+            {"text": "token=abc", "token_total": 15},
+            {"private_key": "private material", "enabled": True, "missing": None},
+        ],
+    }
+    encrypted = Fernet(keyfile.read_bytes()).encrypt(json.dumps(report).encode())
+    with sqlite3.connect(source) as db:
+        db.execute("UPDATE diagnostic_runs SET result=?", (encrypted,))
+    checksum = hashlib.sha256(source.read_bytes()).hexdigest()
+    assert migrate.import_linux(source, keyfile)["runs"] == 1
+    with main.connection() as db:
+        value = db.execute("SELECT report FROM diagnostic_tasks").fetchone()[0]
+    decoded = json.loads(main.cipher().decrypt(value.encode()))
+    assert decoded["output"] == report["output"]
+    assert decoded["nested"] == [
+        {"password": "[REDACTED]"},
+        {"text": "token=[REDACTED]", "token_total": 15},
+        {"private_key": "[REDACTED]", "enabled": True, "missing": None},
+    ]
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == checksum

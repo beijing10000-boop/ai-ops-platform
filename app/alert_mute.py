@@ -2,7 +2,6 @@
 
 import hashlib
 import hmac
-import os
 import time
 from .main import connection, read_setting
 

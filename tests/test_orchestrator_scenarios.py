@@ -300,3 +300,87 @@ def test_configured_secrets_never_reach_model_inputs_or_final_report(rig, monkey
     assert all(secret not in request for request in captured)
     assert secret not in answer[0]
     assert secret not in json.dumps(task["report"])
+
+
+def test_mcp_error_result_cannot_produce_success(rig, monkeypatch):
+    monkeypatch.setattr(
+        mcp_runtime.zabbix,
+        "safe_result",
+        lambda *a, **k: {"data": "permission denied", "is_error": True, "records": []},
+    )
+    _, task = run(rig)
+    assert task["status"] == "partial"
+    assert any("返回错误" in gap for gap in task["report"]["limitations"])
+    evidence = tasks.evidence_page(task["task_id"], True)
+    assert any(e["provider"] == "zabbix_mcp" and e["status"] == "failed" for e in evidence)
+
+
+@pytest.mark.parametrize("final_only", [False, True])
+def test_empty_model_answer_is_partial(rig, final_only):
+    async def create(**kwargs):
+        return SimpleNamespace(
+            output=[Call("host_get", {"hostids": ["10"]})]
+            if final_only and kwargs.get("tool_choice") != "none"
+            else [],
+            output_text="",
+            usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        )
+
+    rig[3].responses.create = create
+    _, task = run(rig)
+    assert task["status"] == "partial"
+    assert "模型未返回" in task["report"]["answer"]
+    assert any("模型未返回" in gap for gap in task["report"]["limitations"])
+
+
+@pytest.mark.parametrize("failure", [RuntimeError, tasks.Cancelled, TimeoutError])
+def test_interrupted_model_run_keeps_reported_usage_once(rig, failure):
+    original = rig[3].responses.create
+
+    async def create(**kwargs):
+        if rig[2]:
+            raise failure("fixture interruption")
+        return await original(**kwargs)
+
+    rig[3].responses.create = create
+    if failure is TimeoutError:
+        _, task = run(rig)
+        assert task["status"] == "partial"
+    else:
+        with pytest.raises(failure):
+            run(rig)
+        task = tasks.page()["items"][0]
+        assert task["status"] == ("cancelled" if failure is tasks.Cancelled else "failed")
+    assert task["token_total"] == 15
+    with main.connection() as db:
+        rows = db.execute(
+            "SELECT token_input,token_output,token_total,rounds FROM ai_token_runs"
+        ).fetchall()
+    assert rows == [(10, 5, 15, 1)]
+
+
+def test_timeout_before_first_response_does_not_invent_zero_usage(rig):
+    async def create(**kwargs):
+        raise TimeoutError("no provider response")
+
+    rig[3].responses.create = create
+    result, task = run(rig)
+    assert task["status"] == "partial" and task["token_total"] is None
+    assert result[1]["available"] is False
+    with main.connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM ai_token_runs").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("state", ["0", 0, "1"])
+def test_recovery_history_uses_recovery_time(state):
+    event = {
+        "event_value": state,
+        "event_date": "2026.10.20",
+        "event_time": "10:00:00",
+        "recovery_date": "2026.10.20",
+        "recovery_time": "12:00:00",
+    }
+    original = mcp_runtime.event_clock({**event, "event_value": "1"})
+    assert mcp_runtime.event_clock(event) == original + (7200 if str(state) == "0" else 0)
+    event["recovery_time"] = "invalid"
+    assert mcp_runtime.event_clock(event) == original

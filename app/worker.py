@@ -6,7 +6,6 @@ import logging
 import os
 import re
 import httpx
-from openai import AsyncOpenAI
 from redis import Redis
 from rq import Worker, Queue
 from .main import read_setting

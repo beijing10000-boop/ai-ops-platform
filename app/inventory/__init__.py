@@ -106,7 +106,11 @@ class AssetInput(BaseModel):
         if self.host_key:
             self.host_key = host_key(self.host_key)
         if self.device_type != "linux" and (
-            self.credential_id or self.host_key or self.privileged_approved
+            self.credential_id
+            or self.host_key
+            or self.privileged_approved
+            or self.proxy_id
+            or self.diagnostic_paths
         ):
             raise ValueError("第一阶段 SSH 诊断只适用于明确登记的 Linux 资产")
         from ..diagnostics.actions import validate_path

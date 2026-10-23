@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 import json
-from .main import read_setting, record_ai_question
+from .main import record_ai_question
 from redis import Redis
 from rq import Worker, Queue
 from .ai_agent import ask
@@ -18,7 +18,7 @@ from .conversation_context import (
     is_pending,
     clear_pending,
 )
-from .feishu_client import reply_card, send_card, update_card, send_text
+from .feishu_client import reply_card, update_card
 
 log = logging.getLogger(__name__)
 

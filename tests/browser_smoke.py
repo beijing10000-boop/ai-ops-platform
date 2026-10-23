@@ -93,6 +93,13 @@ try:
                 checks.append({"width": width, "page": name, "ok": True})
         page.set_viewport_size({"width": 1440, "height": 1080})
         page.locator('[data-page="assets"]').click()
+        assert page.locator('[data-action="asset-prev"]').is_disabled()
+        page.locator('[data-action="asset-next"]').click()
+        page.locator(".pagination").get_by_text("第 2 页 / 2 页").wait_for()
+        assert page.locator('[data-action="asset-next"]').is_disabled()
+        page.locator('[data-action="asset-prev"]').click()
+        page.locator(".pagination").get_by_text("第 1 页 / 2 页").wait_for()
+        checks.append({"workflow": "asset pagination boundaries", "ok": True})
         page.locator('[data-action="new-asset"]').click()
         page.locator('dialog input[name="name"]').fill("浏览器验证资产")
         page.locator('dialog button[type="submit"]').click()
@@ -120,7 +127,33 @@ try:
         page.locator('[data-action="new-asset"]').click()
         page.locator('dialog input[name="name"]').wait_for()
         assert page.evaluate("window.__storedXss || 0") == 0
-        page.locator("#close-editor").click()
+        page.locator('dialog input[name="name"]').fill("分组选择验证")
+        page.locator("dialog").get_by_label(payload, exact=True).check()
+        page.locator('dialog button[type="submit"]').click()
+        row = page.locator("tr").filter(has_text="分组选择验证")
+        row.locator('[data-action="edit-asset"]').click()
+        assert page.locator("dialog").get_by_label(payload, exact=True).is_checked()
+        page.locator('dialog select[name="device_type"]').select_option("windows")
+        assert page.locator("#asset-ssh-fields").is_hidden()
+        page.locator('dialog button[type="submit"]').click()
+        page.locator("#asset-group").select_option(label=payload)
+        page.locator('[data-action="search-assets"]').click()
+        page.locator("tr").filter(has_text="分组选择验证").wait_for()
+        assert page.locator('[data-action="edit-asset"]').count() == 1
+        assert page.locator('[data-action="asset-next"]').is_disabled()
+        assert "仅监控分析" in page.locator("tr").filter(
+            has_text="分组选择验证"
+        ).inner_text()
+        assert page.locator('[data-action="test-asset"]').count() == 0
+        row = page.locator("tr").filter(has_text="分组选择验证")
+        row.locator('[data-action="edit-asset"]').click()
+        assert page.locator('dialog select[name="device_type"]').input_value() == "windows"
+        assert page.locator("dialog").get_by_label(payload, exact=True).is_checked()
+        page.locator('dialog input[name="enabled"]').uncheck()
+        page.locator('dialog button[type="submit"]').click()
+        page.locator("tr").filter(has_text="分组选择验证").get_by_text("已禁用").wait_for()
+        assert page.locator('[data-action="diagnose-asset"]').count() == 0
+        checks.append({"workflow": "group assignment/filter + device-aware editing", "ok": True})
         group = page.locator("tr").filter(has_text=payload)
         group.locator('[data-action="edit-group"]').click()
         page.locator('dialog input[name="name"]').fill("浏览器验证组")
@@ -133,7 +166,27 @@ try:
         checks.append(
             {"workflow": "group create/edit/delete + stored HTML escaping", "ok": True}
         )
+        page.locator("#asset-group").select_option("")
+        page.locator('[data-action="search-assets"]').click()
+        page.locator('[data-action="asset-next"]').wait_for()
         page.locator('[data-page="feishu"]').click()
+        page.locator('[data-action="new-member"]').click()
+        page.locator('dialog input[name="open_id"]').fill("ou_browser_member")
+        page.locator('dialog button[type="submit"]').click()
+        member = page.locator("tr").filter(has_text="ou_browser_member")
+        member.locator('[data-action="edit-member"]').click()
+        assert page.locator('dialog input[name="open_id"]').input_value() == "ou_browser_member"
+        assert page.locator('dialog input[name="open_id"]').get_attribute("readonly") is not None
+        page.locator('dialog select[name="role"]').select_option("auditor")
+        page.locator('dialog input[name="enabled"]').uncheck()
+        page.locator('dialog button[type="submit"]').click()
+        member.get_by_text("已停用").wait_for()
+        assert "只读审计" in member.inner_text()
+        member.locator('[data-action="edit-member"]').click()
+        assert page.locator('dialog select[name="role"]').input_value() == "auditor"
+        assert not page.locator('dialog input[name="enabled"]').is_checked()
+        page.locator("#close-editor").click()
+        checks.append({"workflow": "member create/edit/disable persistence", "ok": True})
         page.locator('#mute-form input[name="host_id"]').fill("991")
         page.locator('#mute-form input[name="trigger_id"]').fill("992")
         page.locator('#mute-form button[type="submit"]').click()
@@ -143,8 +196,33 @@ try:
             state="detached"
         )
         checks.append({"workflow": "Web mute create + early unmute", "ok": True})
+        page.locator('[data-page="history"]').click()
+        page.locator('[data-action="task-next"]').click()
+        page.locator(".pagination").get_by_text("第 2 页 / 2 页").wait_for()
+        assert page.locator('[data-action="task-next"]').is_disabled()
+        page.locator("#task-status").select_option("partial")
+        page.locator(".pagination").get_by_text("第 1 页 / 1 页").wait_for()
+        assert page.locator('[data-action="task-prev"]').is_disabled()
+        assert page.locator('[data-action="task-next"]').is_disabled()
+        checks.append({"workflow": "history pagination + filter resets page", "ok": True})
+        page.locator("#task-status").select_option("all")
+        page.locator(".pagination").get_by_text("第 1 页 / 2 页").wait_for()
+        # A response completing after navigation must not write into a removed form.
+        pending = []
+        page.route("**/api/v1/ask", lambda route: pending.append(route))
+        page.locator('[data-page="diagnostics"]').click()
+        page.locator('#ask-form textarea[name="question"]').fill("导航期间的问答")
+        page.locator('#ask-form button[type="submit"]').click()
+        page.wait_for_function(
+            "document.querySelector('#ask-result').textContent.includes('正在查询')"
+        )
         page.locator('[data-page="overview"]').click()
         page.locator(".hero").wait_for()
+        assert len(pending) == 1
+        pending[0].fulfill(json={"answer": "延迟返回的测试结论"})
+        page.unroute("**/api/v1/ask")
+        page.wait_for_timeout(100)
+        checks.append({"workflow": "late answer after page navigation", "ok": True})
         page.locator("#toast").wait_for(state="hidden", timeout=8000)
         page.evaluate("document.fonts.ready")
         page.screenshot(path=str(OUT / "overview-1440.png"), full_page=True)

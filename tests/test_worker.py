@@ -1,5 +1,4 @@
 import asyncio
-from unittest.mock import AsyncMock
 
 from app import worker
 
@@ -399,7 +398,6 @@ def test_mute_summary_follows_action_buttons():
 
 def test_manual_analysis_progress_updates_and_context_for_both_states(monkeypatch):
     from app import feishu_client, conversation_context
-    from app.main import connection
 
     events = []
 

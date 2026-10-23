@@ -1,6 +1,5 @@
 from fastapi.testclient import TestClient
 from app.main import app, connection
-from cryptography.fernet import Fernet
 
 
 def test_setup_requires_bootstrap_secret_and_closes_after_completion(monkeypatch):

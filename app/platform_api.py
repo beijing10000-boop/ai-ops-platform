@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 from . import inventory
 from .main import connection, read_setting
-from .security.rbac import require, enforce, permits, ROLES, audit
+from .security.rbac import require, enforce, ROLES, audit
 from .orchestrator import tasks
 from .diagnostics.actions import SERVICE
 from .diagnostics.playbooks import PLAYBOOKS, classify
@@ -511,7 +511,18 @@ def retry_task(task_id: str, who=Depends(require("diagnostics.run"))):
     old = tasks.get(task_id, private=True)
     if not old or old["status"] not in ("failed", "partial", "cancelled"):
         raise HTTPException(409, "仅失败、部分完成或取消的任务可重试")
+    if old["kind"] == "legacy":
+        raise HTTPException(409, "导入的历史记录不能重试，请从资产页发起新诊断")
     request = {k: v for k, v in old["request"].items() if k != "limits"}
+    if old["asset_id"]:
+        asset = inventory.get_asset(old["asset_id"])
+        if not asset or not asset["enabled"]:
+            raise HTTPException(422, "资产不存在或已禁用")
+    if old["kind"] == "connection":
+        asset = inventory.get_asset(old["asset_id"]) if old["asset_id"] else None
+        if not asset or asset["device_type"] != "linux":
+            raise HTTPException(422, "需要已启用的 Linux 资产")
+        request["asset_revision"] = asset["revision"]
     task, created = tasks.create(
         request,
         source=old["source"],

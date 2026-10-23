@@ -1,6 +1,5 @@
 "use strict";
-async function groupsPanel() {
-  const rows = await api(P + "/groups");
+async function groupsPanel(rows) {
   state.groupRows = rows;
   return panel(
     "主机组",
@@ -65,6 +64,8 @@ const state = {
   assetPage: 1,
   assetQuery: "",
   assetType: "all",
+  assetGroup: "",
+  auditPage: 1,
   taskPage: 1,
   taskStatus: "all",
   editor: null,
@@ -119,8 +120,25 @@ const date = (v) =>
     : "—";
 const badge = (s) =>
   `<span class="tag ${E(s)}">${E(labels[s] || s || "—")}</span>`;
-const btn = (action, text, id = "", kind = "") =>
-  `<button type="button" class="button ${kind}" data-action="${action}" data-id="${E(id)}">${text}</button>`;
+const btn = (action, text, id = "", kind = "", disabled = false) =>
+  `<button type="button" class="button ${kind}" data-action="${action}" data-id="${E(id)}" ${disabled ? "disabled" : ""}>${text}</button>`;
+async function paged(path, key, pageSize = 25, filters = {}) {
+  const query = new URLSearchParams({
+    ...filters, page: state[key], page_size: pageSize,
+  });
+  const data = await api(path + "?" + query);
+  const pages = Math.max(1, Math.ceil(data.total / pageSize));
+  if (state[key] > pages) {
+    state[key] = pages;
+    return paged(path, key, pageSize, filters);
+  }
+  state[key + "Count"] = pages;
+  return data;
+}
+function pagination(prefix, key) {
+  const page = state[key], pages = state[key + "Count"];
+  return `<div class="pagination">${btn(prefix + "-prev", "上一页", "", "small", page <= 1)}<span>第 ${page} 页 / ${pages} 页</span>${btn(prefix + "-next", "下一页", "", "small", page >= pages)}</div>`;
+}
 const intro = (text, actions = "") =>
   `<div class="page-intro"><p class="muted small">${text}</p><div class="actions">${actions}</div></div>`;
 const panel = (title, body, note = "") =>
@@ -165,7 +183,9 @@ async function api(path, method = "GET", body) {
     throw new Error(
       typeof result.detail === "string"
         ? result.detail
-        : JSON.stringify(result.detail || result),
+        : Array.isArray(result.detail)
+          ? result.detail.map((error) => error.msg || "输入无效").join("；")
+          : "请求失败，请稍后重试",
     );
   }
   return result;
@@ -274,13 +294,14 @@ async function diagnostics() {
   );
 }
 async function assets() {
-  const q = new URLSearchParams({
-    page: state.assetPage,
-    page_size: 25,
-    q: state.assetQuery,
-    device_type: state.assetType,
-  });
-  const data = await api(P + "/assets?" + q);
+  const [data, groups] = await Promise.all([
+    paged(P + "/assets", "assetPage", 25, {
+      q: state.assetQuery,
+      device_type: state.assetType,
+      ...(state.assetGroup ? { group_id: state.assetGroup } : {}),
+    }),
+    api(P + "/groups"),
+  ]);
   state.assetRows = data.items;
   const html =
     intro(
@@ -292,8 +313,8 @@ async function assets() {
             btn("new-asset", "登记资产", "", "primary")
         : "",
     ) +
-    `<section class="panel"><div class="toolbar"><input id="asset-search" aria-label="搜索主机资产" placeholder="搜索名称、地址或 Host ID" value="${E(state.assetQuery)}"><select id="asset-type" aria-label="设备类型"><option value="all">全部设备类型</option>${["linux", "windows", "vmware", "network", "unknown"].map((x) => `<option value="${x}" ${state.assetType === x ? "selected" : ""}>${labels[x]}</option>`).join("")}</select>${btn("search-assets", "搜索")}<span class="muted small">共 ${fmt(data.total)} 台</span></div>${table(["资产 / Host ID", "设备类型", "SSH 路由", "权限模式", "状态 / 验证", "操作"], data.items.map((r) => `<tr><td><span class="cell-title">${E(r.name)}</span><small>资产 ${r.id} · Host ID ${E(r.zabbix_hostid || "未关联")}</small></td><td>${badge(r.device_type)}</td><td class="mono">${E(r.address || "未配置")}<small>${r.address ? E(r.username) + " · " + r.ssh_port + (r.proxy_id ? " · 跳板 " + r.proxy_id : " · 直连") : ""}</small></td><td>${E(r.diagnostic_mode === "privileged" ? "B · 受限特权" : "A · 低权限免 Agent")}</td><td>${badge(r.enabled ? "已启用" : "已禁用")}<small>${r.last_test_status ? E(labels[r.last_test_status] || r.last_test_status) : "尚未验证"}</small></td><td><div class="actions">${can("diagnostics.run") ? btn("diagnose-asset", "诊断", r.id, "small") + (r.device_type === "linux" ? btn("test-asset", "测试", r.id, "small") : "") : ""}${can("inventory.manage") ? btn("edit-asset", "编辑", r.id, "small") : ""}</div></td></tr>`).join(""))}<div class="pagination">${btn("asset-prev", "上一页", "", "small")}<span>第 ${state.assetPage} 页 / ${Math.max(1, Math.ceil(data.total / 25))} 页</span>${btn("asset-next", "下一页", "", "small")}</div></section>`;
-  return html + (await groupsPanel());
+    `<section class="panel"><div class="toolbar"><input id="asset-search" aria-label="搜索主机资产" placeholder="搜索名称、地址或 Host ID" value="${E(state.assetQuery)}"><select id="asset-type" aria-label="设备类型"><option value="all">全部设备类型</option>${["linux", "windows", "vmware", "network", "other", "unknown"].map((x) => `<option value="${x}" ${state.assetType === x ? "selected" : ""}>${labels[x]}</option>`).join("")}</select><select id="asset-group" aria-label="主机组"><option value="">全部主机组</option>${groups.map((g) => `<option value="${g.id}" ${state.assetGroup === String(g.id) ? "selected" : ""}>${E(g.name)}</option>`).join("")}</select>${btn("search-assets", "搜索")}<span class="muted small">共 ${fmt(data.total)} 台</span></div>${table(["资产 / Host ID", "设备类型", "SSH 路由", "权限模式", "状态 / 验证", "操作"], data.items.map((r) => `<tr><td><span class="cell-title">${E(r.name)}</span><small>资产 ${r.id} · Host ID ${E(r.zabbix_hostid || "未关联")}</small></td><td>${badge(r.device_type)}</td><td class="mono">${E(r.address || "未配置")}<small>${r.address ? E(r.username) + " · " + r.ssh_port + (r.proxy_id ? " · 跳板 " + r.proxy_id : " · 直连") : ""}</small></td><td>${E(r.device_type !== "linux" ? "仅监控分析" : r.diagnostic_mode === "privileged" ? "B · 受限特权" : "A · 低权限免 Agent")}</td><td>${badge(r.enabled ? "已启用" : "已禁用")}<small>${r.device_type !== "linux" ? "SSH 不适用" : r.last_test_status ? E(labels[r.last_test_status] || r.last_test_status) : "尚未验证"}</small></td><td><div class="actions">${can("diagnostics.run") && r.enabled ? btn("diagnose-asset", "诊断", r.id, "small") + (r.device_type === "linux" ? btn("test-asset", "测试", r.id, "small") : "") : ""}${can("inventory.manage") ? btn("edit-asset", "编辑", r.id, "small") : ""}</div></td></tr>`).join(""))}${pagination("asset", "assetPage")}</section>`;
+  return html + (await groupsPanel(groups));
 }
 async function tools() {
   const data = await api(P + "/tools");
@@ -341,15 +362,12 @@ async function connections() {
       "凭据加密保存。主机和跳板均须核验 SSH 主机公钥；密钥不会传入模型。",
       btn("discover", "检测 Zabbix MCP") + btn("test-model", "测试 AI 模型"),
     ) +
-    `<div class="panel"><div class="section-heading"><div><h2>SSH 凭据</h2><p class="muted small">轮换后，关联主机的原连接测试结果失效。</p></div>${btn("new-credential", "新增凭据", "", "primary")}</div>${table(["名称", "版本", "更新时间", "操作"], creds.map((c) => `<tr><td>${E(c.name)}<small>ID ${c.id}</small></td><td>v${c.revision}</td><td>${date(c.updated_at)}</td><td>${btn("rotate-credential", "轮换密钥", c.id, "small")}</td></tr>`).join(""))}</div><div class="panel"><div class="section-heading"><div><h2>SSH 跳板</h2><p class="muted small">诊断目标仍须单独登记并验证主机身份。</p></div>${btn("new-proxy", "新增跳板")}</div>${table(["名称", "地址", "账号", "凭据", "操作"], proxies.map((p) => `<tr><td>${E(p.name)}</td><td class="mono">${E(p.address)}:${p.port}</td><td>${E(p.username)}</td><td>${p.credential_id}</td><td>${btn("edit-proxy", "编辑", p.id, "small")}</td></tr>`).join(""))}</div><div id="connection-result" class="notice" hidden></div>`
+    `<div class="panel"><div class="section-heading"><div><h2>SSH 凭据</h2><p class="muted small">轮换后，关联主机的原连接测试结果失效。</p></div>${btn("new-credential", "新增凭据", "", "primary")}</div>${table(["名称", "版本", "更新时间", "操作"], creds.map((c) => `<tr><td>${E(c.name)}<small>ID ${c.id}</small></td><td>v${c.revision}</td><td>${date(c.updated_at)}</td><td>${btn("rotate-credential", "轮换密钥", c.id, "small")}</td></tr>`).join(""))}</div><div class="panel"><div class="section-heading"><div><h2>SSH 跳板</h2><p class="muted small">诊断目标仍须单独登记并验证主机身份。</p></div>${btn("new-proxy", "新增跳板")}</div>${table(["名称", "地址", "账号", "凭据", "操作"], proxies.map((p) => `<tr><td>${E(p.name)}</td><td class="mono">${E(p.address)}:${p.port}</td><td>${E(p.username)}</td><td>${p.credential_id}</td><td>${btn("edit-proxy", "编辑", p.id, "small")}</td></tr>`).join(""))}</div>`
   );
 }
 async function history() {
   const [data, usage] = await Promise.all([
-    api(
-      P +
-        `/tasks?page=${state.taskPage}&page_size=25&status=${encodeURIComponent(state.taskStatus)}`,
-    ),
+    paged(P + "/tasks", "taskPage", 25, { status: state.taskStatus }),
     api("/api/v1/ai-token-usage?days=30&limit=20"),
   ]);
   return (
@@ -357,7 +375,7 @@ async function history() {
       "任务、工具调用与证据可按 trace_id 追溯。Token 仅使用模型实际返回数据。",
       btn("refresh", "刷新"),
     ) +
-    `<div class="token-grid"><div class="stat"><div class="label">最近 30 天 · 输入 Token</div><div class="value">${fmt(usage.total_input)}</div></div><div class="stat"><div class="label">最近 30 天 · 输出 Token</div><div class="value">${fmt(usage.total_output)}</div></div><div class="stat"><div class="label">最近 30 天 · 总 Token</div><div class="value">${fmt(usage.total_tokens)}</div><div class="hint">未返回用量的请求不计入汇总</div></div></div><div class="panel"><div class="toolbar"><select id="task-status" aria-label="任务状态"><option value="all">全部任务状态</option>${["queued", "running", "success", "partial", "failed", "cancelled"].map((s) => `<option value="${s}" ${s === state.taskStatus ? "selected" : ""}>${labels[s]}</option>`).join("")}</select><span class="muted small">共 ${data.total} 条</span></div>${table(["任务 / 时间", "诊断类型 / 来源", "状态", "工具", "耗时", "Token", "操作"], taskRows(data.items))}<div class="pagination">${btn("task-prev", "上一页", "", "small")}<span>第 ${state.taskPage} 页</span>${btn("task-next", "下一页", "", "small")}</div></div>` +
+    `<div class="token-grid"><div class="stat"><div class="label">最近 30 天 · 输入 Token</div><div class="value">${fmt(usage.total_input)}</div></div><div class="stat"><div class="label">最近 30 天 · 输出 Token</div><div class="value">${fmt(usage.total_output)}</div></div><div class="stat"><div class="label">最近 30 天 · 总 Token</div><div class="value">${fmt(usage.total_tokens)}</div><div class="hint">未返回用量的请求不计入汇总</div></div></div><div class="panel"><div class="toolbar"><select id="task-status" aria-label="任务状态"><option value="all">全部任务状态</option>${["queued", "running", "success", "partial", "failed", "cancelled"].map((s) => `<option value="${s}" ${s === state.taskStatus ? "selected" : ""}>${labels[s]}</option>`).join("")}</select><span class="muted small">共 ${data.total} 条</span></div>${table(["任务 / 时间", "诊断类型 / 来源", "状态", "工具", "耗时", "Token", "操作"], taskRows(data.items))}${pagination("task", "taskPage")}</div>` +
     panel(
       "逐轮用量",
       table(
@@ -387,7 +405,7 @@ async function report(id) {
         (can("diagnostics.run")
           ? ["running", "queued"].includes(t.status)
             ? btn("cancel-task", "取消任务", id, "danger")
-            : ["failed", "partial", "cancelled"].includes(t.status)
+            : t.kind !== "legacy" && ["failed", "partial", "cancelled"].includes(t.status)
               ? btn("retry-task", "重试", id)
               : ""
           : "") +
@@ -501,7 +519,8 @@ async function configPage(page) {
   let extra = "";
   if (page === "feishu" && can("*")) {
     const members = await api(P + "/members");
-    extra = `<div class="panel"><div class="section-heading"><div><h2>授权成员</h2><p class="muted small">超级管理员通过上方名单管理；其他角色由后端授权。</p></div>${btn("new-member", "添加 / 调整成员")}</div>${table(["Open ID", "角色", "状态"], members.map((m) => `<tr><td class="mono">${E(m.open_id)}</td><td>${E(labels[m.role])}</td><td>${badge(m.enabled ? "已启用" : "已停用")}</td></tr>`).join(""))}</div>`;
+    state.members = members;
+    extra = `<div class="panel"><div class="section-heading"><div><h2>授权成员</h2><p class="muted small">超级管理员通过上方名单管理；其他角色由后端授权。</p></div>${btn("new-member", "添加成员")}</div>${table(["Open ID", "角色", "状态", "操作"], members.map((m) => `<tr><td class="mono">${E(m.open_id)}</td><td>${E(labels[m.role])}</td><td>${badge(m.enabled ? "已启用" : "已停用")}</td><td>${btn("edit-member", "编辑", m.open_id, "small")}</td></tr>`).join(""))}</div>`;
   }
   if (page === "feishu" && can("alerts.manage")) extra += await mutesPanel();
   if (page === "settings")
@@ -523,7 +542,7 @@ async function configPage(page) {
   );
 }
 async function auditPage() {
-  const data = await api(P + "/audit?page_size=100");
+  const data = await paged(P + "/audit", "auditPage", 50);
   return (
     intro(
       "最近 100 条 · 登录、配置变更、资产操作、报告访问和诊断操作",
@@ -539,7 +558,7 @@ async function auditPage() {
               `<tr><td>${date(r.created_at)}</td><td>${E(r.action)}</td><td class="mono">${E(r.key)}</td><td class="mono">${E(r.actor || "旧版记录")}</td><td class="mono">${E(r.trace_id || "—")}</td></tr>`,
           )
           .join(""),
-      ),
+      ) + pagination("audit", "auditPage"),
     )
   );
 }
@@ -620,14 +639,9 @@ async function openEditor(type, id) {
           (x) => [x, labels[x] || x],
         ),
       ) +
-      field(
-        "group_ids",
-        "主机组 ID（英文逗号分隔）",
-        (r.group_ids || []).join(","),
-        "text",
-        groups.map((g) => `${g.id}: ${g.name}`).join(" · "),
-      ) +
-      field("address", "已核验的 SSH 内网 IP", r.address || "") +
+      `<fieldset class="field wide group-picker"><legend>主机组（可多选）</legend><div class="group-options">${groups.length ? groups.map((g) => `<label class="check-field"><input type="checkbox" name="group_ids" value="${g.id}" ${(r.group_ids || []).includes(g.id) ? "checked" : ""}><span>${E(g.name)}</span></label>`).join("") : '<span class="muted small">暂无主机组，可在资产页新增。</span>'}</div></fieldset>` +
+      field("address", "资产内网 IP", r.address || "") +
+      '<fieldset id="asset-ssh-fields" class="form-grid field wide ssh-fields"><legend>Linux SSH 诊断</legend>' +
       field("ssh_port", "SSH 端口", r.ssh_port || 22, "number") +
       field("username", "SSH 账号", r.username || "ai-diagnostic") +
       field("credential_id", "凭据", r.credential_id || "", "text", "", [
@@ -673,6 +687,7 @@ async function openEditor(type, id) {
         !!r.privileged_approved,
         "checkbox",
       ) +
+      "</fieldset>" +
       field(
         "enabled",
         "启用资产",
@@ -721,15 +736,16 @@ async function openEditor(type, id) {
       (state.groupRows || []).find((g) => g.id === Number(id))?.name || "",
     );
   } else if (type === "member") {
-    title = "授权成员";
+    const member = (state.members || []).find((m) => m.open_id === id);
+    title = id ? "编辑成员" : "授权成员";
     fields =
-      field("open_id", "飞书 Open ID") +
-      field("role", "角色", "operator", "text", "", [
+      field("open_id", "飞书 Open ID", member?.open_id || "") +
+      field("role", "角色", member?.role || "operator", "text", "", [
         ["ops_admin", "运维管理员"],
         ["operator", "运维人员"],
         ["auditor", "只读审计"],
       ]) +
-      field("enabled", "启用该成员", true, "checkbox");
+      field("enabled", "启用该成员", member ? !!member.enabled : true, "checkbox");
   } else if (type === "import") {
     title = "批量导入资产";
     fields = field(
@@ -747,11 +763,22 @@ async function openEditor(type, id) {
   $("#editor-note").textContent = note;
   $("#editor-feedback").textContent = "";
   $("#editor-feedback").hidden = true;
+  if (type === "asset") updateAssetFields();
+  if (type === "member" && id) $("#editor-form").elements.open_id.readOnly = true;
   $("#editor").showModal();
+}
+function updateAssetFields() {
+  const linux = $("#editor-form").elements.device_type.value === "linux";
+  const fields = $("#asset-ssh-fields");
+  fields.disabled = !linux;
+  fields.hidden = !linux;
+  $("#editor-note").textContent = linux
+    ? "低权限账号仍可能具有写权限；root 仅允许用于明确授权的 B 模式。"
+    : "此类型使用监控分析。保存后会清除原有 SSH 凭据、跳板与诊断授权。";
 }
 document.addEventListener("click", async (event) => {
   const b = event.target.closest("[data-action]");
-  if (!b) return;
+  if (!b || b.disabled) return;
   const { action, id } = b.dataset;
   b.disabled = true;
   try {
@@ -771,7 +798,8 @@ document.addEventListener("click", async (event) => {
       await api("/api/v1/alert-mutes/" + host + "/" + trigger, "DELETE");
       toast("屏蔽已解除");
       await navigate();
-    } else if (action === "new-member") await openEditor("member");
+    } else if (action === "new-member" || action === "edit-member")
+      await openEditor("member", id);
     else if (action === "new-credential" || action === "rotate-credential")
       await openEditor("credential", id);
     else if (action === "new-proxy" || action === "edit-proxy")
@@ -809,21 +837,28 @@ document.addEventListener("click", async (event) => {
         2,
       );
     else if (action === "asset-prev" || action === "asset-next") {
-      state.assetPage = Math.max(
-        1,
+      state.assetPage = Math.max(1, Math.min(
+        state.assetPageCount,
         state.assetPage + (action === "asset-next" ? 1 : -1),
-      );
+      ));
       await navigate();
     } else if (action === "search-assets") {
       state.assetQuery = $("#asset-search").value;
       state.assetType = $("#asset-type").value;
+      state.assetGroup = $("#asset-group").value;
       state.assetPage = 1;
       await navigate();
     } else if (action === "task-prev" || action === "task-next") {
-      state.taskPage = Math.max(
-        1,
+      state.taskPage = Math.max(1, Math.min(
+        state.taskPageCount,
         state.taskPage + (action === "task-next" ? 1 : -1),
-      );
+      ));
+      await navigate();
+    } else if (action === "audit-prev" || action === "audit-next") {
+      state.auditPage = Math.max(1, Math.min(
+        state.auditPageCount,
+        state.auditPage + (action === "audit-next" ? 1 : -1),
+      ));
       await navigate();
     } else if (action === "toggle-logs") {
       state.includeLogs = !state.includeLogs;
@@ -843,6 +878,7 @@ document.addEventListener("click", async (event) => {
   }
 });
 document.addEventListener("change", (e) => {
+  if (e.target.matches('#editor-form [name="device_type"]')) updateAssetFields();
   if (e.target.id === "task-status") {
     state.taskStatus = e.target.value;
     state.taskPage = 1;
@@ -880,9 +916,10 @@ document.addEventListener("submit", async (event) => {
       toast("配置已保存");
     } else if (form.id === "ask-form") {
       if (!data.question.trim()) throw Error("请输入问题");
-      $("#ask-result").textContent = "正在查询监控并分析…";
+      const output = $("#ask-result");
+      output.textContent = "正在查询监控并分析…";
       const r = await api("/api/v1/ask", "POST", data);
-      $("#ask-result").textContent = r.answer;
+      if (output.isConnected) output.textContent = r.answer;
     } else if (form.id === "diagnostic-form") {
       data.asset_id = data.asset_id ? Number(data.asset_id) : null;
       data.event_id = data.event_id || null;
@@ -908,9 +945,14 @@ document.addEventListener("submit", async (event) => {
         data.enabled = form.elements.enabled.checked;
         data.privileged_approved = form.elements.privileged_approved.checked;
         data.zabbix_hostid = data.zabbix_hostid || null;
-        data.group_ids = data.group_ids
-          ? data.group_ids.split(",").map((x) => Number(x.trim()))
-          : [];
+        data.group_ids = new FormData(form).getAll("group_ids").map(Number);
+        if (data.device_type !== "linux") {
+          Object.assign(data, {
+            ssh_port: 22, username: "ai-diagnostic", credential_id: null,
+            proxy_id: null, host_key: "", diagnostic_mode: "standard",
+            privileged_approved: false, diagnostic_paths: [],
+          });
+        }
         path = "/assets" + (id ? "/" + id : "");
       } else if (type === "credential")
         path = "/credentials" + (id ? "/" + id : "");
