@@ -6,9 +6,10 @@
 
 | 验证 | 实际结果/范围 |
 |---|---|
-| Python / pytest | Python 3.12，172 passed；真实临时 Redis 启用，未跳过该组 |
+| Python / pytest | 本地 Python 3.12 与 GitHub Ubuntu Python 3.11/3.12 均为 172 passed；真实临时 Redis 启用，0 skipped |
 | 静态检查 | ruff F821、ruff format、JavaScript node --check 通过 |
 | 桌面 Chromium | 37 项通过，1280 / 1440 / 1920，11 页面，JS 异常0、HTTP 5xx0 |
+| Docker / Compose | GitHub Ubuntu 干净构建、健康启动、UID 10001、0700/0600权限、重启后加密配置解密与数据库完整性检查通过 |
 | 截图检查 | 中文字体正常，浅色概览/资产/报告与深色报告人工视觉检查 |
 
 pytest 内容：旧功能回归、OAuth/CSRF/角色直连接口、1000资产分页/原子导入、加密凭据与轮换、并发同事件去重、取消/重试、真实数据库跨密钥迁移及失败回滚、主密钥持久化、全周期超过10000记录的 SQL 汇总、配置秘密模型输入/报告脱敏、设备类型闸门和固定目录上限。
@@ -32,7 +33,7 @@ python -m playwright install --with-deps chromium
 python tests/browser_smoke.py
 ```
 
-Chromium 截图需测试机安装中文字体（例如 Noto CJK）；它不随产品镜像发货。Redis 路径不存在时集成用例会 skip，需明确报告。CI 配置覆盖 Python 3.11/3.12、Chromium、Compose 解析和 Docker 构建；本地环境没有 Docker，本报告不将“已配置 CI”当作已通过。
+Chromium 截图需测试机安装中文字体（例如 Noto CJK）；它不随产品镜像发货。Redis 路径不存在时集成用例会 skip，需明确报告。CI 已实际通过 Python 3.11/3.12、Chromium、Compose 解析、Docker 构建、干净启动和重启持久化验证。验证代码 SHA 为 `11ac4b70850593213f4734268171af1c12fd511b`，见 [GitHub Actions 运行](https://github.com/beijing10000-boop/ai-ops-platform/actions/runs/39922888133) 与 [CI-RESULTS.json](CI-RESULTS.json)。容器运行验证发生在 GitHub Ubuntu runner，不能替代 Rocky 目标机验收。
 
 ## 尚未执行
 
