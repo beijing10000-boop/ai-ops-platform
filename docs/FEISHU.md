@@ -1,47 +1,35 @@
-# 飞书企业机器人与自定义 Webhook
+# 飞书配置与验收
 
-系统目前使用两种独立飞书通道：
+统一使用企业自建应用机器人发送告警、恢复、分析和问答卡片。旧版自定义机器人 Webhook 参数不再是本平台配置项。
 
-1. **告警卡片**：Zabbix AI Worker 通过群自定义机器人 Webhook 发送。
-2. **主动问答**：企业自建飞书应用经 WebSocket 长连接接收群内 @，并通过应用 API 发送和更新问答卡片。
+## 配置
 
-## 企业自建应用
+1. 在企业自建应用启用机器人、网页授权及接收群内 @、以机器人身份发送/读取/更新所需消息权限，发布后将机器人加入目标群。准确权限名称以飞书当前控制台为准。
+2. 网页授权重定向配置为 `协议://外部主机/api/v1/auth/callback`，与平台 Web 外部地址一致。由服务器交换授权码，只有初始化超级管理员或已启用成员可以登录。
+3. 消息事件订阅 `im.message.receive_v1`，通过长连接接收。卡片回调配置订阅 `card.action.trigger` 并发布。
+4. Web 填写 App ID / Secret、问答 allowed_chat_ids、告警 feishu_alert_chat_ids，启用 feishu_enabled。问答群白名单为空时不接收群问答。
+5. 停止旧接收器后，`docker compose --profile feishu up -d feishu-receiver`。同 App ID 的独立接收器不可当作双写迁移方案。
 
-打开飞书开放平台创建应用，启用机器人、开通接收群内 @ 消息和以机器人身份发送消息的相关权限；发布应用版本。添加 `im.message.receive_v1` 事件，选择长连接模式，然后将应用机器人加入目标群聊。
+接收器、Web、worker 共用数据库、主密钥和 Redis。测试发送、登录 OAuth、回复与更新权限必须在真实租户逐项验证。
 
-在 Web 管理页面填写 `lark_app_id`、`lark_app_secret`、`allowed_chat_ids`。
+## 消息流程
 
-`allowed_chat_ids` 可以用逗号分隔多个 `oc_...` 群 ID。只有白名单群的文字消息会入队。确保 @ 的是企业应用机器人，而不是告警自定义 Webhook 机器人。
+原问题卡片保留告警/主机/组/级别/时间/详情与手动分析按钮；自动分析以关联回复提供摘要、实际 Token 和诊断详情链接，不覆盖原通知。恢复关联原问题，卡片分级及本地屏蔽功能保留。
 
-卡片更新需要相应飞书消息修改权限。若更新失败，问答 Worker 尝试发送普通消息兜底。
+手动分析按钮要求诊断权限、签名和数据库里准确的 event/message/chat 关联，不能用文本 event ID 冒充原卡片。相同事件正在运行时返回“正在分析中，请勿重复提交。”。后续问答只依据**直接回复的消息**取上下文，群与消息 ID 隔离，不从其他分支或最新线程借上下文。
 
-## 避免长连接抢事件
+最多四次 AI 答复。用户继续回复第五次请求时返回“关联消息超过5个，不支持分析，请更换方式。”，不再执行模型。上下文含限长原始事件及该分支的实际问答；不直接回复已有消息视为新问题。处理中卡片标记 pending，回复该卡片不重复提交。
 
-同一个飞书应用的多台独立 WebSocket 客户端可能竞争分发事件；如果使用相同 App ID，请确保只有一个接收实例，或所有实例都使用相同 Redis 和完全一致的入队逻辑。
+模型分析与原始日志分开，正文限长；完整报告需要登录和 reports.read，读取原始日志另需 logs.read。飞书群消息本身可被群成员看到，应按运维群的访问策略配置成员。
 
-## 查看日志
+## 屏蔽
+
+有 alerts.manage 权限的管理员可选择 1/4/24/72/168 小时，粒度为 host_id + trigger_id，仅影响本平台后续问题通知，不写入 Zabbix 维护周期。恢复仍按原通知关联处理；可从卡片或 Web 提前解除。详见 FEISHU-CARD-MUTE.md。
+
+## 日志与联调
 
 ```bash
-docker compose logs -f feishu-receiver
-docker compose logs -f qa-worker
+docker compose logs --since=10m feishu-receiver qa-worker alert-worker
 ```
 
-搜索关键字：`FEISHU_RECEIVED`、`FEISHU_FILTERED`、`FEISHU_QUEUED`、`FEISHU_PROGRESS_SENT`、`FEISHU_CARD_UPDATED`。
-
-## 自定义机器人
-
-在 Web 配置 `feishu_webhook_url`；如果机器人开启签名，则同时配置 `feishu_sign_secret`。告警消息会采用 `interactive` 格式。
-
-请对飞书机器人 Webhook 进行网络和使用范围限制；Webhook URL 本身是敏感凭据。
-
-## 从现有 92 服务器迁移到 93（复用同一个飞书应用）
-
-可以复用现有 App ID、App Secret 和群 ID，但**不能同时让两个独立实例抢同一个应用的长连接消息**。
-
-1. 先在 93 的 Web 管理页使用“测试 AI 模型”和“直接提问”完成 AI + MCP 只读联调；这两项均不依赖飞书连接。
-2. 在 93 部署 `qa-worker`，但暂时不要启动 `feishu-receiver`。
-3. 预定短维护窗口，在 92 上停止**仅负责长连接收消息**的服务（不要贸然停止 Zabbix 告警 Webhook 或 Worker）。
-4. 确认 92 的飞书接收长连接已停止，再在 93 启动 `feishu-receiver`，观察日志并用群聊 @AI 测试。
-5. 若有异常，先停止 93 的 `feishu-receiver`，再恢复 92 的长连接服务；注意消息去重和处理中任务不会跨两套 Redis 自动迁移。
-
-告警自定义 Webhook 不依赖企业应用的 WebSocket，迁移时需单独规划 Zabbix 媒介地址和数据一致性。
+测试顺序：OAuth 登录 → 低级别原通知 → 高级别自动分析 → 手动/重复分析 → 同链四次回复及第五次拒绝 → 分支和跨群隔离 → 恢复 → 屏蔽与解除 → 卡片更新失败兜底。避免只用媒介“测试”窗口未展开的宏判断结果。

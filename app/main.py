@@ -1,4 +1,4 @@
-"""Zabbix AI Ops management API and webhook ingress (development baseline)."""
+"""Zabbix AI Ops unified management API and webhook ingress."""
 
 import hashlib
 import hmac
@@ -363,7 +363,9 @@ def complete_setup(body: SetupRequest):
             DATA_DIR / "bootstrap.token", lambda: secrets.token_urlsafe(48).encode()
         ).decode()
     )
-    if not body.bootstrap_token.isascii() or not hmac.compare_digest(body.bootstrap_token, expected):
+    if not body.bootstrap_token.isascii() or not hmac.compare_digest(
+        body.bootstrap_token, expected
+    ):
         raise HTTPException(403, "初始化凭据错误")
     if not setup_missing():
         raise HTTPException(409, "系统已经初始化，请登录 Web 后台修改配置")
@@ -499,7 +501,8 @@ def update_settings(body: SettingsUpdate, identity=Depends(require_admin)):
                 (key, stored, int(key in SENSITIVE)),
             )
             db.execute(
-                "INSERT INTO audit(action,key,actor) VALUES(?,?,?)", ("settings_update", key, identity["open_id"])
+                "INSERT INTO audit(action,key,actor) VALUES(?,?,?)",
+                ("settings_update", key, identity["open_id"]),
             )
     return {"ok": True}
 
@@ -575,24 +578,74 @@ def qa_stats():
 
 
 @app.get("/api/v1/ai-token-usage", dependencies=[Depends(require_admin)])
-def ai_token_usage(days: int = 30, source: str = "all", model: str = "all", limit: int = 100):
+def ai_token_usage(
+    days: int = 30, source: str = "all", model: str = "all", limit: int = 100
+):
     """Aggregate the entire selected period in SQL; limit only the detail rows."""
-    days=min(max(days,1),365); limit=min(max(limit,1),200)
-    clauses=["created_at>=datetime('now',?)"]; args=[f'-{days} days']
-    if source!='all': clauses.append('source=?'); args.append(source)
-    if model!='all': clauses.append('model=?'); args.append(model)
-    where=' WHERE '+' AND '.join(clauses)
+    days = min(max(days, 1), 365)
+    limit = min(max(limit, 1), 200)
+    clauses = ["created_at>=datetime('now',?)"]
+    args = [f"-{days} days"]
+    if source != "all":
+        clauses.append("source=?")
+        args.append(source)
+    if model != "all":
+        clauses.append("model=?")
+        args.append(model)
+    where = " WHERE " + " AND ".join(clauses)
     with connection() as db:
-        summary=db.execute('SELECT COALESCE(SUM(token_input),0),COALESCE(SUM(token_output),0),COALESCE(SUM(token_total),0),COUNT(*),COUNT(token_total) FROM ai_token_runs'+where,args).fetchone()
-        daily=[dict(zip(('date','tokens','input','output','runs'),r)) for r in db.execute("SELECT date(created_at,'+8 hours'),COALESCE(SUM(token_total),0),COALESCE(SUM(token_input),0),COALESCE(SUM(token_output),0),COUNT(*) FROM ai_token_runs"+where+" GROUP BY date(created_at,'+8 hours') ORDER BY 1",args)]
-        rows=db.execute('SELECT id,created_at,source,model,profile,token_input,token_output,token_total,rounds,tools,result_chars,details FROM ai_token_runs'+where+' ORDER BY id DESC LIMIT ?',(*args,limit)).fetchall()
-    records=[]
+        summary = db.execute(
+            "SELECT COALESCE(SUM(token_input),0),COALESCE(SUM(token_output),0),COALESCE(SUM(token_total),0),COUNT(*),COUNT(token_total) FROM ai_token_runs"
+            + where,
+            args,
+        ).fetchone()
+        daily = [
+            dict(zip(("date", "tokens", "input", "output", "runs"), r))
+            for r in db.execute(
+                "SELECT date(created_at,'+8 hours'),COALESCE(SUM(token_total),0),COALESCE(SUM(token_input),0),COALESCE(SUM(token_output),0),COUNT(*) FROM ai_token_runs"
+                + where
+                + " GROUP BY date(created_at,'+8 hours') ORDER BY 1",
+                args,
+            )
+        ]
+        rows = db.execute(
+            "SELECT id,created_at,source,model,profile,token_input,token_output,token_total,rounds,tools,result_chars,details FROM ai_token_runs"
+            + where
+            + " ORDER BY id DESC LIMIT ?",
+            (*args, limit),
+        ).fetchall()
+    records = []
     for r in rows:
-        try: detail=json.loads(r[11])
-        except (ValueError,TypeError): detail=[]
-        records.append({'id':r[0],'time':beijing_time(r[1]),'source':r[2],'model':r[3],'profile':r[4],'input':r[5],'output':r[6],'total':r[7],'rounds':r[8],'tools':r[9],'result_chars':r[10],'details':detail})
-    return {'total_input':summary[0],'total_output':summary[1],'total_tokens':summary[2],'runs':summary[3],
-            'usage_unavailable_runs':summary[3]-summary[4],'truncated':False,'daily':daily,'records':records}
+        try:
+            detail = json.loads(r[11])
+        except (ValueError, TypeError):
+            detail = []
+        records.append(
+            {
+                "id": r[0],
+                "time": beijing_time(r[1]),
+                "source": r[2],
+                "model": r[3],
+                "profile": r[4],
+                "input": r[5],
+                "output": r[6],
+                "total": r[7],
+                "rounds": r[8],
+                "tools": r[9],
+                "result_chars": r[10],
+                "details": detail,
+            }
+        )
+    return {
+        "total_input": summary[0],
+        "total_output": summary[1],
+        "total_tokens": summary[2],
+        "runs": summary[3],
+        "usage_unavailable_runs": summary[3] - summary[4],
+        "truncated": False,
+        "daily": daily,
+        "records": records,
+    }
 
 
 @app.get("/api/v1/qa-events", dependencies=[Depends(require_admin)])
@@ -627,8 +680,11 @@ class MuteRequest(BaseModel):
 
 
 @app.post("/api/v1/alert-mutes", dependencies=[Depends(require_admin)])
-def create_mute(body: MuteRequest):
+def create_mute(body: MuteRequest, request: Request):
     import time
+    from .feishu_auth import authenticate
+
+    actor = authenticate(request)["open_id"]
 
     expires = int(time.time()) + body.hours * 3600
     with connection() as db:
@@ -637,8 +693,8 @@ def create_mute(body: MuteRequest):
             (body.host_id, body.trigger_id, expires),
         )
         db.execute(
-            "INSERT INTO audit(action,key) VALUES (?,?)",
-            ("alert_mute", body.host_id + ":" + body.trigger_id),
+            "INSERT INTO audit(action,key,actor) VALUES (?,?,?)",
+            ("alert_mute", body.host_id + ":" + body.trigger_id, actor),
         )
     return {"ok": True, "expires_at": expires}
 
@@ -666,7 +722,10 @@ def list_mutes():
 @app.delete(
     "/api/v1/alert-mutes/{host_id}/{trigger_id}", dependencies=[Depends(require_admin)]
 )
-def remove_mute(host_id: str, trigger_id: str):
+def remove_mute(host_id: str, trigger_id: str, request: Request):
+    from .feishu_auth import authenticate
+
+    actor = authenticate(request)["open_id"]
     if not host_id.isdigit() or not trigger_id.isdigit():
         raise HTTPException(422, "invalid mute identity")
     with connection() as db:
@@ -675,8 +734,8 @@ def remove_mute(host_id: str, trigger_id: str):
             (host_id, trigger_id),
         )
         db.execute(
-            "INSERT INTO audit(action,key) VALUES(?,?)",
-            ("alert_unmute", host_id + ":" + trigger_id),
+            "INSERT INTO audit(action,key,actor) VALUES(?,?,?)",
+            ("alert_unmute", host_id + ":" + trigger_id, actor),
         )
     return {"ok": True}
 

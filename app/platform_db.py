@@ -65,5 +65,7 @@ def migrate(db):
         db.execute(
             "INSERT OR IGNORE INTO feishu_event_messages SELECT message_id,event_id,'1',chat_id,'problem' FROM alert_message_links"
         )
-        db.execute("CREATE INDEX ix_token_period ON ai_token_runs(created_at,source,model)")
+        db.execute(
+            "CREATE INDEX ix_token_period ON ai_token_runs(created_at,source,model)"
+        )
         db.execute("INSERT INTO platform_migrations(version) VALUES (2)")

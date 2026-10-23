@@ -4,6 +4,19 @@ from unittest.mock import AsyncMock
 from app import worker
 
 
+def configure_frontend(monkeypatch):
+    original = worker.read_setting
+    monkeypatch.setattr(
+        worker,
+        "read_setting",
+        lambda key: (
+            "https://zabbix.example.com"
+            if key == "zabbix_frontend_url"
+            else original(key)
+        ),
+    )
+
+
 def test_alert_prompt_keeps_required_json_contract():
     value = worker.alert_instructions("请重点分析网络性能")
     assert "host_groups,cause,action,analysis,human_required" in value
@@ -226,7 +239,17 @@ def test_duration_calculated_when_macro_unresolved():
     )
 
 
-def test_zabbix_event_deep_link():
+def test_zabbix_event_deep_link(monkeypatch):
+    original = worker.read_setting
+    monkeypatch.setattr(
+        worker,
+        "read_setting",
+        lambda key: (
+            "https://zabbix.example.com"
+            if key == "zabbix_frontend_url"
+            else original(key)
+        ),
+    )
     event = {
         "event_id": "6057922",
         "trigger_id": "102345",
@@ -253,9 +276,14 @@ def test_zabbix_event_deep_link():
     )
     no_id = worker.make_card({**event, "trigger_id": "{TRIGGER.ID}"})
     assert "tr_events.php" not in str(no_id)
+    monkeypatch.setattr(worker, "read_setting", lambda key: "")
+    assert worker.zabbix_event_link(event) == ""
+    monkeypatch.setattr(worker, "read_setting", lambda key: "javascript:alert(1)")
+    assert worker.zabbix_event_link(event) == ""
 
 
-def test_alert_mute_button_targets_host_and_trigger():
+def test_alert_mute_button_targets_host_and_trigger(monkeypatch):
+    configure_frontend(monkeypatch)
     event = {
         "event_id": "777001",
         "host_id": "101",
@@ -490,7 +518,8 @@ def test_feishu_card_does_not_nest_action_inside_column():
     ] == ["analyze_alert", "choose_mute"]
 
 
-def test_source_button_precedes_actions_for_problem_and_recovery():
+def test_source_button_precedes_actions_for_problem_and_recovery(monkeypatch):
+    configure_frontend(monkeypatch)
     event = {
         "event_id": "6180279",
         "host_id": "101",

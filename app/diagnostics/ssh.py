@@ -142,11 +142,12 @@ def execute(asset_id, action, service=None, time_window=30, cancelled=lambda: Fa
             out, err = bytearray(), bytearray()
             truncated = False
             deadline = time.monotonic() + timeout
-            last_cancel_check=0
+            last_cancel_check = 0
             while True:
-                if time.monotonic()-last_cancel_check>=.5:
-                    if cancelled(): raise DiagnosticError("任务已取消")
-                    last_cancel_check=time.monotonic()
+                if time.monotonic() - last_cancel_check >= 0.5:
+                    if cancelled():
+                        raise DiagnosticError("任务已取消")
+                    last_cancel_check = time.monotonic()
                 if time.monotonic() > deadline:
                     raise DiagnosticError("SSH 诊断超时")
                 for ready, recv, buf, cap in [

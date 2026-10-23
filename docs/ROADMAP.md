@@ -1,11 +1,5 @@
-# 路线图
+# 后续计划
 
-- [ ] FastAPI Web 管理接口和 React 管理页面
-- [ ] 配置数据库、管理员登录、密钥加密及审计
-- [ ] Zabbix Webhook 和告警解析统一接口
-- [ ] 可配置 Azure/OpenAI Responses 模型
-- [ ] MCP 工具发现、分页、只读白名单
-- [ ] 飞书群聊 @、回复原告警、卡片更新
-- [ ] 经过二次审批的 Zabbix MCP 写入（默认关闭）
-- [ ] Docker Compose、systemd 和安全升级回滚
-- [ ] 自动集成测试、GitHub Actions、Releases
+当前实现和验收分开记录于 [ACCEPTANCE.md](ACCEPTANCE.md)。下一步先完成真实 Zabbix、飞书、SSH 与目标 Docker 验证，再安排独立切换窗口和发布。
+
+后续可扩展非 Linux 实时适配器、数据保留归档与在线主密钥轮换。自动整改及写入审批需要另行设计与授权，本版没有开放写入工具。

@@ -1,21 +1,14 @@
 # Changelog
 
-## Unreleased — P0 稳定性修复（2026-10-19）
+## 0.6.0 候选版本 · 2026-10-23
 
-- 修复飞书 Webhook 签名字符串中的换行符问题，抽出 `feishu_sign`。
-- 将 AI 告警和主动问答提示词拆开，保留旧问答提示词兼容逻辑。
-- 当告警 AI 分析不可用时，生成并尝试投递人工处理兜底卡片。
-- 网络超时及飞书 5xx 采用最多三次有限重试；业务拒绝不自动重发。
-- 修复模型单轮调用超过 8 个 MCP 工具时缺少对应工具输出的问题。
-- 跳过 event_id/host_id 不合法的 MCP 调用。
-- 修复审批回执和 README 字面换行；根据模拟开关显示审批标题。
-- 增加飞书签名、提示词要求、告警降级通知的定向测试。
+- 在独立 ai-ops-platform 仓库整合 Zabbix 告警与 Linux SSH 诊断，保留产品名与默认 8088 端口。
+- 统一资产、多组、Host ID、凭据、跳板、用户角色、配置、任务、证据与审计；旧 Linux 数据离线显式导入。
+- 默认低权限免 Agent SSH，固定公钥、限时限量、跨进程并发与可选 POSIX 强制命令网关。
+- 九个精确授权 Zabbix 只读工具、动态 Schema、参数/字段/主机约束、模式预算和真实用量。
+- 重建统一桌面控制台，深浅主题、实时 API、历史与报告详情、Token 全周期汇总。
+- 加固飞书群/消息/事件来源关联，保留四次 AI 回复链、进行中拦截、恢复和本地屏蔽。
+- 增加隔离数据库、真实 SSH/MCP stdio/Redis 协议测试及 Chromium 桌面回归。
+- 移除未调用的旧调查器和问答卡片适配器、过时写操作审批文档。
 
-### 尚未完成
-
-告警可靠持久化与可重试任务状态、回复告警与审批的生产联调、P1/P2/P3 后续安全及性能改造。仓库尚未作为正式生产版发布。
-
-## Unreleased
-- Initialized private development repository from available prior generated materials.
-- Added Feishu QA progress-card adapter and initial operational documentation.
-- No production release has been tagged.
+尚未发布生产版本；真实环境验收和部署边界见 docs/ACCEPTANCE.md。

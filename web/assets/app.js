@@ -1,3 +1,4 @@
+"use strict";
 async function groupsPanel() {
   const rows = await api(P + "/groups");
   state.groupRows = rows;
@@ -45,7 +46,6 @@ async function mutesPanel() {
     "仅影响本平台的问题通知；不修改 Zabbix，也不屏蔽已经发送的告警对应的恢复。",
   );
 }
-("use strict");
 const $ = (s) => document.querySelector(s),
   E = (v) =>
     String(v ?? "").replace(

@@ -106,10 +106,42 @@ try:
         ).wait_for()
         page.locator("#close-editor").click()
         checks.append({"workflow": "asset create + rejected root edit", "ok": True})
+        # Exercise both group names in table cells and asset-editor help text.
+        payload = '<img src=x onerror="window.__storedXss=1">'
+        page.locator('[data-action="new-group"]').click()
+        page.locator('dialog input[name="name"]').fill(payload)
+        page.locator('dialog button[type="submit"]').click()
+        page.get_by_text(payload, exact=True).wait_for()
+        page.locator('[data-action="new-asset"]').click()
+        page.locator('dialog input[name="name"]').wait_for()
+        assert page.evaluate("window.__storedXss || 0") == 0
+        page.locator("#close-editor").click()
+        group = page.locator("tr").filter(has_text=payload)
+        group.locator('[data-action="edit-group"]').click()
+        page.locator('dialog input[name="name"]').fill("浏览器验证组")
+        page.locator('dialog button[type="submit"]').click()
+        page.get_by_text("浏览器验证组", exact=True).wait_for()
+        page.locator("tr").filter(has_text="浏览器验证组").locator(
+            '[data-action="delete-group"]'
+        ).click()
+        page.get_by_text("浏览器验证组", exact=True).wait_for(state="detached")
+        checks.append(
+            {"workflow": "group create/edit/delete + stored HTML escaping", "ok": True}
+        )
+        page.locator('[data-page="feishu"]').click()
+        page.locator('#mute-form input[name="host_id"]').fill("991")
+        page.locator('#mute-form input[name="trigger_id"]').fill("992")
+        page.locator('#mute-form button[type="submit"]').click()
+        page.locator('[data-action="unmute"][data-id="991:992"]').wait_for()
+        page.locator('[data-action="unmute"][data-id="991:992"]').click()
+        page.locator('[data-action="unmute"][data-id="991:992"]').wait_for(
+            state="detached"
+        )
+        checks.append({"workflow": "Web mute create + early unmute", "ok": True})
         page.locator('[data-page="overview"]').click()
         page.locator(".hero").wait_for()
-        page.locator('#toast').wait_for(state='hidden',timeout=8000)
-        page.evaluate('document.fonts.ready')
+        page.locator("#toast").wait_for(state="hidden", timeout=8000)
+        page.evaluate("document.fonts.ready")
         page.screenshot(path=str(OUT / "overview-1440.png"), full_page=True)
         page.locator('[data-page="assets"]').click()
         page.locator('[data-action="new-asset"]').wait_for()

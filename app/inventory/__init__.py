@@ -228,7 +228,10 @@ def save_credential(name, raw, passphrase, actor, credential_id=None):
                 (name, *encrypted, credential_id),
             ).rowcount:
                 raise ValueError("凭据不存在")
-            db.execute('UPDATE assets SET revision=revision+1,last_test_status=NULL WHERE credential_id=? OR proxy_id IN (SELECT id FROM ssh_proxies WHERE credential_id=?)',(credential_id,credential_id))
+            db.execute(
+                "UPDATE assets SET revision=revision+1,last_test_status=NULL WHERE credential_id=? OR proxy_id IN (SELECT id FROM ssh_proxies WHERE credential_id=?)",
+                (credential_id, credential_id),
+            )
         else:
             credential_id = db.execute(
                 "INSERT INTO ssh_credentials(name,private_key,passphrase) VALUES (?,?,?)",

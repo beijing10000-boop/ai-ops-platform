@@ -1,91 +1,65 @@
-# Docker 安装（开发预览版）
+# 安装与运行
 
-> 尚未完成对现有生产系统的端到端联调；建议使用测试机器，不要覆盖现有 `/data/zabbix-feishu-ai-agent`。
+此文针对新仓库的独立测试部署。当前执行环境无法运行 Docker；Rocky Linux 9/10 与真实业务联调尚未验收。不要将新服务直接挂载旧生产数据卷。
 
-## 安装
+## Docker 准备
 
-准备 Docker Engine、Docker Compose、具有私有仓库访问权限的 GitHub 登录。
+使用组织批准的软件源和版本。Docker 官方 CentOS 文档提供下列仓库与插件安装方式，Rocky 的兼容性需在实际目标版本验证：
 
 ```bash
-git clone https://github.com/beijing10000-boop/zabbix-ai-ops.git
-cd zabbix-ai-ops
-python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
-python3 -c 'import secrets; print(secrets.token_urlsafe(40))'
+sudo dnf -y install dnf-plugins-core
+sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+sudo dnf install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+docker compose version
 ```
 
-将两段随机输出分别配置为 `APP_ENCRYPTION_KEY` 和 `ADMIN_API_TOKEN`，写入本地 `.env`（权限 `chmod 600 .env`）。禁止上传仓库或发送到聊天中。
+已有 Docker 的服务器无需重复安装。不要在现有业务机盲目替换容器运行时。
+
+## 独立启动
 
 ```bash
+git clone --branch integration/unified-platform https://github.com/beijing10000-boop/ai-ops-platform.git
+cd ai-ops-platform
 docker compose up -d --build
+docker compose exec web python -m app.bootstrap
 docker compose ps
 curl -f http://127.0.0.1:8088/healthz
 ```
 
-Web 仅映射到宿主机 `127.0.0.1:8088`；通过 SSH 隧道或受信任 HTTPS 反向代理访问，输入管理 Token。配置 MCP、OpenAI/Azure 模型、飞书 App ID/Secret、群白名单和告警 Webhook。
+私有仓库需使用你自己的 GitHub 授权，不把访问 Token 写入脚本。Compose 项目名 `ai-ops-platform`，数据卷 `appdata` 和 `redisdata` 独立于两个旧项目；同机测试用 `WEB_PORT=8089`。默认绑定 127.0.0.1，Redis 不发布宿主机端口。命名数据卷首次创建由镜像准备 UID 10001 写权限；如果改成 bind mount，需自行设置目录所有权与 SELinux 标签，不能直接复用旧路径。
 
-## 服务
+## 访问和初始化
 
-- `web`：FastAPI + Web 管理页面
-- `alert-worker`：分析 Zabbix Webhook 的告警
-- `qa-worker`：回答飞书群 @AI 问题，并更新同一张卡片
-- `feishu-receiver`：飞书 WebSocket 长连接事件接收
-- `redis`：任务队列与去重
+- 本机访问 `http://127.0.0.1:8088/setup`。远程先用 SSH 隧道访问初始化页面：`ssh -L 8088:127.0.0.1:8088 user@server`。
+- 在服务器自己的终端运行 `docker compose exec web cat /app/data/bootstrap.token`，将结果输入初始化页。若显式设置 ADMIN_API_TOKEN，则使用该值。凭据只用于尚未完成的初始化。
+- 填写外部主机名/端口、协议、飞书 App ID / Secret、超级管理员 Open ID。应用生成并持久保存 `master.key` 与 `bootstrap.token`，不在日志打印。
+- 飞书网页授权重定向地址必须与 `协议://外部主机/api/v1/auth/callback` 一致。HTTPS 由可信反向代理提供；页面选择 https 不会自动签发证书。HTTP 仅适合受控测试。
+- 初始化后通过飞书登录，在 Web 配置 AI、MCP、Webhook 密钥、群白名单及业务参数，然后逐项测试。
 
-新飞书应用需启用机器人、发布消息权限、订阅 `im.message.receive_v1`，选择长连接接收事件。请避免同一飞书 App ID 有其他不共享队列的接收实例。
+APP_ENCRYPTION_KEY 可用于保留旧实例密钥；新安装可留空。密钥一旦写入数据，不可随意更换。缺失已加密实例的主密钥会拒绝启动解密，不能靠新生成密钥修复。
 
-## 查看日志
+## 启用飞书与切换
+
+默认不启动接收器。复用相同 App ID 时，只有在停止旧接收器后才执行：
 
 ```bash
-docker compose logs -f web
-docker compose logs -f feishu-receiver
-docker compose logs -f qa-worker
-docker compose logs -f alert-worker
+docker compose --profile feishu up -d feishu-receiver
+docker compose logs --since=5m feishu-receiver qa-worker alert-worker
 ```
 
-## 已知限制
+外部 Zabbix Webhook 地址与旧平台保持原样，直到专门验收通过后再由操作者切换。测试实例和生产实例的 Redis 去重状态互不共享。
 
-- 尚未实现完整升级回滚、密钥轮换、多账号管理。
-- 飞书自定义 Webhook 的签名支持待补；启用签名校验的 Webhook 可能无法发送。
-- 原告警引用回复、写入审批等尚未接入。
-- MCP 和飞书权限需在真实设备上测试。不要把本开发版直接用于生产替换。
+## 运行与备份
 
-## 飞书账号登录（新版 Web 控制台）
-
-后台使用企业自建飞书应用网页授权，登录用户 Open ID 必须处于服务器环境变量 `FEISHU_ADMIN_OPEN_IDS` 白名单中。服务器端保存随机会话，浏览器只保存 HttpOnly、Secure、SameSite=Lax Cookie；写入接口要求 CSRF Token。**要求 HTTPS，不能直接通过 `http://172.20.200.93:8088` 完成 OAuth 登录。**
-
-1. 在飞书开放平台的当前自建应用中开通网页授权，进入“安全设置 → 重定向 URL”，填写与服务器完全一致的 `https://你的域名/api/v1/auth/callback`，并发布应用配置。
-2. 将该域名使用 HTTPS 反向代理到 `127.0.0.1:8088`；建议仅管理网络能访问。
-3. 在服务器 `.env` 中增加：
-   ```ini
-   FEISHU_LOGIN_REDIRECT_URI=https://你的域名/api/v1/auth/callback
-   FEISHU_ADMIN_OPEN_IDS=ou_你的飞书管理员OpenID
-   ALLOW_LEGACY_ADMIN_TOKEN=false
-   ```
-4. `docker compose up -d --build web`，访问 HTTPS 地址，点击“使用飞书账号登录”。复用之前 Web 已保存的 `lark_app_id`、`lark_app_secret`，无需再次写到浏览器。
-5. 验证 `/api/v1/auth/me`、配置、AI 测试与日志可用，退出后不能再访问受保护接口。
-
-**从旧 Web 迁移：** 旧版管理员 Token 不再是页面登录方式。仅在故障迁移时可临时设置 `ALLOW_LEGACY_ADMIN_TOKEN=true` 启用旧 API Token；结束后必须关闭。不要删除 `APP_ENCRYPTION_KEY` 或原 SQLite 数据卷。飞书应用的 OAuth 登录和飞书机器人 WebSocket 接收是独立功能，不要求立即把 92 的长连接切换到 93。
-
-
-### 临时 HTTP 登录测试（仅 172.20.200.93）
-飞书开放平台已经登记 `http://172.20.200.93:8088/api/v1/auth/callback` 时，允许在隔离测试网络里临时开启 HTTP 登录：
-```ini
-FEISHU_LOGIN_REDIRECT_URI=http://172.20.200.93:8088/api/v1/auth/callback
-FEISHU_ALLOW_HTTP_TEST=true
-FEISHU_ADMIN_OPEN_IDS=ou_实际管理员OpenID
-ALLOW_LEGACY_ADMIN_TOKEN=false
+```bash
+docker compose logs --tail=100 web diagnostic-worker
+docker compose exec web python -m app.migrate backup --source /app/data/app.sqlite3 --destination /app/data/manual-snapshot.bak
+docker compose cp web:/app/data/manual-snapshot.bak ./manual-snapshot.bak
 ```
-这仅用于当前测试服务器；默认仍要求 HTTPS。HTTP 下 OAuth 授权码、会话 Cookie 和 API 响应都没有传输加密，网络中间人可能窃取会话并修改配置，**绝不能作为正式生产部署**。验证后应改成可信 HTTPS 并关闭 `FEISHU_ALLOW_HTTP_TEST`。
 
+备份还必须包括对应 master.key（或既有 APP_ENCRYPTION_KEY）与部署参数，保存在访问受控的备份系统。备份数据库文件和密钥分别管理；数据库单独丢失密钥无法恢复。定期将历史证据归档；本版不自动清理诊断历史，需监控数据卷大小。Redis 满内存时会拒绝入队，应观察内存与磁盘。
 
-### HTTP 默认，Web 管理页可切换 HTTPS
-现在系统默认使用 HTTP，不必设置 `FEISHU_ALLOW_HTTP_TEST`。首次启动在 `.env` 写入：
-```ini
-FEISHU_LOGIN_REDIRECT_URI=http://172.20.200.93:8088/api/v1/auth/callback
-WEB_PROTOCOL=http
-WEB_PUBLIC_HOST=172.20.200.93:8088
-FEISHU_ADMIN_OPEN_IDS=ou_你的管理员OpenID
-```
-随后在【系统配置】页面可修改【Web 访问协议】为 `https`、【Web 外部访问主机】为域名或 IP（可带端口），保存后同步修改飞书平台中的重定向 URL，再重新登录。**HTTPS 必须自行配置受信任证书和反向代理**；UI 选中 https 不会自动签发证书或使端口开始提供 TLS。为避免切换期间锁定后台，推荐先将 HTTPS 代理配置完成再修改 Web 设置。
+Compose 对应用和 Redis 配置日志轮转、重启策略和健康检查；healthz 是存活检查，不证明远端业务可用。连接页需另做 MCP、AI 和 SSH 实际测试。
 
-**安全告警**：HTTP 下 OAuth 授权码、会话 Cookie、配置与 AI/MCP 凭据在网络中没有加密。仅可在受控隔离测试环境使用，正式环境强烈建议 HTTPS。Web 只允许环境变量指定的管理员 Open ID 登录。
+参考：[Docker 官方 CentOS 安装文档](https://docs.docker.com/engine/install/centos/)。

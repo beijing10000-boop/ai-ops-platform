@@ -105,3 +105,17 @@ def test_redaction_removes_credentials_before_model_submission():
     result = redact(text)
     for secret in ("xyzsecret", "hunter2", "secret123", "u:p@", "\nsecret\n"):
         assert secret not in result
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/", "/root", "/proc", "/var/log/../lib", "/data;id", "/opt/$(id)", "/data/a b"],
+)
+def test_directory_checks_reject_unbounded_and_injected_paths(path):
+    with pytest.raises(ValueError):
+        build("directory", path)
+
+
+def test_directory_check_is_short_low_priority_and_single_filesystem():
+    command = build("directory", "/data/app")
+    assert "timeout -k 1 3 nice -n 19 du -x -s -- /data/app" in command

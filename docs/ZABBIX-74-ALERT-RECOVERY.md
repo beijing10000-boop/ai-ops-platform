@@ -2,7 +2,7 @@
 
 ## 配置位置
 
-Zabbix 7.4：**告警 → 媒介类型 → Zabbix AI Analysis**，URL 保持 `http://172.20.200.93:8088/zabbix`。
+Zabbix 7.4：**告警 → 媒介类型 → Zabbix AI Analysis**，URL 填写新平台实际接收地址，例如 `https://ops.example.com/zabbix`，验收前不要切换原生产地址。
 
 请在媒介类型参数表中配置下列参数；其中 `event_id` 在恢复操作仍使用原故障事件 ID，便于在 AI Ops 中将恢复与告警关联。
 
@@ -25,7 +25,7 @@ Zabbix 7.4：**告警 → 媒介类型 → Zabbix AI Analysis**，URL 保持 `ht
 | recovery_time | `{EVENT.RECOVERY.TIME}` | 恢复时间 |
 | event_duration | `{EVENT.DURATION}` | 持续时间（仅恢复后可准确获得） |
 | trigger_id | `{TRIGGER.ID}` | 触发器 ID |
-| url | `http://172.20.200.93:8088/zabbix` | 接收地址 |
+| url | `https://ops.example.com/zabbix` | 接收地址 |
 | secret | Web 配置的 Zabbix Webhook 密钥 | HTTP Bearer 认证 |
 
 **检查 Webhook JavaScript**：必须转发这些参数（可以使用整体 `JSON.stringify(params)`）；如果脚本仅发送手工定义的字段，要逐个加入新增参数。不要把 `secret` 放进日志或向外转发的事件正文。

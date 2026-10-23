@@ -48,15 +48,21 @@ def overview(who=Depends(require("overview.read"))):
             )
         ]
     with connection() as db:
-        ai_counts=dict(db.execute("SELECT status,COUNT(*) FROM diagnostic_tasks WHERE kind='analysis' AND created_at>=datetime('now','-1 day') GROUP BY status"))
-    ai_finished=sum(ai_counts.get(k,0) for k in ('success','partial','failed'))
+        ai_counts = dict(
+            db.execute(
+                "SELECT status,COUNT(*) FROM diagnostic_tasks WHERE kind='analysis' AND created_at>=datetime('now','-1 day') GROUP BY status"
+            )
+        )
+    ai_finished = sum(ai_counts.get(k, 0) for k in ("success", "partial", "failed"))
     finished = sum(counts.get(k, 0) for k in ("success", "partial", "failed"))
     return {
         "scope": "平台已接收的告警；任务与用量为最近 24 小时",
         "unrecovered_received_events": active,
         "tasks_24h": sum(counts.values()),
-        "ai_runs_24h":sum(ai_counts.values()),
-        "ai_success_rate_24h":round(100*ai_counts.get("success",0)/ai_finished,1) if ai_finished else None,
+        "ai_runs_24h": sum(ai_counts.values()),
+        "ai_success_rate_24h": round(100 * ai_counts.get("success", 0) / ai_finished, 1)
+        if ai_finished
+        else None,
         "completed_24h": counts.get("success", 0),
         "partial_24h": counts.get("partial", 0),
         "failed_24h": counts.get("failed", 0),
@@ -168,7 +174,9 @@ def groups(who=Depends(require("inventory.read"))):
 
 @router.post("/groups")
 def add_group(body: GroupInput, who=Depends(require("inventory.manage"))):
-    if not body.name.strip(): raise HTTPException(422,"主机组名称不能为空")
+    if not body.name.strip():
+        raise HTTPException(422, "主机组名称不能为空")
+
     def save():
         with connection() as db:
             return db.execute(
@@ -323,13 +331,29 @@ async def sync_assets(who=Depends(require("inventory.manage"))):
             aid = db.execute(
                 "SELECT id FROM assets WHERE zabbix_hostid=?", (hid,)
             ).fetchone()[0]
+            db.execute(
+                "DELETE FROM asset_group_members WHERE asset_id=? AND group_id IN (SELECT id FROM asset_groups WHERE zabbix_groupid IS NOT NULL)",
+                (aid,),
+            )
             for group in host.get("hostgroups") or host.get("groups") or []:
                 gid = str(group.get("groupid", ""))
                 if not gid.isdigit():
                     continue
+                group_name = str(group.get("name") or gid)[:160]
+                suffix = 0
+                while db.execute(
+                    "SELECT 1 FROM asset_groups WHERE name=? AND (zabbix_groupid IS NULL OR zabbix_groupid!=?)",
+                    (group_name, gid),
+                ).fetchone():
+                    suffix += 1
+                    group_name = (
+                        str(group.get("name") or gid)[:120]
+                        + f" · Zabbix {gid}"
+                        + (f" ({suffix})" if suffix > 1 else "")
+                    )
                 db.execute(
                     "INSERT INTO asset_groups(name,zabbix_groupid) VALUES (?,?) ON CONFLICT(zabbix_groupid) DO UPDATE SET name=excluded.name",
-                    (str(group.get("name") or gid)[:160], gid),
+                    (group_name, gid),
                 )
                 db.execute(
                     "INSERT OR IGNORE INTO asset_group_members VALUES (?,(SELECT id FROM asset_groups WHERE zabbix_groupid=?))",
@@ -474,7 +498,7 @@ def task_detail(
 def cancel_task(task_id: str, who=Depends(require("diagnostics.run"))):
     with connection() as db:
         if not db.execute(
-            "UPDATE diagnostic_tasks SET cancel_requested=1,status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END WHERE task_id=? AND status IN ('queued','running')",
+            "UPDATE diagnostic_tasks SET cancel_requested=1,stage=CASE WHEN status='queued' THEN 'cancelled' ELSE stage END,completed_at=CASE WHEN status='queued' THEN CURRENT_TIMESTAMP ELSE completed_at END,status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END WHERE task_id=? AND status IN ('queued','running')",
             (task_id,),
         ).rowcount:
             raise HTTPException(409, "任务不存在或已结束")
@@ -652,23 +676,42 @@ def audit_page(
         }
 
 
-@router.put('/groups/{group_id}')
-def edit_group(group_id:int,body:GroupInput,who=Depends(require('inventory.manage'))):
-    if not body.name.strip(): raise HTTPException(422,'主机组名称不能为空')
+@router.put("/groups/{group_id}")
+def edit_group(
+    group_id: int, body: GroupInput, who=Depends(require("inventory.manage"))
+):
+    if not body.name.strip():
+        raise HTTPException(422, "主机组名称不能为空")
+
     def save():
         with connection() as db:
-            row=db.execute('SELECT zabbix_groupid FROM asset_groups WHERE id=?',(group_id,)).fetchone()
-            if not row: raise HTTPException(404,'主机组不存在')
-            if row[0]: raise HTTPException(409,'同步组由 Zabbix 维护，本地只编辑手工组')
-            db.execute('UPDATE asset_groups SET name=? WHERE id=?',(body.name.strip(),group_id))
-    write(save); audit(who['open_id'],'group_updated',group_id); return {'ok':True}
+            row = db.execute(
+                "SELECT zabbix_groupid FROM asset_groups WHERE id=?", (group_id,)
+            ).fetchone()
+            if not row:
+                raise HTTPException(404, "主机组不存在")
+            if row[0]:
+                raise HTTPException(409, "同步组由 Zabbix 维护，本地只编辑手工组")
+            db.execute(
+                "UPDATE asset_groups SET name=? WHERE id=?",
+                (body.name.strip(), group_id),
+            )
+
+    write(save)
+    audit(who["open_id"], "group_updated", group_id)
+    return {"ok": True}
 
 
-@router.delete('/groups/{group_id}')
-def delete_group(group_id:int,who=Depends(require('inventory.manage'))):
+@router.delete("/groups/{group_id}")
+def delete_group(group_id: int, who=Depends(require("inventory.manage"))):
     with connection() as db:
-        row=db.execute('SELECT zabbix_groupid FROM asset_groups WHERE id=?',(group_id,)).fetchone()
-        if not row: raise HTTPException(404,'主机组不存在')
-        if row[0]: raise HTTPException(409,'同步组由 Zabbix 维护，本地只删除手工组')
-        db.execute('DELETE FROM asset_groups WHERE id=?',(group_id,))
-    audit(who['open_id'],'group_deleted',group_id); return {'ok':True}
+        row = db.execute(
+            "SELECT zabbix_groupid FROM asset_groups WHERE id=?", (group_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "主机组不存在")
+        if row[0]:
+            raise HTTPException(409, "同步组由 Zabbix 维护，本地只删除手工组")
+        db.execute("DELETE FROM asset_groups WHERE id=?", (group_id,))
+    audit(who["open_id"], "group_deleted", group_id)
+    return {"ok": True}

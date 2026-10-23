@@ -27,6 +27,18 @@ async def execute(
     chat_id, question, message_id, sender_open_id=None, parent_id=None, root_id=None
 ):
     """Only the directly replied-to message determines the chain and depth."""
+    if sender_open_id:
+        from .security.rbac import permits
+
+        if not permits(sender_open_id, "diagnostics.run"):
+            await reply_card(
+                message_id,
+                "无诊断权限",
+                "当前账号没有诊断权限，请联系平台管理员。",
+                "orange",
+            )
+            record_ai_question("feishu", message_id, question, "rejected")
+            return
     stored = recall(chat_id, parent_id)
     if is_pending(chat_id, parent_id):
         await reply_card(

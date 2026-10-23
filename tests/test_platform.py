@@ -314,3 +314,58 @@ def test_missing_master_key_cannot_replace_existing_ciphertext(monkeypatch):
     with pytest.raises(RuntimeError, match="原始主密钥"):
         main.cipher()
     assert not (main.DATA_DIR / "master.key").exists()
+
+
+def test_trusted_feishu_event_lookup_requires_exact_message_and_chat():
+    from app.integrations.feishu_links import remember, event_for_message
+
+    event = {"event_id": "771", "event_value": "1", "host_id": "42"}
+    with main.connection() as db:
+        db.execute(
+            "INSERT INTO alert_events(event_id,event_value,event_name,host_name,severity,event_json) VALUES ('771','1','cpu','server',4,?)",
+            (json.dumps(event),),
+        )
+    remember(event, "oc_one", "om_source", "problem")
+    assert event_for_message("om_source", "oc_one") == event
+    assert event_for_message("om_source", "oc_two") is None
+    assert event_for_message("om_other", "oc_one") is None
+
+
+def test_queued_question_rechecks_revoked_permissions(monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from app import qa_worker
+
+    reply = AsyncMock()
+    ask = AsyncMock()
+    monkeypatch.setattr(qa_worker, "reply_card", reply)
+    monkeypatch.setattr(qa_worker, "ask", ask)
+    monkeypatch.setattr(qa_worker, "record_ai_question", lambda *a, **k: None)
+    asyncio.run(
+        qa_worker.execute("oc_one", "diagnose", "om_q", sender_open_id="ou_revoked")
+    )
+    assert "无诊断权限" in reply.await_args.args
+    ask.assert_not_awaited()
+
+
+def test_group_crud_preserves_synced_groups():
+    client = client_for()
+    gid = client.post("/api/v1/platform/groups", json={"name": "Local"}).json()["id"]
+    assert (
+        client.put(
+            f"/api/v1/platform/groups/{gid}", json={"name": "Renamed"}
+        ).status_code
+        == 200
+    )
+    with main.connection() as db:
+        sync_id = db.execute(
+            "INSERT INTO asset_groups(name,zabbix_groupid) VALUES ('Synced','77')"
+        ).lastrowid
+    assert (
+        client.put(
+            f"/api/v1/platform/groups/{sync_id}", json={"name": "Changed"}
+        ).status_code
+        == 409
+    )
+    assert client.delete(f"/api/v1/platform/groups/{sync_id}").status_code == 409
+    assert client.delete(f"/api/v1/platform/groups/{gid}").status_code == 200

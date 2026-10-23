@@ -268,3 +268,35 @@ def test_disk_and_service_select_relevant_fixed_actions(rig):
     result, task = run(rig, "filesystem /data 95%")
     assert [name for kind, name in rig[1] if kind == "ssh"] == ["disk"]
     assert task["diagnostic_type"] == "disk"
+
+
+def test_configured_secrets_never_reach_model_inputs_or_final_report(rig, monkeypatch):
+    secret = "fixture-secret-never-send"
+    rig[0]["openai_api_key"] = secret
+    original = mcp_runtime.zabbix.safe_result
+
+    def result(*args, **kwargs):
+        value = original(*args, **kwargs)
+        value["data"] = value.get("data", "") + " " + secret
+        return value
+
+    monkeypatch.setattr(mcp_runtime.zabbix, "safe_result", result)
+    captured = []
+
+    async def create(**kwargs):
+        # Serialize now: the runtime appends later output to the same input list.
+        captured.append(json.dumps(kwargs, ensure_ascii=False, default=str))
+        return SimpleNamespace(
+            output=[Call("host_get", {"hostids": ["10"]})]
+            if len(captured) == 1
+            else [],
+            output_text="" if len(captured) == 1 else "AI result " + secret,
+            usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        )
+
+    rig[3].responses.create = create
+    answer, task = run(rig)
+    assert len(captured) == 2
+    assert all(secret not in request for request in captured)
+    assert secret not in answer[0]
+    assert secret not in json.dumps(task["report"])

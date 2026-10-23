@@ -178,10 +178,19 @@ def zabbix_event_link(event):
     trigger_id = str(event.get("trigger_id") or "")
     if not (event_id.isdigit() and trigger_id.isdigit()):
         return ""
-    # Internal Zabbix 7.4 frontend currently runs on port 8080.
-    from urllib.parse import urlencode
+    from urllib.parse import urlencode, urlsplit
 
-    base = os.getenv("ZABBIX_FRONTEND_URL", "http://172.20.200.90:8080").rstrip("/")
+    base = read_setting("zabbix_frontend_url").strip().rstrip("/")
+    parts = urlsplit(base)
+    if (
+        parts.scheme not in ("http", "https")
+        or not parts.hostname
+        or parts.username
+        or parts.password
+        or parts.query
+        or parts.fragment
+    ):
+        return ""
     return (
         base
         + "/tr_events.php?"

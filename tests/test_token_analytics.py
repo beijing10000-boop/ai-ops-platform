@@ -56,3 +56,16 @@ def test_token_usage_aggregation_without_prices():
     assert payload["total_input"] >= 100
     assert payload["records"][0]["details"][1]["name"] == "host_get"
     assert "price_input" not in payload and "total_cost" not in payload
+
+
+def test_aggregate_counts_entire_period_beyond_detail_limit():
+    with connection() as db:
+        db.executemany(
+            "INSERT INTO ai_token_runs(source,model,profile,token_input,token_output,token_total,rounds,tools,result_chars,details) VALUES ('qa','full-period','standard',1,2,3,1,0,0,'[]')",
+            [()] * 10001,
+        )
+    payload = client.get(
+        "/api/v1/ai-token-usage?model=full-period", headers=AUTH
+    ).json()
+    assert payload["total_tokens"] == 30003
+    assert len(payload["records"]) <= 500

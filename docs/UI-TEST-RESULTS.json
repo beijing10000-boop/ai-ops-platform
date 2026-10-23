@@ -172,6 +172,14 @@
       "ok": true
     },
     {
+      "workflow": "group create/edit/delete + stored HTML escaping",
+      "ok": true
+    },
+    {
+      "workflow": "Web mute create + early unmute",
+      "ok": true
+    },
+    {
       "workflow": "report, evidence, theme toggle",
       "ok": true
     }

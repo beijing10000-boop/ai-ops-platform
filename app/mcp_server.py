@@ -45,12 +45,22 @@ def diagnose_linux_host(
     from .diagnostics.actions import build
 
     actions = list(PLAYBOOKS[diagnostic_type]["actions"])
-    if diagnostic_type=='disk' and asset['diagnostic_paths']:
+    if diagnostic_type == "disk" and asset["diagnostic_paths"]:
         # Directory parameters always come from the registered asset, never free-form MCP input.
-        actions.extend(['directory']*len(asset['diagnostic_paths']))
-    path_iter=iter(asset['diagnostic_paths'])
-    plan=[(action,next(path_iter) if action=='directory' else service if action in {'logs','service'} else None) for action in actions]
-    for action,parameter in plan:
+        actions.extend(["directory"] * len(asset["diagnostic_paths"]))
+    path_iter = iter(asset["diagnostic_paths"])
+    plan = [
+        (
+            action,
+            next(path_iter)
+            if action == "directory"
+            else service
+            if action in {"logs", "service"}
+            else None,
+        )
+        for action in actions
+    ]
+    for action, parameter in plan:
         build(action, parameter, time_window)
     task, _ = tasks.create(
         {"time_window": time_window},
@@ -65,7 +75,7 @@ def diagnose_linux_host(
     began = time.monotonic()
     results = []
     try:
-        for action,parameter in plan:
+        for action, parameter in plan:
             result = execute(
                 host_id,
                 action,

@@ -309,9 +309,9 @@ async def run(
         except Exception as exc:
             outcome = {"error": type(exc).__name__}
             gaps.append("Zabbix " + name + " 调用失败")
+        if "data" in outcome:
+            outcome["data"] = safe_text(outcome["data"])
         clean = {k: v for k, v in outcome.items() if k != "_rows"}
-        if "data" in clean:
-            clean["data"] = safe_text(clean["data"])
         tasks.evidence(
             task_id, "zabbix_mcp", name, clean, int((time.monotonic() - start) * 1000)
         )
@@ -666,7 +666,7 @@ async def run(
                                 "type": "function_call_output",
                                 "call_id": call.call_id,
                                 "output": compact_result(
-                                    json.dumps(outcome, ensure_ascii=False),
+                                    safe_text(json.dumps(outcome, ensure_ascii=False)),
                                     limits["result_chars"],
                                 ),
                             }
