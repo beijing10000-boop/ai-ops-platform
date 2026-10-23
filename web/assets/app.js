@@ -128,6 +128,15 @@ const panel = (title, body, note = "") =>
 const table = (heads, rows) =>
   `<div class="table-wrap"><table><thead><tr>${heads.map((x) => `<th>${x}</th>`).join("")}</tr></thead><tbody>${rows || `<tr><td colspan="${heads.length}" class="empty">暂无记录</td></tr>`}</tbody></table></div>`;
 function toast(message) {
+  // Modal dialogs are in the top layer: a page-level toast would sit behind
+  // their backdrop, so show the message inside the active editor instead.
+  if ($("#editor").open) {
+    const feedback = $("#editor-feedback");
+    feedback.textContent = message;
+    feedback.hidden = false;
+    feedback.scrollIntoView({ block: "nearest" });
+    return;
+  }
   $("#toast").textContent = message;
   $("#toast").hidden = false;
   clearTimeout(state.toastTimer);
@@ -736,6 +745,8 @@ async function openEditor(type, id) {
   $("#editor-title").textContent = title;
   $("#editor-fields").innerHTML = fields;
   $("#editor-note").textContent = note;
+  $("#editor-feedback").textContent = "";
+  $("#editor-feedback").hidden = true;
   $("#editor").showModal();
 }
 document.addEventListener("click", async (event) => {
@@ -851,6 +862,10 @@ document.addEventListener("submit", async (event) => {
   )
     return;
   event.preventDefault();
+  if (form.id === "editor-form") {
+    $("#editor-feedback").textContent = "";
+    $("#editor-feedback").hidden = true;
+  }
   const b = form.querySelector("[type=submit]");
   b.disabled = true;
   try {
