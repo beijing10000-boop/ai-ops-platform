@@ -22,7 +22,9 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y redis-server
       - run: python -m ruff check --select F401,F811,F821,F841 app tests
       - run: AIOPS_REDIS_SERVER=$(command -v redis-server) python -m pytest -q --junitxml=/tmp/test-results.xml
+        if: success() || failure()
       - run: python -m ruff format --check --diff app tests
+        if: success() || failure()
       - uses: actions/upload-artifact@v4
         if: always()
         with:

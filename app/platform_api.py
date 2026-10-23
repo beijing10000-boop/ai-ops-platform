@@ -514,12 +514,10 @@ def retry_task(task_id: str, who=Depends(require("diagnostics.run"))):
     if old["kind"] == "legacy":
         raise HTTPException(409, "导入的历史记录不能重试，请从资产页发起新诊断")
     request = {k: v for k, v in old["request"].items() if k != "limits"}
-    if old["asset_id"]:
-        asset = inventory.get_asset(old["asset_id"])
-        if not asset or not asset["enabled"]:
-            raise HTTPException(422, "资产不存在或已禁用")
+    asset = inventory.get_asset(old["asset_id"]) if old["asset_id"] else None
+    if old["asset_id"] and (not asset or not asset["enabled"]):
+        raise HTTPException(422, "资产不存在或已禁用")
     if old["kind"] == "connection":
-        asset = inventory.get_asset(old["asset_id"]) if old["asset_id"] else None
         if not asset or asset["device_type"] != "linux":
             raise HTTPException(422, "需要已启用的 Linux 资产")
         request["asset_revision"] = asset["revision"]

@@ -43,8 +43,6 @@ def _event(value):
 
 
 def _authorized(operator_open_id, permission="alerts.manage"):
-    import os
-
     ids = read_setting("feishu_admin_open_ids")
     admins = {s.strip() for s in ids.split(",") if s.strip()}
     if not operator_open_id:
