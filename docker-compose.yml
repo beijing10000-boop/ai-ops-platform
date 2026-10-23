@@ -1,0 +1,54 @@
+x-app-env: &app-env
+  TZ: Asia/Shanghai
+  DATA_DIR: /app/data
+  REDIS_URL: redis://redis:6379/0
+  APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:?set key}
+  FEISHU_ADMIN_OPEN_IDS: ${FEISHU_ADMIN_OPEN_IDS:-}
+services:
+  redis:
+    image: redis:7-alpine
+    environment:
+      TZ: Asia/Shanghai
+    command: ["redis-server","--appendonly","yes"]
+    restart: unless-stopped
+    volumes: [redisdata:/data]
+  web:
+    build: .
+    restart: unless-stopped
+    ports: ["${WEB_BIND_IP:-172.20.200.93}:8088:8088"]
+    environment:
+      <<: *app-env
+      ADMIN_API_TOKEN: ${ADMIN_API_TOKEN:?set admin token}
+      ALLOW_LEGACY_ADMIN_TOKEN: ${ALLOW_LEGACY_ADMIN_TOKEN:-false}
+      FEISHU_ADMIN_OPEN_IDS: ${FEISHU_ADMIN_OPEN_IDS:-}
+      FEISHU_LOGIN_REDIRECT_URI: ${FEISHU_LOGIN_REDIRECT_URI:-}
+      WEB_PROTOCOL: ${WEB_PROTOCOL:-http}
+      WEB_PUBLIC_HOST: ${WEB_PUBLIC_HOST:-}
+      FEISHU_ALLOW_HTTP_TEST: ${FEISHU_ALLOW_HTTP_TEST:-false}
+    volumes: [appdata:/app/data]
+    depends_on: [redis]
+  alert-worker:
+    build: .
+    command: ["python","-m","app.worker"]
+    restart: unless-stopped
+    environment: *app-env
+    volumes: [appdata:/app/data]
+    depends_on: [redis]
+  qa-worker:
+    build: .
+    command: ["python","-m","app.qa_worker"]
+    restart: unless-stopped
+    environment: *app-env
+    volumes: [appdata:/app/data]
+    depends_on: [redis]
+  feishu-receiver:
+    build: .
+    command: ["python","-m","app.feishu_bot"]
+    restart: unless-stopped
+    environment: *app-env
+    volumes: [appdata:/app/data]
+    depends_on: [redis]
+    # The same Feishu App ID should have a single receiver per deployment.
+volumes:
+  appdata:
+  redisdata:
