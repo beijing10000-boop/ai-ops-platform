@@ -90,7 +90,6 @@ def test_csrf_is_enforced_on_new_apis():
         {"name": "bad", "address": "127.0.0.1"},
         {"name": "bad", "address": "8.8.8.8"},
         {"name": "bad", "address": "example.org"},
-        {"name": "bad", "device_type": "linux", "username": "root"},
         {
             "name": "bad",
             "device_type": "linux",
@@ -429,3 +428,30 @@ def test_imported_history_cannot_be_retried():
     response = client_for().post(f"/api/v1/platform/tasks/{old['task_id']}/retry")
     assert response.status_code == 409
     assert tasks.page()["total"] == 1
+
+
+@pytest.mark.parametrize("operation", ["create", "edit", "import"])
+def test_standard_mode_accepts_root_without_gateway_approval(operation):
+    client = client_for()
+    body = {"name": "root-target", "device_type": "linux", "username": "root"}
+    if operation == "create":
+        response = client.post("/api/v1/platform/assets", json=body)
+        assert response.status_code == 201
+        asset = response.json()
+    elif operation == "edit":
+        original = client.post(
+            "/api/v1/platform/assets",
+            json={"name": "root-target", "device_type": "linux"},
+        ).json()
+        response = client.put(f"/api/v1/platform/assets/{original['id']}", json=body)
+        assert response.status_code == 200
+        asset = response.json()
+    else:
+        response = client.post(
+            "/api/v1/platform/assets-import", json={"assets": [body]}
+        )
+        assert response.status_code == 200
+        asset = client.get("/api/v1/platform/assets").json()["items"][0]
+    assert asset["username"] == "root"
+    assert asset["diagnostic_mode"] == "standard"
+    assert not asset["privileged_approved"]

@@ -603,7 +603,7 @@ def tool_registry(who=Depends(require("tools.read"))):
         "tools": rows,
         "playbooks": PLAYBOOKS,
         "modes": {
-            "standard": "低权限账号，无需 Python/网关；账号本身不保证绝对只读",
+            "standard": "支持 root 和普通账号，无需 Python/网关；仅执行固定诊断动作",
             "privileged": "必须管理员授权并安装固定强制命令网关；root 不是真正只读",
         },
     }

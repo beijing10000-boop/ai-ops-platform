@@ -18,7 +18,7 @@ pytest 内容：旧功能回归、OAuth/CSRF/角色直连接口、1000资产分�
 
 模型/MCP 场景测试使用受控响应：CPU 历史先于 SSH、非Linux拒绝SSH、MCP或SSH故障降级、缺少工具/权限、快速模式、Token阈值、配置变更撤销等。这些验证编排逻辑，不证明第三方模型的分析质量或实际 initMAX 版本兼容性。
 
-桌面包含资产创建与非法 root 编辑、组 CRUD、存储 HTML 转义、Web 屏蔽/解除、报告证据和主题切换。原始结果：[UI-TEST-RESULTS.json](UI-TEST-RESULTS.json)，截图位于 screenshots/。所有页面数据来自临时 SQLite API；没有产品静态演示计数。
+首次整合的桌面检查包含资产创建与当时的 root 限制校验（该限制现已取消，见下文）、组 CRUD、存储 HTML 转义、Web 屏蔽/解除、报告证据和主题切换。原始结果：[UI-TEST-RESULTS.json](UI-TEST-RESULTS.json)，截图位于 screenshots/。所有页面数据来自临时 SQLite API；没有产品静态演示计数。
 
 ## 后续代码审查与回归检查扩展
 
@@ -29,6 +29,12 @@ pytest 内容：旧功能回归、OAuth/CSRF/角色直连接口、1000资产分�
 新增 API/编排/迁移回归用例，以及浏览器分页、分组保存和筛选、设备切换、成员调整、异步导航流程。浏览器使用临时数据库中的 30 台资产和 29 条任务验证多页数据。本轮本地执行环境不可用，完整测试由 GitHub Actions 执行；最新运行状态与日志见 [PR #1 的检查](https://github.com/beijing10000-boop/ai-ops-platform/pull/1/checks)。上方 172/37 与仓库内原截图为首次整合记录，最新浏览器截图和机器结果以对应 CI 的 desktop-results 附件为准。
 
 Token 统计只累计模型实际返回的用量；未返回响应的失败请求无法计量，不按预算推算费用或 Token。
+
+## root SSH 支持
+
+标准免 Agent 模式允许 root 与 UID 0，无需切换到 B 模式或确认网关。回归覆盖资产创建、编辑、批量导入，以及使用 root/别名的本地真实 SSH 握手；固定连接命令另外通过模拟 UID 0 执行，验证不会再被身份检查中止。浏览器检查用无效用户名测试弹窗反馈，随后改为 root 保存并重新打开，核对标准模式和账号持久化。该验证不代表已连接用户的真实服务器。
+
+最新运行日志与桌面结果仍以 PR #1 检查为准。
 
 ## 复现
 

@@ -3,6 +3,7 @@
 import io
 import ipaddress
 import socket
+import subprocess
 import threading
 import time
 
@@ -13,8 +14,9 @@ from app.diagnostics.ssh import execute, DiagnosticError, lease
 
 
 class FixtureSSH(paramiko.ServerInterface):
-    def __init__(self, key):
+    def __init__(self, key, username):
         self.key = key
+        self.username = username
         self.command = None
         self.ready = threading.Event()
 
@@ -24,7 +26,7 @@ class FixtureSSH(paramiko.ServerInterface):
     def check_auth_publickey(self, username, key):
         return (
             paramiko.AUTH_SUCCESSFUL
-            if username == "ai-diagnostic" and key == self.key
+            if username == self.username and key == self.key
             else paramiko.AUTH_FAILED
         )
 
@@ -42,7 +44,7 @@ class FixtureSSH(paramiko.ServerInterface):
 
 
 @pytest.fixture
-def target(monkeypatch, tmp_path):
+def target(monkeypatch, tmp_path, request):
     monkeypatch.setattr(main, "DATA_DIR", tmp_path)
     monkeypatch.setattr(main, "DB", tmp_path / "app.sqlite3")
     # Loopback is permitted only in this isolated protocol fixture; production validation remains private-IP only.
@@ -60,7 +62,8 @@ def target(monkeypatch, tmp_path):
     listener.bind(("127.0.0.1", 0))
     listener.listen()
     listener.settimeout(0.2)
-    fixture = FixtureSSH(user_key)
+    username = getattr(request, "param", "ai-diagnostic")
+    fixture = FixtureSSH(user_key, username)
     stopped = threading.Event()
     output = {"text": "AIOPS_SSH_OK\n1001\nLinux\n", "hang": False}
     transports = []
@@ -97,6 +100,7 @@ def target(monkeypatch, tmp_path):
         inventory.AssetInput(
             name="fixture",
             device_type="linux",
+            username=username,
             address="127.0.0.1",
             ssh_port=listener.getsockname()[1],
             credential_id=cred["id"],
@@ -116,7 +120,7 @@ def test_real_ssh_transport_uses_fixed_action_and_pinned_key(target):
     asset, server, _ = target
     result = execute(asset["id"], "connection")
     assert result["status"] == "success" and "AIOPS_SSH_OK" in result["output"]
-    assert "id -u" in server.command and "UID_ZERO_DENIED" in server.command
+    assert "id -u" in server.command
     assert "python" not in server.command and "sudo" not in server.command
 
 
@@ -171,3 +175,23 @@ def test_mode_b_refuses_an_unverified_gateway_response(target):
         )
     with pytest.raises(DiagnosticError, match="网关标识"):
         execute(asset["id"], "connection")
+
+
+@pytest.mark.parametrize("target", ["root", "root-alias"], indirect=True)
+def test_standard_ssh_accepts_root_and_uid_zero(target):
+    asset, server, output = target
+    output["text"] = "AIOPS_SSH_OK\n0\nLinux\n"
+    result = execute(asset["id"], "connection")
+    assert result["status"] == "success"
+    assert result["mode"] == "standard"
+    assert result["output"].splitlines()[:2] == ["AIOPS_SSH_OK", "0"]
+    # Run the transmitted fixed snippet with UID 0 simulated; no root privileges
+    # or production target are needed to exercise the former runtime guard.
+    completed = subprocess.run(
+        ["/bin/sh", "-c", "id() { printf '0\\n'; }; " + server.command],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=True,
+    )
+    assert completed.stdout.splitlines()[:2] == ["AIOPS_SSH_OK", "0"]

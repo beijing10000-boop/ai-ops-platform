@@ -313,7 +313,7 @@ async function assets() {
             btn("new-asset", "登记资产", "", "primary")
         : "",
     ) +
-    `<section class="panel"><div class="toolbar"><input id="asset-search" aria-label="搜索主机资产" placeholder="搜索名称、地址或 Host ID" value="${E(state.assetQuery)}"><select id="asset-type" aria-label="设备类型"><option value="all">全部设备类型</option>${["linux", "windows", "vmware", "network", "other", "unknown"].map((x) => `<option value="${x}" ${state.assetType === x ? "selected" : ""}>${labels[x]}</option>`).join("")}</select><select id="asset-group" aria-label="主机组"><option value="">全部主机组</option>${groups.map((g) => `<option value="${g.id}" ${state.assetGroup === String(g.id) ? "selected" : ""}>${E(g.name)}</option>`).join("")}</select>${btn("search-assets", "搜索")}<span class="muted small">共 ${fmt(data.total)} 台</span></div>${table(["资产 / Host ID", "设备类型", "SSH 路由", "权限模式", "状态 / 验证", "操作"], data.items.map((r) => `<tr><td><span class="cell-title">${E(r.name)}</span><small>资产 ${r.id} · Host ID ${E(r.zabbix_hostid || "未关联")}</small></td><td>${badge(r.device_type)}</td><td class="mono">${E(r.address || "未配置")}<small>${r.address ? E(r.username) + " · " + r.ssh_port + (r.proxy_id ? " · 跳板 " + r.proxy_id : " · 直连") : ""}</small></td><td>${E(r.device_type !== "linux" ? "仅监控分析" : r.diagnostic_mode === "privileged" ? "B · 受限特权" : "A · 低权限免 Agent")}</td><td>${badge(r.enabled ? "已启用" : "已禁用")}<small>${r.device_type !== "linux" ? "SSH 不适用" : r.last_test_status ? E(labels[r.last_test_status] || r.last_test_status) : "尚未验证"}</small></td><td><div class="actions">${can("diagnostics.run") && r.enabled ? btn("diagnose-asset", "诊断", r.id, "small") + (r.device_type === "linux" ? btn("test-asset", "测试", r.id, "small") : "") : ""}${can("inventory.manage") ? btn("edit-asset", "编辑", r.id, "small") : ""}</div></td></tr>`).join(""))}${pagination("asset", "assetPage")}</section>`;
+    `<section class="panel"><div class="toolbar"><input id="asset-search" aria-label="搜索主机资产" placeholder="搜索名称、地址或 Host ID" value="${E(state.assetQuery)}"><select id="asset-type" aria-label="设备类型"><option value="all">全部设备类型</option>${["linux", "windows", "vmware", "network", "other", "unknown"].map((x) => `<option value="${x}" ${state.assetType === x ? "selected" : ""}>${labels[x]}</option>`).join("")}</select><select id="asset-group" aria-label="主机组"><option value="">全部主机组</option>${groups.map((g) => `<option value="${g.id}" ${state.assetGroup === String(g.id) ? "selected" : ""}>${E(g.name)}</option>`).join("")}</select>${btn("search-assets", "搜索")}<span class="muted small">共 ${fmt(data.total)} 台</span></div>${table(["资产 / Host ID", "设备类型", "SSH 路由", "权限模式", "状态 / 验证", "操作"], data.items.map((r) => `<tr><td><span class="cell-title">${E(r.name)}</span><small>资产 ${r.id} · Host ID ${E(r.zabbix_hostid || "未关联")}</small></td><td>${badge(r.device_type)}</td><td class="mono">${E(r.address || "未配置")}<small>${r.address ? E(r.username) + " · " + r.ssh_port + (r.proxy_id ? " · 跳板 " + r.proxy_id : " · 直连") : ""}</small></td><td>${E(r.device_type !== "linux" ? "仅监控分析" : r.diagnostic_mode === "privileged" ? "B · 受限特权" : "A · 标准免 Agent")}</td><td>${badge(r.enabled ? "已启用" : "已禁用")}<small>${r.device_type !== "linux" ? "SSH 不适用" : r.last_test_status ? E(labels[r.last_test_status] || r.last_test_status) : "尚未验证"}</small></td><td><div class="actions">${can("diagnostics.run") && r.enabled ? btn("diagnose-asset", "诊断", r.id, "small") + (r.device_type === "linux" ? btn("test-asset", "测试", r.id, "small") : "") : ""}${can("inventory.manage") ? btn("edit-asset", "编辑", r.id, "small") : ""}</div></td></tr>`).join(""))}${pagination("asset", "assetPage")}</section>`;
   return html + (await groupsPanel(groups));
 }
 async function tools() {
@@ -643,7 +643,8 @@ async function openEditor(type, id) {
       field("address", "资产内网 IP", r.address || "") +
       '<fieldset id="asset-ssh-fields" class="form-grid field wide ssh-fields"><legend>Linux SSH 诊断</legend>' +
       field("ssh_port", "SSH 端口", r.ssh_port || 22, "number") +
-      field("username", "SSH 账号", r.username || "ai-diagnostic") +
+      field("username", "SSH 账号", r.username || "ai-diagnostic", "text",
+        "支持 root 或其他已配置密钥登录的账号。") +
       field("credential_id", "凭据", r.credential_id || "", "text", "", [
         ["", "未配置"],
         ...creds.map((c) => [c.id, c.name]),
@@ -694,7 +695,7 @@ async function openEditor(type, id) {
         r.enabled === undefined || !!r.enabled,
         "checkbox",
       );
-    note = "低权限账号仍可能具有写权限；root 仅允许用于明确授权的 B 模式。";
+    note = "模式 A 支持 root，无需勾选 B 模式确认；模式 B 用于已部署强制命令网关的主机。";
   } else if (type === "credential") {
     title = id ? "轮换 SSH 密钥" : "新增 SSH 凭据";
     const c = (state.credentials || []).find((x) => x.id === Number(id));
@@ -773,7 +774,7 @@ function updateAssetFields() {
   fields.disabled = !linux;
   fields.hidden = !linux;
   $("#editor-note").textContent = linux
-    ? "低权限账号仍可能具有写权限；root 仅允许用于明确授权的 B 模式。"
+    ? "模式 A 支持 root，无需勾选 B 模式确认；模式 B 用于已部署强制命令网关的主机。"
     : "此类型使用监控分析。保存后会清除原有 SSH 凭据、跳板与诊断授权。";
 }
 document.addEventListener("click", async (event) => {

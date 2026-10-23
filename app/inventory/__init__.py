@@ -97,8 +97,6 @@ class AssetInput(BaseModel):
             "privileged",
         } or not USER_RE.fullmatch(self.username):
             raise ValueError("诊断模式或 SSH 用户名无效")
-        if self.username == "root" and self.diagnostic_mode != "privileged":
-            raise ValueError("标准免 Agent 模式禁止 root；请使用专用低权限账号")
         if self.diagnostic_mode == "privileged" and not self.privileged_approved:
             raise ValueError("特权模式必须由管理员确认目标强制命令网关已正确限制")
         if self.address:

@@ -81,13 +81,6 @@ def execute(asset_id, action, service=None, time_window=30, cancelled=lambda: Fa
         if not asset["privileged_approved"]:
             raise ValueError("特权模式尚未授权")
         command = gateway_request(action, service, time_window)
-    else:
-        if asset["username"] == "root":
-            raise ValueError("标准模式禁止 root")
-        command = (
-            "PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH; if [ \"$(id -u)\" = 0 ]; then printf 'AIOPS_UID_ZERO_DENIED\\n'; exit 78; fi; "
-            + command
-        )
     if cancelled():
         raise DiagnosticError("任务已取消")
     timeout = max(3, min(30, int(read_setting("ssh_timeout") or 15)))
@@ -173,8 +166,6 @@ def execute(asset_id, action, service=None, time_window=30, cancelled=lambda: Fa
             stderr = redact(err.decode("utf-8", "replace"), 2048)
             if code == -1:
                 raise DiagnosticError("SSH 未返回退出状态，可能连接中断或超时")
-            if "AIOPS_UID_ZERO_DENIED" in output:
-                raise DiagnosticError("标准模式目标实际 UID 为 0，已拒绝执行")
             if asset["diagnostic_mode"] == "privileged" and not output.startswith(
                 "AIOPS_GATEWAY_V1\n"
             ):

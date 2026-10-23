@@ -115,18 +115,28 @@ try:
         page.locator("#content").get_by_text("浏览器验证资产", exact=True).wait_for()
         row = page.locator("tr").filter(has_text="浏览器验证资产")
         row.locator('[data-action="edit-asset"]').click()
-        page.locator('dialog input[name="username"]').fill("root")
+        page.locator('dialog input[name="username"]').fill("bad user")
         page.locator('dialog button[type="submit"]').click()
         feedback = page.locator("#editor-feedback")
-        feedback.get_by_text("标准免 Agent 模式禁止 root").wait_for()
+        feedback.get_by_text("诊断模式或 SSH 用户名无效").wait_for()
         assert feedback.is_visible(), "保存失败的提示必须显示在弹窗内"
-        assert "标准免 Agent 模式禁止 root" not in page.locator("#toast").inner_text()
-        # Correcting the input clears the error and allows saving normally.
-        page.locator('dialog input[name="username"]').fill("ai-diagnostic")
+        assert "诊断模式或 SSH 用户名无效" not in page.locator("#toast").inner_text()
+        # A valid root account saves in standard mode without gateway approval.
+        page.locator('dialog input[name="username"]').fill("root")
         page.locator('dialog button[type="submit"]').click()
         page.locator("#editor").wait_for(state="hidden")
+        row.locator('[data-action="edit-asset"]').click()
+        assert page.locator('dialog input[name="username"]').input_value() == "root"
+        assert (
+            page.locator('dialog select[name="diagnostic_mode"]').input_value()
+            == "standard"
+        )
+        approval = page.locator('dialog input[name="privileged_approved"]')
+        assert not approval.is_checked()
+        assert page.locator("#editor-feedback").is_hidden()
+        page.locator("#close-editor").click()
         checks.append(
-            {"workflow": "asset create + inline error + corrected save", "ok": True}
+            {"workflow": "asset create + inline error + root edit", "ok": True}
         )
         # Exercise both group names in table cells and asset-editor help text.
         payload = '<img src=x onerror="window.__storedXss=1">'
