@@ -147,8 +147,11 @@ try:
         page.locator('dialog select[name="device_type"]').select_option("windows")
         assert page.locator("#asset-ssh-fields").is_hidden()
         page.locator('dialog button[type="submit"]').click()
+        page.locator("#editor").wait_for(state="hidden")
+        row.get_by_text("Windows", exact=True).wait_for()
         page.locator("#asset-group").select_option(label=payload)
         page.locator('[data-action="search-assets"]').click()
+        page.locator(".toolbar").get_by_text("共 1 台", exact=True).wait_for()
         page.locator("tr").filter(has_text="分组选择验证").wait_for()
         assert page.locator('[data-action="edit-asset"]').count() == 1
         assert page.locator('[data-action="asset-next"]').is_disabled()
