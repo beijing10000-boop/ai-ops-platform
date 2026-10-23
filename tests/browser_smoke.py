@@ -101,14 +101,19 @@ try:
         row.locator('[data-action="edit-asset"]').click()
         page.locator('dialog input[name="username"]').fill("root")
         page.locator('dialog button[type="submit"]').click()
-        page.get_by_role("status").filter(
-            has_text="标准免 Agent 模式禁止 root"
-        ).wait_for()
-        page.locator("#close-editor").click()
-        checks.append({"workflow": "asset create + rejected root edit", "ok": True})
+        feedback = page.locator("#editor-feedback")
+        feedback.get_by_text("标准免 Agent 模式禁止 root").wait_for()
+        assert feedback.is_visible(), "保存失败的提示必须显示在弹窗内"
+        assert "标准免 Agent 模式禁止 root" not in page.locator("#toast").inner_text()
+        # Correcting the input clears the error and allows saving normally.
+        page.locator('dialog input[name="username"]').fill("ai-diagnostic")
+        page.locator('dialog button[type="submit"]').click()
+        page.locator("#editor").wait_for(state="hidden")
+        checks.append({"workflow": "asset create + inline error + corrected save", "ok": True})
         # Exercise both group names in table cells and asset-editor help text.
         payload = '<img src=x onerror="window.__storedXss=1">'
         page.locator('[data-action="new-group"]').click()
+        assert page.locator("#editor-feedback").is_hidden(), "新弹窗不应显示旧错误"
         page.locator('dialog input[name="name"]').fill(payload)
         page.locator('dialog button[type="submit"]').click()
         page.get_by_text(payload, exact=True).wait_for()
