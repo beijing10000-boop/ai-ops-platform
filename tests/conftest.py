@@ -1,4 +1,5 @@
 """Configure isolated environment before importing application modules."""
+
 import os
 import tempfile
 from cryptography.fernet import Fernet

@@ -1,6 +1,10 @@
 """Additive migrations for the unified platform. Never opens a second database."""
-def migrate(db):
-    db.execute("CREATE TABLE IF NOT EXISTS platform_migrations(version INTEGER PRIMARY KEY, applied_at TEXT DEFAULT CURRENT_TIMESTAMP)")
+
+
+def _v1(db):
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS platform_migrations(version INTEGER PRIMARY KEY, applied_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+    )
     if db.execute("SELECT 1 FROM platform_migrations WHERE version=1").fetchone():
         return
     statements = [
@@ -43,7 +47,23 @@ def migrate(db):
     ]
     for statement in statements:
         db.execute(statement)
-    for name in ('actor', 'trace_id'):
-        if name not in {r[1] for r in db.execute('PRAGMA table_info(audit)')}:
-            db.execute('ALTER TABLE audit ADD COLUMN ' + name + ' TEXT')
-    db.execute('INSERT INTO platform_migrations(version) VALUES (1)')
+    for name in ("actor", "trace_id"):
+        if name not in {r[1] for r in db.execute("PRAGMA table_info(audit)")}:
+            db.execute("ALTER TABLE audit ADD COLUMN " + name + " TEXT")
+    db.execute("INSERT INTO platform_migrations(version) VALUES (1)")
+
+
+def migrate(db):
+    _v1(db)
+    if not db.execute("SELECT 1 FROM platform_migrations WHERE version=2").fetchone():
+        db.execute(
+            "ALTER TABLE assets ADD COLUMN diagnostic_paths TEXT NOT NULL DEFAULT '[]'"
+        )
+        db.execute(
+            "CREATE TABLE feishu_event_messages(message_id TEXT PRIMARY KEY,event_id TEXT NOT NULL,event_value TEXT NOT NULL,chat_id TEXT NOT NULL,kind TEXT NOT NULL)"
+        )
+        db.execute(
+            "INSERT OR IGNORE INTO feishu_event_messages SELECT message_id,event_id,'1',chat_id,'problem' FROM alert_message_links"
+        )
+        db.execute("CREATE INDEX ix_token_period ON ai_token_runs(created_at,source,model)")
+        db.execute("INSERT INTO platform_migrations(version) VALUES (2)")
