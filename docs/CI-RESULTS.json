@@ -1,0 +1,39 @@
+{
+  "verified_at": "2026-10-23",
+  "source_commit": "11ac4b70850593213f4734268171af1c12fd511b",
+  "run_url": "https://github.com/beijing10000-boop/ai-ops-platform/actions/runs/39922888133",
+  "runner": "GitHub-hosted Ubuntu",
+  "jobs": {
+    "python_3_11": {
+      "conclusion": "success",
+      "pytest_passed": 172
+    },
+    "python_3_12": {
+      "conclusion": "success",
+      "pytest_passed": 172
+    },
+    "desktop": {
+      "conclusion": "success",
+      "checks": 37,
+      "javascript_errors": 0,
+      "http_5xx": 0
+    },
+    "container": {
+      "conclusion": "success",
+      "verified": [
+        "compose config",
+        "image build",
+        "clean healthy startup",
+        "UID 10001",
+        "directory 0700 and secrets/database 0600",
+        "encrypted setting survives restart",
+        "SQLite integrity and schema version"
+      ]
+    }
+  },
+  "limitations": [
+    "No production data or credentials used",
+    "Rocky 9/10 not exercised",
+    "Actual Zabbix, Feishu and SSH targets pending acceptance"
+  ]
+}

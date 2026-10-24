@@ -1,0 +1,26 @@
+[
+  {
+    "repository": "https://github.com/beijing10000-boop/zabbix-ai-ops.git",
+    "commit": "6f5f4287a5e6dd404601f8e59c8c9fae6ba48b32"
+  },
+  {
+    "repository": "https://github.com/beijing10000-boop/linux-ai-diagnostic-mcp.git",
+    "commit": "2129cef2021b8666541c45489b3dfa62d78e00ce"
+  },
+  {
+    "repository": "https://github.com/microsoft/Sysmon-Linux.git",
+    "commit": "b2f11cc07ac9392813fdd3c7aea79a66f41268db"
+  },
+  {
+    "repository": "https://github.com/aliyun/sysom-ai.git",
+    "commit": "c735b3306aab3a4431c843c193ea49129fd47a77"
+  },
+  {
+    "repository": "https://github.com/classfang/ssh-mcp-server.git",
+    "commit": "f814a4e7205703cb1b910e48d1de5d5c37b2cc63"
+  },
+  {
+    "repository": "https://github.com/initMAX/zabbix-mcp-server.git",
+    "commit": "50f700cfa4563dd44ef54d8ebaa76b3c1c7d7002"
+  }
+]

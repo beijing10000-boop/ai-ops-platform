@@ -1,0 +1,16 @@
+.git
+.env
+.env.*
+__pycache__
+*.pyc
+.venv
+node_modules
+data
+backups
+*.key
+*.pem
+*.db
+*.sqlite*
+tests
+
+migration-input

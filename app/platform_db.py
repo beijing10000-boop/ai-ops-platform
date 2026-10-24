@@ -1,0 +1,90 @@
+"""Additive migrations for the unified platform. Never opens a second database."""
+
+
+def _v1(db):
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS platform_migrations(version INTEGER PRIMARY KEY, applied_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+    )
+    if db.execute("SELECT 1 FROM platform_migrations WHERE version=1").fetchone():
+        return
+    statements = [
+        """CREATE TABLE ssh_credentials(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+            private_key TEXT NOT NULL, passphrase TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""",
+        """CREATE TABLE ssh_proxies(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+            address TEXT NOT NULL, port INTEGER NOT NULL, username TEXT NOT NULL,
+            host_key TEXT NOT NULL, credential_id INTEGER NOT NULL REFERENCES ssh_credentials(id))""",
+        """CREATE TABLE assets(id INTEGER PRIMARY KEY, name TEXT NOT NULL, zabbix_hostid TEXT UNIQUE,
+            device_type TEXT NOT NULL DEFAULT 'unknown', address TEXT NOT NULL DEFAULT '',
+            ssh_port INTEGER NOT NULL DEFAULT 22, username TEXT NOT NULL DEFAULT 'ai-diagnostic',
+            host_key TEXT NOT NULL DEFAULT '', credential_id INTEGER REFERENCES ssh_credentials(id),
+            proxy_id INTEGER REFERENCES ssh_proxies(id), diagnostic_mode TEXT NOT NULL DEFAULT 'standard',
+            privileged_approved INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1,
+            revision INTEGER NOT NULL DEFAULT 1, last_test_status TEXT, last_test_at TEXT,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""",
+        "CREATE INDEX ix_assets_type ON assets(device_type,enabled,id)",
+        "CREATE INDEX ix_assets_name ON assets(name)",
+        "CREATE TABLE asset_groups(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, zabbix_groupid TEXT UNIQUE)",
+        "CREATE TABLE asset_group_members(asset_id INTEGER REFERENCES assets(id) ON DELETE CASCADE, group_id INTEGER REFERENCES asset_groups(id) ON DELETE CASCADE, PRIMARY KEY(asset_id,group_id))",
+        "CREATE TABLE members(open_id TEXT PRIMARY KEY, role TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1)",
+        """CREATE TABLE diagnostic_tasks(task_id TEXT PRIMARY KEY, trace_id TEXT NOT NULL UNIQUE,
+            kind TEXT NOT NULL, source TEXT NOT NULL, actor TEXT NOT NULL, event_id TEXT,
+            asset_id INTEGER REFERENCES assets(id), diagnostic_type TEXT NOT NULL, profile TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'queued', stage TEXT NOT NULL DEFAULT 'queued',
+            request TEXT NOT NULL, report TEXT, error_type TEXT, cancel_requested INTEGER NOT NULL DEFAULT 0,
+            attempt INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            started_at TEXT, completed_at TEXT, duration_ms INTEGER, token_input INTEGER,
+            token_output INTEGER, token_total INTEGER, tools INTEGER NOT NULL DEFAULT 0)""",
+        "CREATE INDEX ix_tasks_created ON diagnostic_tasks(created_at DESC,task_id)",
+        "CREATE INDEX ix_tasks_event ON diagnostic_tasks(event_id,status)",
+        "CREATE UNIQUE INDEX ix_tasks_active_event ON diagnostic_tasks(event_id) WHERE event_id IS NOT NULL AND kind='analysis' AND status IN ('queued','running')",
+        """CREATE TABLE diagnostic_evidence(id INTEGER PRIMARY KEY, task_id TEXT NOT NULL REFERENCES diagnostic_tasks(task_id),
+            trace_id TEXT NOT NULL, provider TEXT NOT NULL, tool TEXT NOT NULL, status TEXT NOT NULL,
+            collected_at TEXT DEFAULT CURRENT_TIMESTAMP, duration_ms INTEGER NOT NULL, payload TEXT NOT NULL)""",
+        "CREATE INDEX ix_evidence_task ON diagnostic_evidence(task_id,id)",
+        "CREATE TABLE migration_imports(source_hash TEXT PRIMARY KEY, imported_at TEXT DEFAULT CURRENT_TIMESTAMP, details TEXT NOT NULL)",
+        "CREATE TABLE integration_health(provider TEXT PRIMARY KEY, status TEXT NOT NULL, checked_at TEXT DEFAULT CURRENT_TIMESTAMP, detail TEXT NOT NULL)",
+    ]
+    for statement in statements:
+        db.execute(statement)
+    for name in ("actor", "trace_id"):
+        if name not in {r[1] for r in db.execute("PRAGMA table_info(audit)")}:
+            db.execute("ALTER TABLE audit ADD COLUMN " + name + " TEXT")
+    db.execute("INSERT INTO platform_migrations(version) VALUES (1)")
+
+
+def migrate(db):
+    _v1(db)
+    if not db.execute("SELECT 1 FROM platform_migrations WHERE version=2").fetchone():
+        db.execute(
+            "ALTER TABLE assets ADD COLUMN diagnostic_paths TEXT NOT NULL DEFAULT '[]'"
+        )
+        db.execute(
+            "CREATE TABLE feishu_event_messages(message_id TEXT PRIMARY KEY,event_id TEXT NOT NULL,event_value TEXT NOT NULL,chat_id TEXT NOT NULL,kind TEXT NOT NULL)"
+        )
+        db.execute(
+            "INSERT OR IGNORE INTO feishu_event_messages SELECT message_id,event_id,'1',chat_id,'problem' FROM alert_message_links"
+        )
+        db.execute(
+            "CREATE INDEX ix_token_period ON ai_token_runs(created_at,source,model)"
+        )
+        db.execute("INSERT INTO platform_migrations(version) VALUES (2)")
+    if not db.execute("SELECT 1 FROM platform_migrations WHERE version=3").fetchone():
+        db.execute(
+            """CREATE TABLE host_key_scans(
+                scan_id TEXT PRIMARY KEY, actor TEXT NOT NULL, total INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued', error TEXT NOT NULL DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP)"""
+        )
+        db.execute(
+            """CREATE TABLE host_key_scan_items(
+                scan_id TEXT NOT NULL REFERENCES host_key_scans(scan_id),
+                asset_id INTEGER NOT NULL, name TEXT NOT NULL, address TEXT NOT NULL,
+                port INTEGER NOT NULL, asset_revision INTEGER NOT NULL,
+                previous_key TEXT NOT NULL, previous_fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending', host_key TEXT NOT NULL DEFAULT '',
+                fingerprint TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+                collected_at TEXT, saved_at TEXT, PRIMARY KEY(scan_id,asset_id))"""
+        )
+        db.execute("INSERT INTO platform_migrations(version) VALUES (3)")
