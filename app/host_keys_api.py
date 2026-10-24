@@ -21,7 +21,8 @@ class Confirmation(Selection):
 
 @router.get("/targets")
 def targets(
-    q: str = Query("", max_length=160), device_type: str = "all",
+    q: str = Query("", max_length=160),
+    device_type: str = "all",
     group_id: int | None = Query(None, ge=1),
     who=Depends(require("credentials.manage")),
 ):
@@ -41,7 +42,8 @@ def create(body: Selection, who=Depends(require("credentials.manage"))):
 
 @router.get("/{scan_id}")
 def detail(
-    scan_id: str, page: int = Query(1, ge=1),
+    scan_id: str,
+    page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
     who=Depends(require("credentials.manage")),
 ):
@@ -49,9 +51,15 @@ def detail(
 
 
 @router.post("/{scan_id}/confirm")
-def confirm(scan_id: str, body: Confirmation, who=Depends(require("credentials.manage"))):
+def confirm(
+    scan_id: str, body: Confirmation, who=Depends(require("credentials.manage"))
+):
     return host_keys.confirm(
-        scan_id, body.asset_ids, who["open_id"], body.verified, body.replace_changed,
+        scan_id,
+        body.asset_ids,
+        who["open_id"],
+        body.verified,
+        body.replace_changed,
     )
 
 

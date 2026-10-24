@@ -29,6 +29,8 @@ curl -f http://127.0.0.1:8088/healthz
 
 私有仓库需使用你自己的 GitHub 授权，不把访问 Token 写入脚本。Compose 项目名 `ai-ops-platform`，数据卷 `appdata` 和 `redisdata` 独立于两个旧项目；同机测试用 `WEB_PORT=8089`。默认绑定 127.0.0.1，Redis 不发布宿主机端口。命名数据卷首次创建由镜像准备 UID 10001 写权限；如果改成 bind mount，需自行设置目录所有权与 SELinux 标签，不能直接复用旧路径。
 
+批量获取主机公钥依赖默认启动的 `host-key-worker`，更新已有测试实例后使用 `docker compose up -d --build` 创建此服务。获取操作与核验步骤见 [Linux 诊断](LINUX-DIAGNOSTICS.md#批量获取-ssh-主机公钥)。
+
 ## 访问和初始化
 
 - 本机访问 `http://127.0.0.1:8088/setup`。远程先用 SSH 隧道访问初始化页面：`ssh -L 8088:127.0.0.1:8088 user@server`。
@@ -53,7 +55,7 @@ docker compose logs --since=5m feishu-receiver qa-worker alert-worker
 ## 运行与备份
 
 ```bash
-docker compose logs --tail=100 web diagnostic-worker
+docker compose logs --tail=100 web diagnostic-worker host-key-worker
 docker compose exec web python -m app.migrate backup --source /app/data/app.sqlite3 --destination /app/data/manual-snapshot.bak
 docker compose cp web:/app/data/manual-snapshot.bak ./manual-snapshot.bak
 ```

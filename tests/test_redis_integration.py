@@ -130,7 +130,9 @@ def test_real_context_keeps_exact_reply_branch_and_chat_isolation(real_redis):
     assert not ctx.is_pending("oc_one", "om_working")
 
 
-def test_real_host_key_queue_is_separate_and_does_not_trust_candidates(real_redis, monkeypatch):
+def test_real_host_key_queue_is_separate_and_does_not_trust_candidates(
+    real_redis, monkeypatch
+):
     import paramiko
     from app.inventory import host_keys
 
@@ -139,7 +141,9 @@ def test_real_host_key_queue_is_separate_and_does_not_trust_candidates(real_redi
     public = key.get_name() + " " + key.get_base64()
     monkeypatch.setattr(host_keys, "fetch_key", lambda _: public)
     asset = inventory.save_asset(
-        inventory.AssetInput(name="key-probe", device_type="linux", address="10.0.0.10"),
+        inventory.AssetInput(
+            name="key-probe", device_type="linux", address="10.0.0.10"
+        ),
         "legacy-admin",
     )
     scan_id = host_keys.create([asset["id"]], "legacy-admin")["scan_id"]

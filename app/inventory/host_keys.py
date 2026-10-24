@@ -23,16 +23,25 @@ def targets(query="", device_type="all", group_id=None):
     if device_type not in ("all", "linux"):
         return []
     if query:
-        clauses.append("(instr(lower(name),lower(?))>0 OR instr(address,?)>0 OR zabbix_hostid=?)")
+        clauses.append(
+            "(instr(lower(name),lower(?))>0 OR instr(address,?)>0 OR zabbix_hostid=?)"
+        )
         args.extend((query, query, query))
     if group_id:
-        clauses.append("id IN (SELECT asset_id FROM asset_group_members WHERE group_id=?)")
+        clauses.append(
+            "id IN (SELECT asset_id FROM asset_group_members WHERE group_id=?)"
+        )
         args.append(group_id)
     with connection() as db:
-        ids = [r[0] for r in db.execute(
-            "SELECT id FROM assets WHERE " + " AND ".join(clauses)
-            + " ORDER BY id DESC LIMIT ?", (*args, MAX_BATCH + 1),
-        )]
+        ids = [
+            r[0]
+            for r in db.execute(
+                "SELECT id FROM assets WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY id DESC LIMIT ?",
+                (*args, MAX_BATCH + 1),
+            )
+        ]
     if len(ids) > MAX_BATCH:
         raise HTTPException(422, "匹配超过 1000 台，请按主机组或名称分批选择")
     return ids
@@ -41,10 +50,14 @@ def targets(query="", device_type="all", group_id=None):
 def enqueue(scan_id, total):
     Queue(
         "ai-host-keys",
-        connection=Redis.from_url(REDIS_URL, socket_connect_timeout=2, socket_timeout=3),
+        connection=Redis.from_url(
+            REDIS_URL, socket_connect_timeout=2, socket_timeout=3
+        ),
     ).enqueue(
-        "app.inventory.host_keys.collect", scan_id,
-        job_id="host-keys-" + scan_id, job_timeout=max(300, total * 20),
+        "app.inventory.host_keys.collect",
+        scan_id,
+        job_id="host-keys-" + scan_id,
+        job_timeout=max(300, total * 20),
         result_ttl=86400,
     )
 
@@ -60,18 +73,32 @@ def create(asset_ids, actor):
         for ident in ids:
             cur = db.execute("SELECT * FROM assets WHERE id=?", (ident,))
             asset = row_dict(cur.fetchone(), cur)
-            if not asset or not asset["enabled"] or asset["device_type"] != "linux" or not asset["address"]:
-                raise HTTPException(422, f"资产 {ident} 需要是已启用且已配置内网 IP 的 Linux 主机")
+            if (
+                not asset
+                or not asset["enabled"]
+                or asset["device_type"] != "linux"
+                or not asset["address"]
+            ):
+                raise HTTPException(
+                    422, f"资产 {ident} 需要是已启用且已配置内网 IP 的 Linux 主机"
+                )
             try:
                 address(asset["address"])
                 previous_fingerprint = fingerprint(asset["host_key"])
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from None
-            rows.append((
-                scan_id, ident, asset["name"], asset["address"], asset["ssh_port"],
-                asset["revision"], asset["host_key"],
-                previous_fingerprint,
-            ))
+            rows.append(
+                (
+                    scan_id,
+                    ident,
+                    asset["name"],
+                    asset["address"],
+                    asset["ssh_port"],
+                    asset["revision"],
+                    asset["host_key"],
+                    previous_fingerprint,
+                )
+            )
         db.execute(
             "INSERT INTO host_key_scans(scan_id,actor,total) VALUES (?,?,?)",
             (scan_id, actor, len(rows)),
@@ -106,7 +133,11 @@ def _collect_one(scan_id, item, actor):
         if not permits(actor, "credentials.manage"):
             raise ValueError("提交者的凭据管理权限已撤销")
         asset = get_asset(item["asset_id"])
-        if not asset or asset["revision"] != item["asset_revision"] or not asset["enabled"]:
+        if (
+            not asset
+            or asset["revision"] != item["asset_revision"]
+            or not asset["enabled"]
+        ):
             raise ValueError("资产配置已变更，请重新获取")
         candidate = fetch_key(asset)
         current = get_asset(item["asset_id"])
@@ -114,8 +145,11 @@ def _collect_one(scan_id, item, actor):
             raise ValueError("获取期间资产配置已变更，请重新获取")
         candidate = host_key(candidate)
         status = (
-            "unchanged" if candidate == item["previous_key"]
-            else "changed" if item["previous_key"] else "new"
+            "unchanged"
+            if candidate == item["previous_key"]
+            else "changed"
+            if item["previous_key"]
+            else "new"
         )
     except Exception as exc:
         candidate = ""
@@ -123,7 +157,15 @@ def _collect_one(scan_id, item, actor):
     with connection() as db:
         db.execute(
             "UPDATE host_key_scan_items SET status=?,host_key=?,fingerprint=?,error=?,collected_at=CURRENT_TIMESTAMP WHERE scan_id=? AND asset_id=? AND status='pending' AND EXISTS(SELECT 1 FROM host_key_scans WHERE scan_id=? AND status='running')",
-            (status, candidate, fingerprint(candidate), error, scan_id, item["asset_id"], scan_id),
+            (
+                status,
+                candidate,
+                fingerprint(candidate),
+                error,
+                scan_id,
+                item["asset_id"],
+                scan_id,
+            ),
         )
         db.execute(
             "UPDATE host_key_scans SET updated_at=CURRENT_TIMESTAMP WHERE scan_id=? AND status='running'",
@@ -160,7 +202,9 @@ def collect(scan_id):
 
 def recent():
     with connection() as db:
-        cur = db.execute("SELECT * FROM host_key_scans ORDER BY created_at DESC,rowid DESC LIMIT 10")
+        cur = db.execute(
+            "SELECT * FROM host_key_scans ORDER BY created_at DESC,rowid DESC LIMIT 10"
+        )
         return [row_dict(row, cur) for row in cur.fetchall()]
 
 
@@ -189,16 +233,26 @@ def detail(scan_id, page=1, page_size=50):
             (scan_id, page_size, (page - 1) * page_size),
         )
         scan["items"] = [row_dict(row, cur) for row in cur.fetchall()]
-        scan["counts"] = dict(db.execute(
-            "SELECT status,COUNT(*) FROM host_key_scan_items WHERE scan_id=? GROUP BY status",
-            (scan_id,),
-        ))
-        scan["new_ids"] = [r[0] for r in db.execute(
-            "SELECT asset_id FROM host_key_scan_items WHERE scan_id=? AND status='new'", (scan_id,),
-        )]
-        scan["changed_ids"] = [r[0] for r in db.execute(
-            "SELECT asset_id FROM host_key_scan_items WHERE scan_id=? AND status='changed'", (scan_id,),
-        )]
+        scan["counts"] = dict(
+            db.execute(
+                "SELECT status,COUNT(*) FROM host_key_scan_items WHERE scan_id=? GROUP BY status",
+                (scan_id,),
+            )
+        )
+        scan["new_ids"] = [
+            r[0]
+            for r in db.execute(
+                "SELECT asset_id FROM host_key_scan_items WHERE scan_id=? AND status='new'",
+                (scan_id,),
+            )
+        ]
+        scan["changed_ids"] = [
+            r[0]
+            for r in db.execute(
+                "SELECT asset_id FROM host_key_scan_items WHERE scan_id=? AND status='changed'",
+                (scan_id,),
+            )
+        ]
         scan["page"], scan["page_size"] = page, page_size
         return scan
 
@@ -208,10 +262,13 @@ def retry(scan_id, actor):
     if scan["status"] not in ("completed", "failed"):
         raise HTTPException(409, "获取尚未结束，请等待")
     with connection() as db:
-        ids = [r[0] for r in db.execute(
-            "SELECT asset_id FROM host_key_scan_items WHERE scan_id=? AND status='failed'",
-            (scan_id,),
-        )]
+        ids = [
+            r[0]
+            for r in db.execute(
+                "SELECT asset_id FROM host_key_scan_items WHERE scan_id=? AND status='failed'",
+                (scan_id,),
+            )
+        ]
     if not ids:
         raise HTTPException(409, "没有失败主机需要重试")
     return create(ids, actor)
@@ -226,7 +283,9 @@ def confirm(scan_id, asset_ids, actor, verified, replace_changed=False):
     saved = 0
     with connection() as db:
         db.execute("BEGIN IMMEDIATE")
-        scan = db.execute("SELECT status FROM host_key_scans WHERE scan_id=?", (scan_id,)).fetchone()
+        scan = db.execute(
+            "SELECT status FROM host_key_scans WHERE scan_id=?", (scan_id,)
+        ).fetchone()
         if not scan:
             raise HTTPException(404, "获取批次不存在")
         if scan[0] not in ("completed", "failed"):
@@ -241,10 +300,21 @@ def confirm(scan_id, asset_ids, actor, verified, replace_changed=False):
             asset = row_dict(cur.fetchone(), cur)
             if not item or item["status"] not in ("new", "changed", "saved"):
                 raise HTTPException(409, f"资产 {ident} 没有可确认的候选公钥")
-            if item["status"] == "saved" and asset and asset["host_key"] == item["host_key"]:
+            if (
+                item["status"] == "saved"
+                and asset
+                and asset["host_key"] == item["host_key"]
+            ):
                 continue
-            if not asset or not asset["enabled"] or asset["device_type"] != "linux" or asset["revision"] != item["asset_revision"]:
-                raise HTTPException(409, f"资产 {ident} 配置已变更，请重新获取；所选公钥均未保存")
+            if (
+                not asset
+                or not asset["enabled"]
+                or asset["device_type"] != "linux"
+                or asset["revision"] != item["asset_revision"]
+            ):
+                raise HTTPException(
+                    409, f"资产 {ident} 配置已变更，请重新获取；所选公钥均未保存"
+                )
             if item["status"] == "changed" and not replace_changed:
                 raise HTTPException(409, f"资产 {ident} 公钥有变化，需要明确确认替换")
             candidate = host_key(item["host_key"])

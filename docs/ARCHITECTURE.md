@@ -8,6 +8,7 @@
 | alert-worker | ai-alerts 队列、原始通知、自动和卡片手动分析、恢复关联 |
 | qa-worker | ai-questions 队列、飞书直接回复链、进度卡片更新 |
 | diagnostic-worker | ai-diagnostics 队列、手动诊断与真实 SSH 连接测试 |
+| host-key-worker | ai-host-keys 队列、批量 SSH 握手获取候选公钥；不自动信任 |
 | feishu-receiver | 可选 profile，飞书长连接，入队与卡片回调 |
 | redis | 队列、消息和事件去重、临时上下文与进行中标志 |
 | 外部 initMAX MCP | 已部署的 Zabbix API 协议服务，不并入本平台进程 |
@@ -53,6 +54,6 @@ flowchart TD
 
 ## 接口边界
 
-`/api/v1/platform/*` 包含资产/组/凭据/跳板、任务、报告、工具、成员和审计。旧 `/zabbix`、`/api/v1/ask`、OAuth 和设置接口保留。只在显式启用旧 API Token 时接受 legacy-admin，正常页面使用服务器端会话和 CSRF。
+`/api/v1/platform/*` 包含资产/组/凭据/跳板、任务、报告、工具、成员和审计。`/api/v1/platform/host-keys` 提供批量获取、进度、失败重试及显式确认；候选公钥存在独立表，确认事务核对资产修订号后才写入可信公钥。旧 `/zabbix`、`/api/v1/ask`、OAuth 和设置接口保留。只在显式启用旧 API Token 时接受 legacy-admin，正常页面使用服务器端会话和 CSRF。
 
 可选 `python -m app.mcp_server` 提供受信任本地 stdio MCP；只允许登记资产和固定剧本，无公开 HTTP MCP、无自由 Shell。运行它的本地用户拥有该服务的诊断权限，应像保护 worker 主机一样保护调用环境。

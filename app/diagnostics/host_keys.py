@@ -44,31 +44,47 @@ def fetch_key(asset):
                 raise ValueError("请先核验并登记跳板主机公钥")
             jump = paramiko.SSHClient()
             _connect(
-                jump, proxy["address"], proxy["port"], proxy["username"],
-                proxy["host_key"], inventory.credential_key(proxy["credential_id"]),
+                jump,
+                proxy["address"],
+                proxy["port"],
+                proxy["username"],
+                proxy["host_key"],
+                inventory.credential_key(proxy["credential_id"]),
             )
             stream = jump.get_transport().open_channel(
-                "direct-tcpip", (destination, asset["ssh_port"]), ("127.0.0.1", 0),
+                "direct-tcpip",
+                (destination, asset["ssh_port"]),
+                ("127.0.0.1", 0),
                 timeout=5,
             )
         else:
-            stream = socket.create_connection((destination, asset["ssh_port"]), timeout=5)
+            stream = socket.create_connection(
+                (destination, asset["ssh_port"]), timeout=5
+            )
         if expired.is_set():
             raise TimeoutError("获取 SSH 主机公钥超时")
         transport = paramiko.Transport(stream)
         options = transport.get_security_options()
         supported = (
-            "ssh-ed25519", "ecdsa-sha2-nistp256",
-            "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa",
+            "ssh-ed25519",
+            "ecdsa-sha2-nistp256",
+            "rsa-sha2-512",
+            "rsa-sha2-256",
+            "ssh-rsa",
         )
         preferred = (asset["host_key"].split() or [""])[0]
-        options.key_types = tuple(sorted(
-            (name for name in supported if name in options.key_types),
-            key=lambda name: not (
-                name == preferred
-                or preferred == "ssh-rsa" and name.startswith("rsa-sha2-")
-            ),
-        ))
+        options.key_types = tuple(
+            sorted(
+                (name for name in supported if name in options.key_types),
+                key=lambda name: (
+                    not (
+                        name == preferred
+                        or preferred == "ssh-rsa"
+                        and name.startswith("rsa-sha2-")
+                    )
+                ),
+            )
+        )
         transport.start_client(timeout=5)
         if expired.is_set():
             raise TimeoutError("获取 SSH 主机公钥超时")

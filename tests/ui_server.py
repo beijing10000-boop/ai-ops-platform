@@ -31,7 +31,10 @@ for index in range(28):
     tasks.finish(previous["task_id"], {"answer": "分页验证记录"})
 asset = inventory.save_asset(
     inventory.AssetInput(
-        name="UI 测试 · Linux 资产", device_type="linux", zabbix_hostid="10001", address="10.20.0.10"
+        name="UI 测试 · Linux 资产",
+        device_type="linux",
+        zabbix_hostid="10001",
+        address="10.20.0.10",
     ),
     "ui-test",
 )
@@ -82,11 +85,17 @@ qa_keys = [paramiko.RSAKey.generate(2048) for _ in range(2)]
 qa_public = [key.get_name() + " " + key.get_base64() for key in qa_keys]
 inventory.save_asset(
     inventory.AssetInput(
-        name="公钥变化样本", device_type="linux", address="10.20.0.11", host_key=qa_public[0]
-    ), "ui-test",
+        name="公钥变化样本",
+        device_type="linux",
+        address="10.20.0.11",
+        host_key=qa_public[0],
+    ),
+    "ui-test",
 )
 qa_failed = inventory.save_asset(
-    inventory.AssetInput(name="获取失败样本", device_type="linux", address="10.20.0.12"),
+    inventory.AssetInput(
+        name="获取失败样本", device_type="linux", address="10.20.0.12"
+    ),
     "ui-test",
 )
 qa_attempts = {}

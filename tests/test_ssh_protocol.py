@@ -7,6 +7,7 @@ import select
 import subprocess
 import threading
 import time
+from contextlib import suppress
 
 import paramiko
 import pytest
@@ -260,11 +261,22 @@ def test_fetch_through_real_pinned_ssh_jump_without_target_auth(target, mismatch
     with main.connection() as db:
         proxy_id = db.execute(
             "INSERT INTO ssh_proxies(name,address,port,username,host_key,credential_id) VALUES (?,?,?,?,?,?)",
-            ("fixture jump", "127.0.0.1", listener.getsockname()[1], "diag-proxy",
-             configured.get_name() + " " + configured.get_base64(), asset["credential_id"]),
+            (
+                "fixture jump",
+                "127.0.0.1",
+                listener.getsockname()[1],
+                "diag-proxy",
+                configured.get_name() + " " + configured.get_base64(),
+                asset["credential_id"],
+            ),
         ).lastrowid
     try:
-        candidate = {**asset, "proxy_id": proxy_id, "host_key": "", "credential_id": None}
+        candidate = {
+            **asset,
+            "proxy_id": proxy_id,
+            "host_key": "",
+            "credential_id": None,
+        }
         if mismatch:
             with pytest.raises(ValueError, match="跳板主机公钥不匹配"):
                 fetch_key(candidate)
@@ -277,7 +289,9 @@ def test_fetch_through_real_pinned_ssh_jump_without_target_auth(target, mismatch
     finally:
         stop.set()
         for resource in reversed(resources):
-            resource.close()
+            # The probe has already closed its transport after reading the key.
+            with suppress(EOFError, OSError):
+                resource.close()
         thread.join(3)
 
 

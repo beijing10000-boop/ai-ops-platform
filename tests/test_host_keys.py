@@ -80,8 +80,11 @@ def test_read_and_write_require_credential_permission(role):
 def test_csrf_and_payload_validation():
     client = client_for()
     for body in (
-        {"asset_ids": []}, {"asset_ids": [0]}, {"asset_ids": [True]},
-        {"asset_ids": ["1"]}, {"asset_ids": list(range(1, 1002))},
+        {"asset_ids": []},
+        {"asset_ids": [0]},
+        {"asset_ids": [True]},
+        {"asset_ids": ["1"]},
+        {"asset_ids": list(range(1, 1002))},
         {"asset_ids": [1], "address": "10.0.0.1"},
     ):
         assert client.post(API, json=body).status_code == 422
@@ -95,8 +98,15 @@ def test_invalid_selection_rolls_back_and_never_enqueues(monkeypatch):
     calls = []
     monkeypatch.setattr(host_keys, "enqueue", lambda *args: calls.append(args))
     client = client_for()
-    for ident in (bad["id"], 9999, asset("off", enabled=False)["id"], asset("no IP", address="")["id"]):
-        assert client.post(API, json={"asset_ids": [good["id"], ident]}).status_code == 422
+    for ident in (
+        bad["id"],
+        9999,
+        asset("off", enabled=False)["id"],
+        asset("no IP", address="")["id"],
+    ):
+        assert (
+            client.post(API, json={"asset_ids": [good["id"], ident]}).status_code == 422
+        )
     # Validate again at use time, including a corrupt legacy address.
     with main.connection() as db:
         db.execute("UPDATE assets SET address='8.8.8.8' WHERE id=?", (good["id"],))
@@ -114,7 +124,8 @@ def test_filter_selects_all_1000_targets_across_pages_and_respects_group():
             [("fleet-" + str(i),) for i in range(1000)],
         )
         db.executemany(
-            "INSERT INTO asset_group_members VALUES (?,1)", [(i,) for i in range(1, 501)]
+            "INSERT INTO asset_group_members VALUES (?,1)",
+            [(i,) for i in range(1, 501)],
         )
     client = client_for()
     result = client.get(API + "/targets").json()
@@ -131,15 +142,19 @@ def test_filter_selects_all_1000_targets_across_pages_and_respects_group():
     assert client.get(API + "/" + scan["scan_id"] + "?page=0").status_code == 422
 
 
-def test_discovery_classifies_without_trusting_and_confirmation_is_explicit(monkeypatch, keys):
+def test_discovery_classifies_without_trusting_and_confirmation_is_explicit(
+    monkeypatch, keys
+):
     fresh = asset("fresh")
     changed = asset("changed", host_key=keys[0])
     unchanged = asset("unchanged", host_key=keys[1])
     failed = asset("unreachable")
+
     def probe(row):
         if row["id"] == failed["id"]:
             raise ValueError("SSH handshake unavailable")
         return keys[1]
+
     monkeypatch.setattr(host_keys, "fetch_key", probe)
     client = client_for("ops_admin")
     ids = [row["id"] for row in (fresh, changed, unchanged, failed)]
@@ -157,25 +172,47 @@ def test_discovery_classifies_without_trusting_and_confirmation_is_explicit(monk
     assert inventory.get_asset(fresh["id"])["host_key"] == ""
     assert inventory.get_asset(changed["id"])["host_key"] == keys[0]
     endpoint = API + "/" + scan_id + "/confirm"
-    assert client.post(endpoint, json={"asset_ids": ids[:2], "verified": False}).status_code == 422
-    assert client.post(endpoint, json={"asset_ids": ids[:2], "verified": "true"}).status_code == 422
-    assert client.post(endpoint, json={"asset_ids": ids[:2], "verified": True}).status_code == 409
+    assert (
+        client.post(
+            endpoint, json={"asset_ids": ids[:2], "verified": False}
+        ).status_code
+        == 422
+    )
+    assert (
+        client.post(
+            endpoint, json={"asset_ids": ids[:2], "verified": "true"}
+        ).status_code
+        == 422
+    )
+    assert (
+        client.post(endpoint, json={"asset_ids": ids[:2], "verified": True}).status_code
+        == 409
+    )
     assert inventory.get_asset(fresh["id"])["host_key"] == ""
     with main.connection() as db:
-        db.execute("UPDATE assets SET last_test_status='success',last_test_at=CURRENT_TIMESTAMP")
-    result = client.post(endpoint, json={
-        "asset_ids": ids[:2], "verified": True, "replace_changed": True
-    })
+        db.execute(
+            "UPDATE assets SET last_test_status='success',last_test_at=CURRENT_TIMESTAMP"
+        )
+    result = client.post(
+        endpoint, json={"asset_ids": ids[:2], "verified": True, "replace_changed": True}
+    )
     assert result.status_code == 200 and result.json()["saved"] == 2
     for row in (fresh, changed):
         stored = inventory.get_asset(row["id"])
-        assert stored["host_key"] == keys[1] and stored["revision"] == row["revision"] + 1
+        assert (
+            stored["host_key"] == keys[1] and stored["revision"] == row["revision"] + 1
+        )
         assert stored["last_test_status"] is None and stored["last_test_at"] is None
-    assert client.post(endpoint, json={
-        "asset_ids": ids[:2], "verified": True
-    }).json()["already_saved"] == 2
+    assert (
+        client.post(endpoint, json={"asset_ids": ids[:2], "verified": True}).json()[
+            "already_saved"
+        ]
+        == 2
+    )
     with main.connection() as db:
-        rows = db.execute("SELECT actor,trace_id FROM audit WHERE action='host_key_confirmed'").fetchall()
+        rows = db.execute(
+            "SELECT actor,trace_id FROM audit WHERE action='host_key_confirmed'"
+        ).fetchall()
     assert rows == [("ou_ops_admin", scan_id)] * 2
 
 
@@ -185,7 +222,8 @@ def test_stale_confirmation_rolls_back_all_selected_keys(monkeypatch, keys):
     scan_id = collect(ids, monkeypatch, keys[0])
     inventory.save_asset(
         inventory.AssetInput(name="edited", device_type="linux", address="10.0.0.11"),
-        "ou_keys", second["id"],
+        "ou_keys",
+        second["id"],
     )
     with pytest.raises(HTTPException) as error:
         host_keys.confirm(scan_id, ids, "ou_keys", True)
@@ -193,17 +231,27 @@ def test_stale_confirmation_rolls_back_all_selected_keys(monkeypatch, keys):
     assert inventory.get_asset(first["id"])["host_key"] == ""
     assert host_keys.detail(scan_id)["counts"] == {"new": 2}
     with main.connection() as db:
-        assert db.execute("SELECT COUNT(*) FROM audit WHERE action='host_key_confirmed'").fetchone()[0] == 0
+        assert (
+            db.execute(
+                "SELECT COUNT(*) FROM audit WHERE action='host_key_confirmed'"
+            ).fetchone()[0]
+            == 0
+        )
 
 
 def test_configuration_change_during_probe_discards_candidate(monkeypatch, keys):
     row = asset()
+
     def probe(_):
         inventory.save_asset(
-            inventory.AssetInput(name="edited", device_type="linux", address="10.0.0.12"),
-            "ou_keys", row["id"],
+            inventory.AssetInput(
+                name="edited", device_type="linux", address="10.0.0.12"
+            ),
+            "ou_keys",
+            row["id"],
         )
         return keys[0]
+
     monkeypatch.setattr(host_keys, "fetch_key", probe)
     scan_id = host_keys.create([row["id"]], "ou_keys")["scan_id"]
     host_keys.collect(scan_id)
@@ -226,8 +274,10 @@ def test_permission_revoked_before_worker_prevents_network(monkeypatch):
 
 def test_queue_failure_is_visible_and_retry_only_selects_failed(monkeypatch, keys):
     first, second = asset("first"), asset("second")
+
     def broken(*_):
         raise ConnectionError("Redis unavailable")
+
     monkeypatch.setattr(host_keys, "enqueue", broken)
     scan_id = host_keys.create([first["id"], second["id"]], "ou_keys")["scan_id"]
     result = host_keys.detail(scan_id)
@@ -235,10 +285,12 @@ def test_queue_failure_is_visible_and_retry_only_selects_failed(monkeypatch, key
     assert "host-key-worker" in result["error"]
     monkeypatch.setattr(host_keys, "enqueue", lambda *_: None)
     retry = host_keys.retry(scan_id, "ou_keys")["scan_id"]
+
     def probe(row):
         if row["id"] == second["id"]:
             raise ValueError("unreachable")
         return keys[0]
+
     monkeypatch.setattr(host_keys, "fetch_key", probe)
     host_keys.collect(retry)
     final = host_keys.retry(retry, "ou_keys")["scan_id"]
@@ -246,7 +298,9 @@ def test_queue_failure_is_visible_and_retry_only_selects_failed(monkeypatch, key
     assert inventory.get_asset(first["id"])["host_key"] == ""
 
 
-def test_stale_worker_can_recover_without_overwriting_completed_candidates(monkeypatch, keys):
+def test_stale_worker_can_recover_without_overwriting_completed_candidates(
+    monkeypatch, keys
+):
     first, second = asset("first"), asset("second")
     scan_id = host_keys.create([first["id"], second["id"]], "ou_keys")["scan_id"]
     with main.connection() as db:
@@ -259,15 +313,19 @@ def test_stale_worker_can_recover_without_overwriting_completed_candidates(monke
     result = host_keys.detail(scan_id)
     assert result["status"] == "failed" and result["counts"] == {"new": 1, "failed": 1}
     assert host_keys.confirm(scan_id, [first["id"]], "ou_keys", True)["saved"] == 1
-    assert host_keys.detail(host_keys.retry(scan_id, "ou_keys")["scan_id"])["total"] == 1
+    assert (
+        host_keys.detail(host_keys.retry(scan_id, "ou_keys")["scan_id"])["total"] == 1
+    )
 
 
 def test_duplicate_worker_does_not_repeat_network(monkeypatch, keys):
     row = asset()
     calls = []
+
     def probe(r):
         calls.append(r["id"])
         return keys[0]
+
     monkeypatch.setattr(host_keys, "fetch_key", probe)
     scan_id = host_keys.create([row["id"], row["id"]], "ou_keys")["scan_id"]
     host_keys.collect(scan_id)
@@ -284,6 +342,9 @@ def test_migration_from_v2_preserves_assets_and_is_idempotent():
         db.execute("DELETE FROM platform_migrations WHERE version=3")
     for _ in range(2):
         with main.connection() as db:
-            assert db.execute("SELECT MAX(version) FROM platform_migrations").fetchone()[0] == 3
+            assert (
+                db.execute("SELECT MAX(version) FROM platform_migrations").fetchone()[0]
+                == 3
+            )
             assert db.execute("SELECT COUNT(*) FROM host_key_scans").fetchone()[0] == 0
     assert inventory.get_asset(row["id"])["username"] == "root"
