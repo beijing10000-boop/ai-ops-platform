@@ -26,7 +26,7 @@ else:
         assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert (
             db.execute("SELECT MAX(version) FROM platform_migrations").fetchone()[0]
-            == 2
+            == 3
         )
         db.execute("DELETE FROM settings WHERE key=?", (key,))
     print(

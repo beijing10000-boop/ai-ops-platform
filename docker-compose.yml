@@ -57,6 +57,9 @@ services:
   diagnostic-worker:
     <<: *worker
     command: [python, -m, app.diagnostic_worker]
+  host-key-worker:
+    <<: *worker
+    command: [python, -m, app.host_key_worker]
   feishu-receiver:
     <<: *worker
     profiles: [feishu]

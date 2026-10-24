@@ -833,3 +833,19 @@ code {
 .ssh-fields[hidden] {
   display: none;
 }
+
+.batch-bar {
+  padding: 12px;
+  background: var(--fill);
+  border-radius: 10px;
+}
+.hostkey-fingerprint {
+  max-width: 300px;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.hostkey-fingerprint pre {
+  max-width: 300px;
+  font-size: 10px;
+}

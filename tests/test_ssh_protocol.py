@@ -3,6 +3,7 @@
 import io
 import ipaddress
 import socket
+import select
 import subprocess
 import threading
 import time
@@ -18,12 +19,14 @@ class FixtureSSH(paramiko.ServerInterface):
         self.key = key
         self.username = username
         self.command = None
+        self.auth_attempts = 0
         self.ready = threading.Event()
 
     def get_allowed_auths(self, username):
         return "publickey"
 
     def check_auth_publickey(self, username, key):
+        self.auth_attempts += 1
         return (
             paramiko.AUTH_SUCCESSFUL
             if username == self.username and key == self.key
@@ -195,3 +198,116 @@ def test_standard_ssh_accepts_root_and_uid_zero(target):
         check=True,
     )
     assert completed.stdout.splitlines()[:2] == ["AIOPS_SSH_OK", "0"]
+
+
+def test_fetch_real_host_key_without_target_authentication(target):
+    from app.diagnostics.host_keys import fetch_key
+
+    asset, server, _ = target
+    expected = asset["host_key"]
+    fetched = fetch_key({**asset, "host_key": "", "credential_id": None})
+    assert fetched == expected
+    assert inventory.fingerprint(fetched).startswith("SHA256:")
+    assert server.auth_attempts == 0 and server.command is None
+
+
+@pytest.mark.parametrize("mismatch", [False, True])
+def test_fetch_through_real_pinned_ssh_jump_without_target_auth(target, mismatch):
+    from app.diagnostics.host_keys import fetch_key
+
+    asset, target_server, _ = target
+    jump_key = paramiko.RSAKey.generate(2048)
+    configured = paramiko.RSAKey.generate(2048) if mismatch else jump_key
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    listener.settimeout(3)
+    stop = threading.Event()
+    resources = [listener]
+    forwarded = []
+
+    class JumpSSH(FixtureSSH):
+        def check_channel_direct_tcpip_request(self, chanid, origin, destination):
+            forwarded.append(destination)
+            return paramiko.OPEN_SUCCEEDED
+
+    jump_server = JumpSSH(target_server.key, "diag-proxy")
+
+    def serve():
+        try:
+            sock, _ = listener.accept()
+            transport = paramiko.Transport(sock)
+            resources.append(transport)
+            transport.add_server_key(jump_key)
+            transport.start_server(server=jump_server)
+            channel = transport.accept(3)
+            if channel is None:
+                return
+            upstream = socket.create_connection(forwarded[0], timeout=3)
+            resources.extend([channel, upstream])
+            while not stop.is_set():
+                ready, _, _ = select.select([channel, upstream], [], [], 0.1)
+                for source in ready:
+                    data = source.recv(32768)
+                    if not data:
+                        return
+                    (upstream if source is channel else channel).sendall(data)
+        except (paramiko.SSHException, EOFError, OSError, ValueError):
+            pass
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    with main.connection() as db:
+        proxy_id = db.execute(
+            "INSERT INTO ssh_proxies(name,address,port,username,host_key,credential_id) VALUES (?,?,?,?,?,?)",
+            ("fixture jump", "127.0.0.1", listener.getsockname()[1], "diag-proxy",
+             configured.get_name() + " " + configured.get_base64(), asset["credential_id"]),
+        ).lastrowid
+    try:
+        candidate = {**asset, "proxy_id": proxy_id, "host_key": "", "credential_id": None}
+        if mismatch:
+            with pytest.raises(ValueError, match="跳板主机公钥不匹配"):
+                fetch_key(candidate)
+            assert forwarded == [] and jump_server.auth_attempts == 0
+        else:
+            assert fetch_key(candidate) == asset["host_key"]
+            assert forwarded == [(asset["address"], asset["ssh_port"])]
+            assert jump_server.auth_attempts > 0
+        assert target_server.auth_attempts == 0 and target_server.command is None
+    finally:
+        stop.set()
+        for resource in reversed(resources):
+            resource.close()
+        thread.join(3)
+
+
+def test_host_key_probe_deadline_closes_unresponsive_handshake(target, monkeypatch):
+    from app.diagnostics import host_keys
+
+    asset, _, _ = target
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    listener.settimeout(2)
+    stop = threading.Event()
+
+    def silent():
+        try:
+            sock, _ = listener.accept()
+            with sock:
+                stop.wait(2)
+        except OSError:
+            pass
+
+    thread = threading.Thread(target=silent, daemon=True)
+    thread.start()
+    monkeypatch.setattr(host_keys, "PROBE_SECONDS", 0.2)
+    began = time.monotonic()
+    try:
+        with pytest.raises(ValueError, match="超时"):
+            host_keys.fetch_key({**asset, "ssh_port": listener.getsockname()[1]})
+        assert time.monotonic() - began < 2
+    finally:
+        stop.set()
+        listener.close()
+        thread.join(2)

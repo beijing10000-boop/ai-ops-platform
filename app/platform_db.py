@@ -69,3 +69,22 @@ def migrate(db):
             "CREATE INDEX ix_token_period ON ai_token_runs(created_at,source,model)"
         )
         db.execute("INSERT INTO platform_migrations(version) VALUES (2)")
+    if not db.execute("SELECT 1 FROM platform_migrations WHERE version=3").fetchone():
+        db.execute(
+            """CREATE TABLE host_key_scans(
+                scan_id TEXT PRIMARY KEY, actor TEXT NOT NULL, total INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued', error TEXT NOT NULL DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP)"""
+        )
+        db.execute(
+            """CREATE TABLE host_key_scan_items(
+                scan_id TEXT NOT NULL REFERENCES host_key_scans(scan_id),
+                asset_id INTEGER NOT NULL, name TEXT NOT NULL, address TEXT NOT NULL,
+                port INTEGER NOT NULL, asset_revision INTEGER NOT NULL,
+                previous_key TEXT NOT NULL, previous_fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending', host_key TEXT NOT NULL DEFAULT '',
+                fingerprint TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+                collected_at TEXT, saved_at TEXT, PRIMARY KEY(scan_id,asset_id))"""
+        )
+        db.execute("INSERT INTO platform_migrations(version) VALUES (3)")

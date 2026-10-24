@@ -128,3 +128,31 @@ def test_real_context_keeps_exact_reply_branch_and_chat_isolation(real_redis):
     assert not ctx.is_pending("oc_two", "om_working")
     ctx.clear_pending("oc_one", "om_working")
     assert not ctx.is_pending("oc_one", "om_working")
+
+
+def test_real_host_key_queue_is_separate_and_does_not_trust_candidates(real_redis, monkeypatch):
+    import paramiko
+    from app.inventory import host_keys
+
+    monkeypatch.setattr(host_keys, "REDIS_URL", main.REDIS_URL)
+    key = paramiko.RSAKey.generate(2048)
+    public = key.get_name() + " " + key.get_base64()
+    monkeypatch.setattr(host_keys, "fetch_key", lambda _: public)
+    asset = inventory.save_asset(
+        inventory.AssetInput(name="key-probe", device_type="linux", address="10.0.0.10"),
+        "legacy-admin",
+    )
+    scan_id = host_keys.create([asset["id"]], "legacy-admin")["scan_id"]
+    queue = Queue("ai-host-keys", connection=real_redis)
+    assert len(queue) == 1 and len(Queue("ai-diagnostics", connection=real_redis)) == 0
+    job = queue.fetch_job("host-keys-" + scan_id)
+    assert job.func_name == "app.inventory.host_keys.collect"
+    SimpleWorker([queue], connection=real_redis).work(
+        burst=True, with_scheduler=False, logging_level="WARNING"
+    )
+    job.refresh()
+    assert job.is_finished
+    result = host_keys.detail(scan_id)
+    assert result["counts"] == {"new": 1}
+    assert result["items"][0]["host_key"] == public
+    assert inventory.get_asset(asset["id"])["host_key"] == ""

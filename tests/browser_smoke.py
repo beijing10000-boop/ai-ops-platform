@@ -20,6 +20,7 @@ for name in (
     "assets-1440.png",
     "diagnosis-1440.png",
     "diagnosis-dark-1440.png",
+    "host-keys-1440.png",
 ):
     (OUT / name).unlink(missing_ok=True)
 with socket.socket() as sock:
@@ -202,6 +203,65 @@ try:
         page.locator("#asset-group").select_option("")
         page.locator('[data-action="search-assets"]').click()
         page.locator('[data-action="asset-next"]').wait_for()
+        # Cross-page/filter selection and two-phase trust use the real UI/API/DB.
+        page.locator('[data-action="keys-select-filter"]').click()
+        page.locator("#key-target-count").get_by_text("已选 3 台", exact=False).wait_for()
+        page.locator('[data-action="asset-next"]').click()
+        assert "已选 3 台" in page.locator("#key-target-count").inner_text()
+        page.locator('[data-action="keys-start"]').click()
+        page.get_by_role("heading", name="批量获取 SSH 主机公钥", exact=True).wait_for()
+        fresh = page.locator("tr").filter(has_text="UI 测试 · Linux 资产")
+        changed = page.locator("tr").filter(has_text="公钥变化样本")
+        failed_row = page.locator("tr").filter(has_text="获取失败样本")
+        fresh.get_by_text("待确认", exact=True).wait_for()
+        changed.get_by_text("公钥变化", exact=True).wait_for()
+        failed_row.get_by_text("获取失败", exact=True).wait_for()
+        for width in (1280, 1440, 1920):
+            page.set_viewport_size({"width": width, "height": 1080})
+            assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+            checks.append({"width": width, "page": "host-keys", "ok": True})
+        page.set_viewport_size({"width": 1440, "height": 1080})
+        page.screenshot(path=str(OUT / "host-keys-1440.png"), full_page=True)
+        before = page.request.get(base + "/api/v1/platform/assets?device_type=linux").json()["items"]
+        new_before = next(r for r in before if r["name"] == "UI 测试 · Linux 资产")
+        old_key = next(r for r in before if r["name"] == "公钥变化样本")["host_key"]
+        assert new_before["host_key"] == "" and old_key
+        page.locator('[data-action="keys-select-new"]').click()
+        fresh.locator(".key-candidate").wait_for()
+        assert fresh.locator(".key-candidate").is_checked()
+        assert not changed.locator(".key-candidate").is_checked()
+        assert page.locator('[data-action="keys-confirm"]').is_disabled()
+        page.locator("#key-verified").check()
+        page.locator('[data-action="keys-confirm"]').click()
+        fresh.get_by_text("已保存", exact=True).wait_for()
+        middle = page.request.get(base + "/api/v1/platform/assets?device_type=linux").json()["items"]
+        assert next(r for r in middle if r["id"] == new_before["id"])["host_key"]
+        assert next(r for r in middle if r["name"] == "公钥变化样本")["host_key"] == old_key
+        page.reload()
+        changed.locator(".key-candidate").wait_for()
+        assert not page.locator("#key-verified").is_checked()
+        assert not changed.locator(".key-candidate").is_checked()
+        changed.locator(".key-candidate").check()
+        assert page.locator('[data-action="keys-confirm"]').is_disabled()
+        page.locator("#key-verified").check()
+        assert "替换 1 台" in page.locator('[data-action="keys-confirm"]').inner_text()
+        page.locator('[data-action="keys-confirm"]').click()
+        changed.get_by_text("已保存", exact=True).wait_for()
+        after = page.request.get(base + "/api/v1/platform/assets?device_type=linux").json()["items"]
+        assert next(r for r in after if r["name"] == "公钥变化样本")["host_key"] != old_key
+        checks.append({"workflow": "batch keys + cross-page selection + explicit new/changed trust + reload", "ok": True})
+        page.locator('[data-action="keys-retry"]').click()
+        page.get_by_text("待确认", exact=True).wait_for()
+        assert page.locator(".key-candidate").count() == 1
+        page.locator("tr").filter(has_text="获取失败样本").get_by_text("待确认", exact=True).wait_for()
+        page.locator('[data-action="keys-select-new"]').click()
+        page.locator("#key-verified").check()
+        page.locator('[data-action="keys-confirm"]').click()
+        page.locator("tr").filter(has_text="获取失败样本").get_by_text("已保存", exact=True).wait_for()
+        page.locator('[data-action="keys-back"]').click()
+        page.get_by_role("heading", name="最近的公钥获取批次", exact=True).wait_for()
+        assert page.locator('[data-action="keys-open"]').count() == 2
+        checks.append({"workflow": "batch keys failed-only retry + persisted recent batches", "ok": True})
         page.locator('[data-page="feishu"]').click()
         page.locator('[data-action="new-member"]').click()
         page.locator('dialog input[name="open_id"]').fill("ou_browser_member")

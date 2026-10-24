@@ -1058,3 +1058,6 @@ from . import feishu_auth  # noqa: E402,F401
 from .platform_api import router as platform_router  # noqa: E402
 
 app.include_router(platform_router)
+from .host_keys_api import router as host_keys_router  # noqa: E402
+
+app.include_router(host_keys_router)

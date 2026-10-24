@@ -71,6 +71,10 @@ const state = {
   editor: null,
   assetRows: [],
   includeLogs: false,
+  keyTargets: new Set(),
+  keySelection: new Set(),
+  keyPage: 1,
+  keyVerified: false,
 };
 const P = "/api/v1/platform";
 const labels = {
@@ -294,13 +298,14 @@ async function diagnostics() {
   );
 }
 async function assets() {
-  const [data, groups] = await Promise.all([
+  const [data, groups, scans] = await Promise.all([
     paged(P + "/assets", "assetPage", 25, {
       q: state.assetQuery,
       device_type: state.assetType,
       ...(state.assetGroup ? { group_id: state.assetGroup } : {}),
     }),
     api(P + "/groups"),
+    can("credentials.manage") ? api(P + "/host-keys") : Promise.resolve([]),
   ]);
   state.assetRows = data.items;
   const html =
@@ -313,9 +318,134 @@ async function assets() {
             btn("new-asset", "登记资产", "", "primary")
         : "",
     ) +
-    `<section class="panel"><div class="toolbar"><input id="asset-search" aria-label="搜索主机资产" placeholder="搜索名称、地址或 Host ID" value="${E(state.assetQuery)}"><select id="asset-type" aria-label="设备类型"><option value="all">全部设备类型</option>${["linux", "windows", "vmware", "network", "other", "unknown"].map((x) => `<option value="${x}" ${state.assetType === x ? "selected" : ""}>${labels[x]}</option>`).join("")}</select><select id="asset-group" aria-label="主机组"><option value="">全部主机组</option>${groups.map((g) => `<option value="${g.id}" ${state.assetGroup === String(g.id) ? "selected" : ""}>${E(g.name)}</option>`).join("")}</select>${btn("search-assets", "搜索")}<span class="muted small">共 ${fmt(data.total)} 台</span></div>${table(["资产 / Host ID", "设备类型", "SSH 路由", "权限模式", "状态 / 验证", "操作"], data.items.map((r) => `<tr><td><span class="cell-title">${E(r.name)}</span><small>资产 ${r.id} · Host ID ${E(r.zabbix_hostid || "未关联")}</small></td><td>${badge(r.device_type)}</td><td class="mono">${E(r.address || "未配置")}<small>${r.address ? E(r.username) + " · " + r.ssh_port + (r.proxy_id ? " · 跳板 " + r.proxy_id : " · 直连") : ""}</small></td><td>${E(r.device_type !== "linux" ? "仅监控分析" : r.diagnostic_mode === "privileged" ? "B · 受限特权" : "A · 标准免 Agent")}</td><td>${badge(r.enabled ? "已启用" : "已禁用")}<small>${r.device_type !== "linux" ? "SSH 不适用" : r.last_test_status ? E(labels[r.last_test_status] || r.last_test_status) : "尚未验证"}</small></td><td><div class="actions">${can("diagnostics.run") && r.enabled ? btn("diagnose-asset", "诊断", r.id, "small") + (r.device_type === "linux" ? btn("test-asset", "测试", r.id, "small") : "") : ""}${can("inventory.manage") ? btn("edit-asset", "编辑", r.id, "small") : ""}</div></td></tr>`).join(""))}${pagination("asset", "assetPage")}</section>`;
-  return html + (await groupsPanel(groups));
+    `<section class="panel"><div class="toolbar"><input id="asset-search" aria-label="搜索主机资产" placeholder="搜索名称、地址或 Host ID" value="${E(state.assetQuery)}"><select id="asset-type" aria-label="设备类型"><option value="all">全部设备类型</option>${["linux", "windows", "vmware", "network", "other", "unknown"].map((x) => `<option value="${x}" ${state.assetType === x ? "selected" : ""}>${labels[x]}</option>`).join("")}</select><select id="asset-group" aria-label="主机组"><option value="">全部主机组</option>${groups.map((g) => `<option value="${g.id}" ${state.assetGroup === String(g.id) ? "selected" : ""}>${E(g.name)}</option>`).join("")}</select>${btn("search-assets", "搜索")}<span class="muted small">共 ${fmt(data.total)} 台</span></div>${can("credentials.manage") ? keyBatchBar() : ""}${table([...(can("credentials.manage") ? ['<input type="checkbox" id="key-target-page" aria-label="选择本页可获取主机">'] : []), "资产 / Host ID", "设备类型", "SSH 路由", "权限模式", "状态 / 验证", "操作"], data.items.map((r) => `<tr>${can("credentials.manage") ? `<td>${keyEligible(r) ? `<input class="key-target" type="checkbox" data-id="${r.id}" aria-label="选择 ${E(r.name)}" ${state.keyTargets.has(r.id) ? "checked" : ""}>` : "—"}</td>` : ""}<td><span class="cell-title">${E(r.name)}</span><small>资产 ${r.id} · Host ID ${E(r.zabbix_hostid || "未关联")}</small></td><td>${badge(r.device_type)}</td><td class="mono">${E(r.address || "未配置")}<small>${r.address ? E(r.username) + " · " + r.ssh_port + (r.proxy_id ? " · 跳板 " + r.proxy_id : " · 直连") : ""}</small></td><td>${E(r.device_type !== "linux" ? "仅监控分析" : r.diagnostic_mode === "privileged" ? "B · 受限特权" : "A · 标准免 Agent")}</td><td>${badge(r.enabled ? "已启用" : "已禁用")}<small>${r.device_type !== "linux" ? "SSH 不适用" : r.last_test_status ? E(labels[r.last_test_status] || r.last_test_status) : "尚未验证"}</small></td><td><div class="actions">${can("diagnostics.run") && r.enabled ? btn("diagnose-asset", "诊断", r.id, "small") + (r.device_type === "linux" ? btn("test-asset", "测试", r.id, "small") : "") : ""}${can("inventory.manage") ? btn("edit-asset", "编辑", r.id, "small") : ""}</div></td></tr>`).join(""))}${pagination("asset", "assetPage")}</section>`;
+  return html + (await groupsPanel(groups)) + keyRecentPanel(scans);
 }
+
+const keyEligible = (asset) =>
+  asset.device_type === "linux" && asset.enabled && !!asset.address;
+const keyStatus = {
+  queued: "等待获取", running: "获取中", completed: "获取完成",
+  pending: "等待获取", new: "待确认", changed: "公钥变化",
+  unchanged: "与已保存一致", failed: "获取失败", saved: "已保存",
+};
+function keyBatchBar() {
+  return `<div class="toolbar batch-bar">${btn("keys-select-filter", "全选筛选结果", "", "small")}${btn("keys-clear-targets", "清空选择", "", "small")}<span id="key-target-count" class="muted small">已选 ${state.keyTargets.size} 台（跨页保留）</span>${btn("keys-start", "批量获取主机公钥", "", "primary", !state.keyTargets.size)}<small class="muted">仅限已启用且配置内网 IP 的 Linux 主机，每批最多 1000 台。</small></div>`;
+}
+function keyRecentPanel(scans) {
+  if (!can("credentials.manage") || !scans.length) return "";
+  return panel("最近的公钥获取批次", table(
+    ["创建时间", "主机数", "状态", "操作"],
+    scans.map((s) => `<tr><td>${date(s.created_at)}</td><td>${s.total}</td><td>${E(keyStatus[s.status] || s.status)}</td><td>${btn("keys-open", "查看并核对", s.scan_id, "small")}</td></tr>`).join(""),
+  ));
+}
+function updateKeyControls() {
+  const count = $("#key-target-count");
+  if (count) count.textContent = `已选 ${state.keyTargets.size} 台（跨页保留）`;
+  const start = $('[data-action="keys-start"]');
+  if (start) start.disabled = !state.keyTargets.size;
+  const visible = [...document.querySelectorAll(".key-target")];
+  visible.forEach((c) => { c.checked = state.keyTargets.has(Number(c.dataset.id)); });
+  const page = $("#key-target-page");
+  if (page) {
+    const checked = visible.filter((c) => c.checked).length;
+    page.checked = !!visible.length && checked === visible.length;
+    page.indeterminate = checked > 0 && checked < visible.length;
+    page.disabled = !visible.length;
+  }
+  const save = $('[data-action="keys-confirm"]');
+  if (save) {
+    const changed = (state.keyScan?.changed_ids || []).filter((id) => state.keySelection.has(id)).length;
+    save.textContent = `确认保存 ${state.keySelection.size} 台${changed ? "（替换 " + changed + " 台）" : ""}`;
+    save.disabled = !state.keyVerified || !state.keySelection.size;
+  }
+}
+async function hostKeysPage(id) {
+  if (state.keyScanId !== id) {
+    state.keyScanId = id;
+    state.keyPage = 1;
+    state.keySelection.clear();
+    state.keyVerified = false;
+    state.keyNotice = "";
+  }
+  const scan = await paged(P + "/host-keys/" + encodeURIComponent(id), "keyPage", 50);
+  state.keyScan = scan;
+  const ready = ["completed", "failed"].includes(scan.status);
+  const available = new Set([...scan.new_ids, ...scan.changed_ids]);
+  state.keySelection = new Set([...state.keySelection].filter((i) => available.has(i)));
+  const finished = scan.total - (scan.counts.pending || 0);
+  return intro("获取后需要核对指纹并确认保存。已保存的公钥在确认前保持原值。",
+    btn("keys-back", "返回资产") + btn("refresh", "刷新")) +
+    panel("批量获取 SSH 主机公钥", `
+      <div class="toolbar"><strong>${E(keyStatus[scan.status])} · ${finished} / ${scan.total}</strong>
+      <span class="muted small">待确认 ${scan.counts.new || 0} · 变化 ${scan.counts.changed || 0} · 一致 ${scan.counts.unchanged || 0} · 失败 ${scan.counts.failed || 0} · 已保存 ${scan.counts.saved || 0}</span></div>
+      ${scan.error ? `<div class="notice error">${E(scan.error)}</div>` : ""}
+      <div class="notice">请通过目标控制台或可信清单逐一核对 SHA256 指纹。获取到的公钥不会自动信任；变化项展示新旧指纹，需逐台勾选。</div>
+      ${state.keyNotice ? `<div class="notice" role="status">${E(state.keyNotice)}</div>` : ""}
+      <div id="host-key-feedback" class="notice error" hidden></div>
+      <div class="toolbar">${btn("keys-select-new", "全选待登记项", "", "small", !ready || !scan.new_ids.length)}
+      ${btn("keys-clear-selection", "清空选择", "", "small")}
+      ${btn("keys-retry", "仅重试失败主机", id, "small", !ready || !scan.counts.failed)}</div>
+      ${table(["选择", "主机 / 地址", "获取到的 SHA256 指纹", "原 SHA256 指纹", "结果"],
+        scan.items.map((r) => `<tr>
+        <td>${ready && ["new", "changed"].includes(r.status) ? `<input class="key-candidate" type="checkbox" data-id="${r.asset_id}" aria-label="确认 ${E(r.name)}" ${state.keySelection.has(r.asset_id) ? "checked" : ""}>` : "—"}</td>
+        <td><span class="cell-title">${E(r.name)}</span><small class="mono">${E(r.address)}:${r.port}</small></td>
+        <td class="hostkey-fingerprint">${E(r.fingerprint || "—")}${r.host_key ? `<details><summary>完整公钥</summary><pre>${E(r.host_key)}</pre></details>` : ""}</td>
+        <td class="hostkey-fingerprint">${E(r.previous_fingerprint || "未登记")}</td>
+        <td><span class="tag ${r.status === "changed" ? "partial" : r.status === "failed" ? "failed" : ""}">${E(keyStatus[r.status])}</span>${r.error ? `<small>${E(r.error)}</small>` : ""}</td></tr>`).join(""))}
+      ${pagination("keys", "keyPage")}
+      <div class="form-actions"><label class="check-field"><input type="checkbox" id="key-verified" ${state.keyVerified ? "checked" : ""} ${ready ? "" : "disabled"}>已逐一核对所选指纹，确认保存并替换手动勾选的变化项</label>
+      ${btn("keys-confirm", "确认保存", id, "primary", true)}</div>
+    `, "获取公钥无需目标登录凭据；跳板连接使用已登记并核验的跳板。");
+}
+function clearKeyVerification() {
+  state.keyVerified = false;
+  if ($("#key-verified")) $("#key-verified").checked = false;
+}
+async function handleKeyAction(action, id) {
+  if (action === "keys-open") go("host-keys/" + id);
+  else if (action === "keys-back") go("assets");
+  else if (action === "keys-clear-targets") {
+    state.keyTargets.clear();
+    updateKeyControls();
+  } else if (action === "keys-select-filter") {
+    state.assetQuery = $("#asset-search").value;
+    state.assetType = $("#asset-type").value;
+    state.assetGroup = $("#asset-group").value;
+    state.assetPage = 1;
+    const query = new URLSearchParams({
+      q: state.assetQuery, device_type: state.assetType,
+      ...(state.assetGroup ? { group_id: state.assetGroup } : {}),
+    });
+    const result = await api(P + "/host-keys/targets?" + query);
+    state.keyTargets = new Set(result.asset_ids);
+    await navigate();
+  } else if (action === "keys-start") {
+    const result = await api(P + "/host-keys", "POST", { asset_ids: [...state.keyTargets] });
+    go("host-keys/" + result.scan_id);
+  } else if (action === "keys-select-new" || action === "keys-clear-selection") {
+    state.keySelection = new Set(action === "keys-select-new" ? state.keyScan.new_ids : []);
+    clearKeyVerification();
+    await navigate();
+  } else if (action === "keys-confirm") {
+    const result = await api(P + "/host-keys/" + id + "/confirm", "POST", {
+      asset_ids: [...state.keySelection], verified: state.keyVerified,
+      replace_changed: state.keyScan.changed_ids.some((i) => state.keySelection.has(i)),
+    });
+    state.keySelection.clear();
+    clearKeyVerification();
+    state.keyNotice = `已保存 ${result.saved} 台主机公钥，请重新进行 SSH 连接测试。`;
+    await navigate();
+  } else if (action === "keys-retry") {
+    const result = await api(P + "/host-keys/" + id + "/retry", "POST");
+    go("host-keys/" + result.scan_id);
+  } else if (action === "keys-prev" || action === "keys-next") {
+    state.keyPage = Math.max(1, Math.min(state.keyPageCount,
+      state.keyPage + (action === "keys-next" ? 1 : -1)));
+    await navigate();
+  }
+}
+
 async function tools() {
   const data = await api(P + "/tools");
   state.toolData = data;
@@ -571,14 +701,15 @@ async function navigate() {
   const page = parts[0];
   const item = nav.find((x) => x[0] === page);
   $("#page-title").textContent =
-    page === "report" ? "诊断详情" : item?.[1] || "总览";
+    page === "report" ? "诊断详情" : page === "host-keys" ? "批量获取主机公钥" : item?.[1] || "总览";
   document
     .querySelectorAll("nav button")
     .forEach((b) =>
       b.classList.toggle(
         "active",
         b.dataset.page === page ||
-          (page === "report" && b.dataset.page === "history"),
+          (page === "report" && b.dataset.page === "history") ||
+          (page === "host-keys" && b.dataset.page === "assets"),
       ),
     );
   $("#content").innerHTML = '<div class="empty" role="status">正在加载…</div>';
@@ -592,14 +723,16 @@ async function navigate() {
     else if (page === "connections") html = await connections();
     else if (page === "history") html = await history();
     else if (page === "report") html = await report(parts[1] || "");
+    else if (page === "host-keys") html = await hostKeysPage(parts[1] || "");
     else if (configGroups[page]) html = await configPage(page);
     else if (page === "audit") html = await auditPage();
     else html = await overview();
     if (current !== generation) return;
     $("#content").innerHTML = html;
+    updateKeyControls();
     if (
-      page === "report" &&
-      ["running", "queued"].includes(state.currentTask?.status)
+      (page === "report" && ["running", "queued"].includes(state.currentTask?.status)) ||
+      (page === "host-keys" && ["running", "queued"].includes(state.keyScan?.status))
     )
       poll = setTimeout(navigate, 3000);
   } catch (err) {
@@ -678,7 +811,7 @@ async function openEditor(type, id) {
         "目标 SSH 主机公钥",
         r.host_key || "",
         "textarea",
-        "必须从独立可信渠道核对，平台不自动信任未知公钥。",
+        "可先留空保存资产，再在资产页批量获取并核对 SHA256 指纹。",
         null,
         true,
       ) +
@@ -783,7 +916,8 @@ document.addEventListener("click", async (event) => {
   const { action, id } = b.dataset;
   b.disabled = true;
   try {
-    if (action === "refresh") await navigate();
+    if (action.startsWith("keys-")) await handleKeyAction(action, id);
+    else if (action === "refresh") await navigate();
     else if (action === "go-history") go("history");
     else if (action === "report") go("report/" + id);
     else if (action === "new-asset" || action === "edit-asset")
@@ -848,6 +982,7 @@ document.addEventListener("click", async (event) => {
       state.assetType = $("#asset-type").value;
       state.assetGroup = $("#asset-group").value;
       state.assetPage = 1;
+      state.keyTargets.clear();
       await navigate();
     } else if (action === "task-prev" || action === "task-next") {
       state.taskPage = Math.max(1, Math.min(
@@ -873,12 +1008,42 @@ document.addEventListener("click", async (event) => {
       go("report/" + t.task_id);
     }
   } catch (err) {
-    toast(err.message);
+    const feedback = action.startsWith("keys-") && $("#host-key-feedback");
+    if (feedback) {
+      feedback.textContent = err.message;
+      feedback.hidden = false;
+      feedback.setAttribute("role", "alert");
+    } else toast(err.message);
   } finally {
     b.disabled = false;
+    updateKeyControls();
   }
 });
 document.addEventListener("change", (e) => {
+  if (e.target.matches(".key-target")) {
+    const id = Number(e.target.dataset.id);
+    if (e.target.checked) state.keyTargets.add(id);
+    else state.keyTargets.delete(id);
+    updateKeyControls();
+  }
+  if (e.target.id === "key-target-page") {
+    state.assetRows.filter(keyEligible).forEach((r) => {
+      if (e.target.checked) state.keyTargets.add(r.id);
+      else state.keyTargets.delete(r.id);
+    });
+    updateKeyControls();
+  }
+  if (e.target.matches(".key-candidate")) {
+    const id = Number(e.target.dataset.id);
+    if (e.target.checked) state.keySelection.add(id);
+    else state.keySelection.delete(id);
+    clearKeyVerification();
+    updateKeyControls();
+  }
+  if (e.target.id === "key-verified") {
+    state.keyVerified = e.target.checked;
+    updateKeyControls();
+  }
   if (e.target.matches('#editor-form [name="device_type"]')) updateAssetFields();
   if (e.target.id === "task-status") {
     state.taskStatus = e.target.value;
