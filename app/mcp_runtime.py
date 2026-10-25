@@ -92,7 +92,7 @@ def readable_report_answer(raw):
     if text.startswith("```"):
         import re
 
-        text = re.sub(r"^\\x60\\x60\\x60(?:json)?\\s*|\\s*\\x60\\x60\\x60$", "", text).strip()
+        text = re.sub(r"^\x60\x60\x60(?:json)?\s*|\s*\x60\x60\x60$", "", text).strip()
     try:
         result = json.loads(text)
     except (TypeError, ValueError):
@@ -109,10 +109,10 @@ def readable_report_answer(raw):
     ):
         content = result.get(key)
         if isinstance(content, str) and content.strip():
-            parts.append(name + "\\n" + content.strip())
+            parts.append(name + "\n" + content.strip())
     if result.get("human_required") is True:
         parts.append("需人工核验：是")
-    return "\\n\\n".join(parts) if parts else raw
+    return "\n\n".join(parts) if parts else raw
 
 
 def format_usage(usage):
