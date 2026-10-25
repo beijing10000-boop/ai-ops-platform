@@ -220,6 +220,14 @@ def test_direct_mcp_host_query_is_bounded_scoped_and_does_not_return_extra_field
             "linux",
         ),
         (
+            {
+                "hostid": "11848",
+                "tags": [{"tag": "aiops.device_type", "value": "unknown"}],
+                "hostgroups": [{"name": "Linux"}],
+            },
+            "linux",
+        ),
+        (
             {"hostid": "11848", "hostgroups": [{"name": "Not Linux servers"}]},
             "unknown",
         ),
