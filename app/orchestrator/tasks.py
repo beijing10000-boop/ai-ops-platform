@@ -3,7 +3,7 @@
 import json
 import sqlite3
 import uuid
-from ..inventory import row_dict
+from ..platform_db import row_dict
 
 
 class Cancelled(RuntimeError):

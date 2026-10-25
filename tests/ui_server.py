@@ -12,7 +12,8 @@ os.environ["DATA_DIR"] = tempfile.mkdtemp(prefix="aiops-desktop-qa-")
 os.environ["APP_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 os.environ["ALLOW_LEGACY_ADMIN_TOKEN"] = "false"
 from app.main import app, connection
-from app import feishu_auth, inventory
+from app import feishu_auth
+from app.integrations import zabbix
 from app.orchestrator import tasks
 from fastapi.responses import RedirectResponse
 
@@ -21,37 +22,58 @@ with connection() as db:
     db.execute("INSERT INTO settings VALUES ('web_public_host','127.0.0.1:8765',0)")
 # Enough real rows to exercise page boundaries and status filtering.
 for index in range(28):
-    inventory.save_asset(
-        inventory.AssetInput(name=f"分页样本 {index + 1}", device_type="other"),
-        "ui-test",
-    )
     previous, _ = tasks.create({"question": "分页验证"}, source="ui_test")
     tasks.finish(previous["task_id"], {"answer": "分页验证记录"})
-asset = inventory.save_asset(
-    inventory.AssetInput(
-        name="UI 测试 · Linux 资产",
-        device_type="linux",
-        zabbix_hostid="10001",
-        address="10.20.0.10",
-    ),
-    "ui-test",
-)
-inventory.save_asset(
-    inventory.AssetInput(
-        name="UI 测试 · 网络设备", device_type="network", zabbix_hostid="10002"
-    ),
-    "ui-test",
-)
+# Fixture data exists only in this isolated QA entry point, never in the production inventory.
+QA_HOSTS = [
+    {
+        "zabbix_hostid": "10001",
+        "name": "UI 测试 · Linux 主机",
+        "device_type": "linux",
+        "monitored": True,
+    },
+    {
+        "zabbix_hostid": "10002",
+        "name": "UI 测试 · 网络设备",
+        "device_type": "network",
+        "monitored": True,
+    },
+    {
+        "zabbix_hostid": "10003",
+        "name": '<img src=x onerror="window.__storedXss=1">',
+        "device_type": "unknown",
+        "monitored": True,
+    },
+]
+
+
+async def qa_monitoring_hosts(read, query="", host_id=None):
+    rows = [
+        h
+        for h in QA_HOSTS
+        if (
+            h["zabbix_hostid"] == host_id
+            if host_id
+            else not query
+            or query.lower() in h["name"].lower()
+            or query == h["zabbix_hostid"]
+        )
+    ]
+    if host_id and not rows:
+        raise ValueError("所选主机不存在")
+    return rows
+
+
+zabbix.monitoring_hosts = qa_monitoring_hosts
 task, _ = tasks.create(
     {
         "event": {
             "event_name": "UI 测试记录 · CPU 诊断",
-            "host_name": asset["name"],
+            "host_name": QA_HOSTS[0]["name"],
             "host_id": "10001",
         }
     },
     source="ui_test",
-    asset_id=asset["id"],
     diagnostic_type="cpu",
 )
 tasks.start(task["task_id"])

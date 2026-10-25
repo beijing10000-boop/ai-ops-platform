@@ -17,7 +17,7 @@ OUT.mkdir(exist_ok=True)
 (ROOT / "docs/UI-TEST-RESULTS.json").unlink(missing_ok=True)
 for name in (
     "overview-1440.png",
-    "assets-1440.png",
+    "diagnostics-1440.png",
     "diagnosis-1440.png",
     "diagnosis-dark-1440.png",
 ):
@@ -78,7 +78,6 @@ try:
                 "overview",
                 "alerts",
                 "diagnostics",
-                "assets",
                 "tools",
                 "connections",
                 "history",
@@ -101,101 +100,47 @@ try:
                 ), (width, name, "horizontal overflow")
                 checks.append({"width": width, "page": name, "ok": True})
         page.set_viewport_size({"width": 1440, "height": 1080})
-        page.locator('[data-page="assets"]').click()
-        assert page.locator('[data-action="asset-prev"]').is_disabled()
-        page.locator('[data-action="asset-next"]').click()
-        page.locator(".pagination").get_by_text("第 2 页 / 2 页").wait_for()
-        assert page.locator('[data-action="asset-next"]').is_disabled()
-        page.locator('[data-action="asset-prev"]').click()
-        page.locator(".pagination").get_by_text("第 1 页 / 2 页").wait_for()
-        checks.append({"workflow": "asset pagination boundaries", "ok": True})
-        page.locator('[data-action="new-asset"]').click()
-        page.locator('dialog input[name="name"]').fill("浏览器验证资产")
-        page.locator('dialog button[type="submit"]').click()
-        page.locator("#content").get_by_text("浏览器验证资产", exact=True).wait_for()
-        row = page.locator("tr").filter(has_text="浏览器验证资产")
-        row.locator('[data-action="edit-asset"]').click()
-        page.locator('dialog input[name="address"]').fill("bad address")
-        page.locator('[data-action="validate-editor"]').click()
-        page.locator("#editor-feedback").get_by_text("资产地址", exact=False).wait_for()
-        assert page.locator("#editor-feedback").is_visible()
-        page.locator('dialog input[name="address"]').fill("172.20.1.20")
-        page.locator('[data-action="validate-editor"]').click()
-        page.locator("#editor-feedback").get_by_text(
-            "表单校验通过", exact=False
+        assert page.locator('nav [data-page="assets"]').count() == 0
+        page.locator('[data-page="diagnostics"]').click()
+        assert page.locator('input[name="asset_id"]').count() == 0
+        page.locator("#host-search").fill("Linux")
+        page.locator('[data-action="search-hosts"]').click()
+        page.locator("#host-search-result").get_by_text(
+            "已查询 1 台主机", exact=False
         ).wait_for()
-        assert page.locator('dialog input[name="username"]').count() == 0
-        page.locator('dialog button[type="submit"]').click()
-        page.locator("#editor").wait_for(state="hidden")
+        page.locator('select[name="zabbix_hostid"]').select_option("10001")
+        page.locator('select[name="profile"]').select_option("quick")
+        page.locator('[data-action="validate-diagnostic"]').click()
+        page.locator("#diagnostic-form [data-verify-result]").get_by_text(
+            "诊断参数验证通过", exact=False
+        ).wait_for()
+        page.locator("#host-search").fill("10002")
+        page.locator('[data-action="search-hosts"]').click()
+        page.locator('select[name="zabbix_hostid"] option[value="10002"]').wait_for(
+            state="attached"
+        )
+        assert (
+            page.locator('select[name="zabbix_hostid"] option[value="10001"]').count()
+            == 0
+        )
+        page.locator("#host-search").fill("")
+        page.locator('[data-action="search-hosts"]').click()
+        page.locator("#host-search-result").get_by_text(
+            "已查询 3 台主机", exact=False
+        ).wait_for()
+        assert page.evaluate("window.__storedXss || 0") == 0
+        assert (
+            "<img src=x"
+            in page.locator(
+                'select[name="zabbix_hostid"] option[value="10003"]'
+            ).inner_text()
+        )
         checks.append(
             {
-                "workflow": "asset create/edit + validation without SSH credentials",
+                "workflow": "removed local inventory + live Zabbix host search/selection + preflight + escaping",
                 "ok": True,
             }
         )
-        # Exercise both group names in table cells and asset-editor help text.
-        payload = '<img src=x onerror="window.__storedXss=1">'
-        page.locator('[data-action="new-group"]').click()
-        assert page.locator("#editor-feedback").is_hidden(), "新弹窗不应显示旧错误"
-        page.locator('dialog input[name="name"]').fill(payload)
-        page.locator('dialog button[type="submit"]').click()
-        page.get_by_role("cell", name=payload, exact=True).wait_for()
-        page.locator('[data-action="new-asset"]').click()
-        page.locator('dialog input[name="name"]').wait_for()
-        assert page.evaluate("window.__storedXss || 0") == 0
-        page.locator('dialog input[name="name"]').fill("分组选择验证")
-        page.locator("dialog").get_by_label(payload, exact=True).check()
-        page.locator('dialog button[type="submit"]').click()
-        row = page.locator("tr").filter(has_text="分组选择验证")
-        row.locator('[data-action="edit-asset"]').click()
-        assert page.locator("dialog").get_by_label(payload, exact=True).is_checked()
-        page.locator('dialog select[name="device_type"]').select_option("windows")
-        page.locator('dialog button[type="submit"]').click()
-        page.locator("#editor").wait_for(state="hidden")
-        row.get_by_text("Windows", exact=True).wait_for()
-        page.locator("#asset-group").select_option(label=payload)
-        page.locator('[data-action="search-assets"]').click()
-        page.locator(".toolbar").get_by_text("共 1 台", exact=True).wait_for()
-        page.locator("tr").filter(has_text="分组选择验证").wait_for()
-        assert page.locator('[data-action="edit-asset"]').count() == 1
-        assert page.locator('[data-action="asset-next"]').is_disabled()
-        assert (
-            "仅监控分析"
-            in page.locator("tr").filter(has_text="分组选择验证").inner_text()
-        )
-        assert page.locator('[data-action="test-asset"]').count() == 0
-        row = page.locator("tr").filter(has_text="分组选择验证")
-        row.locator('[data-action="edit-asset"]').click()
-        assert (
-            page.locator('dialog select[name="device_type"]').input_value() == "windows"
-        )
-        assert page.locator("dialog").get_by_label(payload, exact=True).is_checked()
-        page.locator('dialog input[name="enabled"]').uncheck()
-        page.locator('dialog button[type="submit"]').click()
-        page.locator("tr").filter(has_text="分组选择验证").get_by_text(
-            "已禁用"
-        ).wait_for()
-        assert page.locator('[data-action="diagnose-asset"]').count() == 0
-        checks.append(
-            {"workflow": "group assignment/filter + device-aware editing", "ok": True}
-        )
-        group = page.locator("tr").filter(has_text=payload)
-        group.locator('[data-action="edit-group"]').click()
-        page.locator('dialog input[name="name"]').fill("浏览器验证组")
-        page.locator('dialog button[type="submit"]').click()
-        page.get_by_role("cell", name="浏览器验证组", exact=True).wait_for()
-        page.locator("tr").filter(has_text="浏览器验证组").locator(
-            '[data-action="delete-group"]'
-        ).click()
-        page.get_by_role("cell", name="浏览器验证组", exact=True).wait_for(
-            state="detached"
-        )
-        checks.append(
-            {"workflow": "group create/edit/delete + stored HTML escaping", "ok": True}
-        )
-        page.locator("#asset-group").select_option("")
-        page.locator('[data-action="search-assets"]').click()
-        page.locator('[data-action="asset-next"]').wait_for()
         page.locator('[data-page="connections"]').click()
         page.locator('#zabbix_mcp-form input[name="mcp_url"]').fill(
             "http://127.0.0.1:9999/mcp"
@@ -329,9 +274,9 @@ try:
         page.locator("#toast").wait_for(state="hidden", timeout=8000)
         page.evaluate("document.fonts.ready")
         page.screenshot(path=str(OUT / "overview-1440.png"), full_page=True)
-        page.locator('[data-page="assets"]').click()
-        page.locator('[data-action="new-asset"]').wait_for()
-        page.screenshot(path=str(OUT / "assets-1440.png"), full_page=True)
+        page.locator('[data-page="diagnostics"]').click()
+        page.locator('[data-action="search-hosts"]').wait_for()
+        page.screenshot(path=str(OUT / "diagnostics-1440.png"), full_page=True)
         page.locator('[data-page="history"]').click()
         page.locator('[data-action="report"]').first.click()
         page.get_by_text("证据与工具执行记录", exact=True).wait_for()

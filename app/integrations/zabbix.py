@@ -411,3 +411,76 @@ async def call(session, name, args, *, schema=None, host_id=None):
             raise ValueError("external schema refs forbidden")
         Draft202012Validator(schema).validate(checked)
     return await asyncio.wait_for(session.call_tool(name, checked), timeout=18)
+
+
+DEVICE_TYPES = {"linux", "windows", "vmware", "network", "other", "unknown"}
+
+
+def infer_device(host):
+    tags = {
+        t.get("tag"): str(t.get("value", "")).lower()
+        for t in host.get("tags", [])
+        if isinstance(t, dict)
+    }
+    if tags.get("aiops.device_type") in DEVICE_TYPES:
+        return tags["aiops.device_type"]
+    os_name = str((host.get("inventory") or {}).get("os", "")).lower()
+    for kind, words in [
+        ("windows", ("windows",)),
+        ("vmware", ("vmware", "esxi", "vcenter")),
+        ("network", ("huawei", "vrp", "cisco", "comware")),
+        ("linux", ("linux",)),
+    ]:
+        if any(w in os_name for w in words):
+            return kind
+    return "unknown"
+
+
+async def monitoring_hosts(read_setting, query="", host_id=None):
+    """Read current authorized hosts directly from Zabbix; never persist an inventory."""
+    import asyncio
+
+    if "host_get" not in enabled_names(read_setting):
+        raise ValueError("host_get 已被禁用，无法查询监控主机")
+    args = {
+        "selectInventory": ["os", "type"],
+        "selectTags": ["tag", "value"],
+        "limit": 100,
+    }
+    if host_id:
+        if not re.fullmatch(r"[0-9]{1,32}", host_id):
+            raise ValueError("Zabbix Host ID 无效")
+        args["hostids"] = [host_id]
+    elif query:
+        if query.isdigit():
+            args["hostids"] = [query]
+        else:
+            args["search"] = {"name": query, "host": query}
+            args["searchByAny"] = True
+    async with asyncio.timeout(20):
+        async with connect(read_setting) as session:
+            response = await call(session, "host_get", args)
+    if response.isError:
+        raise ValueError("Zabbix MCP 拒绝查询主机")
+    rows = records(response)
+    result, seen = [], set()
+    for host in rows[:100]:
+        hid = str(host.get("hostid", ""))
+        if host_id and hid in seen:
+            raise ValueError("Zabbix MCP 返回重复 Host ID，无法唯一确认所选主机")
+        if not re.fullmatch(r"[0-9]{1,32}", hid) or hid in seen:
+            continue
+        if host_id and hid != host_id:
+            raise ValueError("Zabbix MCP 返回的主机与所选 Host ID 不匹配")
+        seen.add(hid)
+        result.append(
+            {
+                "zabbix_hostid": hid,
+                "name": str(host.get("name") or host.get("host") or hid)[:160],
+                "device_type": infer_device(host),
+                "monitored": str(host.get("status", "0")) == "0",
+            }
+        )
+    if host_id and len(result) != 1:
+        raise ValueError("所选主机不存在或不在当前 Zabbix MCP 读取范围内")
+    return result

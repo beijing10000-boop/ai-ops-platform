@@ -1,20 +1,4 @@
 "use strict";
-async function groupsPanel(rows) {
-  state.groupRows = rows;
-  return panel(
-    "主机组",
-    table(
-      ["ID", "名称", "来源", "操作"],
-      rows
-        .map(
-          (g) =>
-            `<tr><td>${g.id}</td><td>${E(g.name)}</td><td>${g.zabbix_groupid ? "Zabbix · " + E(g.zabbix_groupid) : "本地手工组"}</td><td>${can("inventory.manage") && !g.zabbix_groupid ? btn("edit-group", "编辑", g.id, "small") + btn("delete-group", "删除", g.id, "small danger") : ""}</td></tr>`,
-        )
-        .join(""),
-    ),
-    "同步组在 Zabbix 维护；本地组可以创建、编辑及分配给多个资产。",
-  );
-}
 async function mutesPanel() {
   const rows = await api("/api/v1/alert-mutes");
   return panel(
@@ -61,16 +45,12 @@ const $ = (s) => document.querySelector(s),
 const state = {
   user: null,
   csrf: "",
-  assetPage: 1,
-  assetQuery: "",
-  assetType: "all",
-  assetGroup: "",
   auditPage: 1,
   taskPage: 1,
   taskStatus: "all",
   editor: null,
-  assetRows: [],
   includeLogs: false,
+  hostRows: [],
 };
 const P = "/api/v1/platform";
 const labels = {
@@ -98,7 +78,6 @@ const nav = [
   ["overview", "总览", "▦", "overview.read"],
   ["alerts", "告警中心", "◴", "reports.read"],
   ["diagnostics", "AI 诊断", "✧", "diagnostics.run"],
-  ["assets", "主机资产", "▤", "inventory.read"],
   ["tools", "诊断工具", "⌘", "tools.read"],
   ["connections", "连接管理", "⇄", "settings.manage"],
   ["history", "分析历史", "◷", "reports.read"],
@@ -242,7 +221,7 @@ async function overview() {
       "最近 24 小时 · 统计截止当前 · 北京时间",
       btn("refresh", "刷新数据"),
     ) +
-    `<div class="hero"><div><span class="eyebrow">EVIDENCE BEFORE ACTION</span><h2>让每一次诊断，都有据可循。</h2><p class="muted small">告警历史、Linux 实时检查与 AI 分析，汇聚到同一条诊断记录。</p></div><div class="hero-mark">✧</div></div><div class="stats">${stat("未收到恢复的事件", fmt(o.unrecovered_received_events), "限平台已接收事件，非全量 Zabbix 告警")}${stat("AI 分析次数", fmt(o.ai_runs_24h), "最近 24 小时创建")}${stat("AI 分析成功率", o.ai_success_rate_24h == null ? "—" : o.ai_success_rate_24h + "%", "已完成 / AI 已结束任务")}${stat("Token 消耗", fmt(o.token_total_24h), `最近 24 小时 · ${fmt(o.usage_available_runs_24h)} 次返回实际用量`)}</div><div class="grid-two">${panel("连接与诊断能力", `<div class="health-row"><div>Zabbix MCP<p>以最近一次主动连接检测为准</p></div>${badge(o.health.find((x) => x.provider === "zabbix_mcp")?.status || (o.mcp_configured ? "未检测" : "未配置"))}</div><div class="health-row"><div>SSH MCP<p>独立服务，按 Host ID 补充实时证据</p></div>${badge(o.health.find((x) => x.provider === "ssh_mcp")?.status || (o.ssh_mcp_configured ? "未检测" : "未配置"))}</div><div class="health-row"><div>已关联 Linux 主机<p>以 Zabbix Host ID 绑定</p></div><strong>${fmt(o.linked_linux_hosts)}</strong></div>`)}${panel("诊断概况", `<div class="health-row"><span>已完成 / 部分完成</span><strong>${fmt(o.completed_24h)} / ${fmt(o.partial_24h)}</strong></div><div class="health-row"><span>失败任务</span><strong>${fmt(o.failed_24h)}</strong></div><div class="health-row"><span>平均分析耗时</span><strong>${o.average_duration_ms_24h == null ? "—" : (o.average_duration_ms_24h / 1000).toFixed(1) + " s"}</strong></div><div class="notice small">缺失数据会明确标记。AI 结论属于分析推断，监控与 SSH 证据可在任务详情核验。</div>`)}</div><div class="panel"><div class="section-heading"><div><h2>最近诊断</h2><p class="muted small">告警分析、问答与手动诊断</p></div>${btn("go-history", "全部记录 →", "", "quiet")}</div>${table(["任务 / 时间", "诊断类型 / 来源", "状态", "工具", "耗时", "Token", "操作"], taskRows(t.items))}</div>`
+    `<div class="hero"><div><span class="eyebrow">EVIDENCE BEFORE ACTION</span><h2>让每一次诊断，都有据可循。</h2><p class="muted small">告警历史、Linux 实时检查与 AI 分析，汇聚到同一条诊断记录。</p></div><div class="hero-mark">✧</div></div><div class="stats">${stat("未收到恢复的事件", fmt(o.unrecovered_received_events), "限平台已接收事件，非全量 Zabbix 告警")}${stat("AI 分析次数", fmt(o.ai_runs_24h), "最近 24 小时创建")}${stat("AI 分析成功率", o.ai_success_rate_24h == null ? "—" : o.ai_success_rate_24h + "%", "已完成 / AI 已结束任务")}${stat("Token 消耗", fmt(o.token_total_24h), `最近 24 小时 · ${fmt(o.usage_available_runs_24h)} 次返回实际用量`)}</div><div class="grid-two">${panel("连接与诊断能力", `<div class="health-row"><div>Zabbix MCP<p>以最近一次主动连接检测为准</p></div>${badge(o.health.find((x) => x.provider === "zabbix_mcp")?.status || (o.mcp_configured ? "未检测" : "未配置"))}</div><div class="health-row"><div>SSH MCP<p>独立服务，按 Host ID 补充实时证据</p></div>${badge(o.health.find((x) => x.provider === "ssh_mcp")?.status || (o.ssh_mcp_configured ? "未检测" : "未配置"))}</div><p class="muted small">主机由 Zabbix MCP 与 SSH MCP 管理，通过 Zabbix Host ID 关联。</p>`)}${panel("诊断概况", `<div class="health-row"><span>已完成 / 部分完成</span><strong>${fmt(o.completed_24h)} / ${fmt(o.partial_24h)}</strong></div><div class="health-row"><span>失败任务</span><strong>${fmt(o.failed_24h)}</strong></div><div class="health-row"><span>平均分析耗时</span><strong>${o.average_duration_ms_24h == null ? "—" : (o.average_duration_ms_24h / 1000).toFixed(1) + " s"}</strong></div><div class="notice small">缺失数据会明确标记。AI 结论属于分析推断，监控与 SSH 证据可在任务详情核验。</div>`)}</div><div class="panel"><div class="section-heading"><div><h2>最近诊断</h2><p class="muted small">告警分析、问答与手动诊断</p></div>${btn("go-history", "全部记录 →", "", "quiet")}</div>${table(["任务 / 时间", "诊断类型 / 来源", "状态", "工具", "耗时", "Token", "操作"], taskRows(t.items))}</div>`
   );
 }
 async function alerts() {
@@ -269,11 +248,11 @@ async function alerts() {
 async function diagnostics() {
   return (
     intro(
-      "按注册资产或已接收的告警发起诊断。执行前查询监控，必要时补充 Linux 实时证据。",
+      "选择 Zabbix 监控主机或已接收的告警发起诊断。执行前查询监控，必要时补充 Linux 实时证据。",
     ) +
     panel(
       "新建诊断",
-      `<form id="diagnostic-form"><div class="form-grid">${field("asset_id", "资产 ID", state.selectedAsset || "", "number", "在主机资产页点击「诊断」可自动带入；不接受任意网络地址。")}${field("event_id", "告警事件 ID", state.selectedEvent || "", "text", "可选，必须是平台已经接收的事件。")}${field("diagnostic_type", "诊断类型", "auto", "text", "", [["auto", "自动识别告警类型"], ...Object.entries(PLAY)])}${field(
+      `<form id="diagnostic-form"><div class="form-grid"><div class="field wide"><span>查询监控主机</span><div class="toolbar"><input id="host-search" aria-label="搜索 Zabbix 主机" placeholder="输入主机名称或 Zabbix Host ID">${btn("search-hosts", "查询 Zabbix 主机")}</div><small id="host-search-result" role="status">直接从 Zabbix MCP 读取主机，无需在平台登记资产。</small></div>${field("zabbix_hostid", "诊断主机", "", "text", "选择监控主机后，平台通过相同 Host ID 关联独立 SSH MCP；填写告警事件 ID 时以事件主机为准。", [["", "未选择主机"], ...state.hostRows.map(h => [h.zabbix_hostid, h.name + " · Host ID " + h.zabbix_hostid + " · " + (labels[h.device_type] || h.device_type)])])}${field("event_id", "告警事件 ID", state.selectedEvent || "", "text", "可选，必须是平台已经接收的事件。")}${field("diagnostic_type", "诊断类型", "auto", "text", "", [["auto", "自动识别告警类型"], ...Object.entries(PLAY)])}${field(
         "profile",
         "分析模式",
         "standard",
@@ -292,19 +271,6 @@ async function diagnostics() {
     )
   );
 }
-async function assets() {
-  const [data, groups] = await Promise.all([
-    paged(P + "/assets", "assetPage", 25, {
-      q: state.assetQuery, device_type: state.assetType,
-      ...(state.assetGroup ? {group_id: state.assetGroup} : {}),
-    }), api(P + "/groups"),
-  ]);
-  state.assetRows = data.items;
-  return intro("监控资产用于告警关联。SSH 主机、私钥、跳板及公钥在独立 SSH MCP 管理；两边登记相同 Zabbix Host ID 即可关联。",
-    can("inventory.manage") ? btn("sync-assets", "同步 Zabbix") + btn("import-assets", "批量导入") + btn("new-group", "新增主机组") + btn("new-asset", "登记资产", "", "primary") : "") +
-    `<section class="panel"><div class="toolbar"><input id="asset-search" aria-label="搜索主机资产" placeholder="搜索名称、展示地址或 Host ID" value="${E(state.assetQuery)}"><select id="asset-type" aria-label="设备类型"><option value="all">全部设备类型</option>${["linux", "windows", "vmware", "network", "other", "unknown"].map(x => `<option value="${x}" ${state.assetType === x ? "selected" : ""}>${labels[x]}</option>`).join("")}</select><select id="asset-group" aria-label="主机组"><option value="">全部主机组</option>${groups.map(g => `<option value="${g.id}" ${state.assetGroup === String(g.id) ? "selected" : ""}>${E(g.name)}</option>`).join("")}</select>${btn("search-assets", "搜索")}<span class="muted small">共 ${fmt(data.total)} 台</span></div>${table(["资产 / Host ID", "设备类型", "展示地址", "诊断来源", "状态", "操作"], data.items.map(r => `<tr><td><span class="cell-title">${E(r.name)}</span><small>资产 ${r.id} · Host ID ${E(r.zabbix_hostid || "未关联")}</small></td><td>${badge(r.device_type)}</td><td class="mono">${E(r.address || "—")}</td><td>${r.device_type === "linux" ? "Zabbix + SSH MCP" : "仅监控分析"}</td><td>${badge(r.enabled ? "已启用" : "已禁用")}</td><td><div class="actions">${can("diagnostics.run") && r.enabled ? btn("diagnose-asset", "诊断", r.id, "small") + (r.device_type === "linux" ? btn("verify-binding", "验证关联", r.id, "small") : "") : ""}${can("inventory.manage") ? btn("edit-asset", "编辑", r.id, "small") : ""}</div></td></tr>`).join(""))}${pagination("asset", "assetPage")}</section>` + await groupsPanel(groups);
-}
-
 async function tools() {
   const data = await api(P + "/tools");
   state.toolData = data;
@@ -394,7 +360,7 @@ async function report(id) {
           : "") +
         btn("refresh", "刷新"),
     ) +
-    `<div class="stats"><div class="stat"><div class="label">诊断状态</div><div class="value">${badge(t.status)}</div><div class="hint">${E(t.stage)}</div></div><div class="stat"><div class="label">资产 / 事件 ID</div><div class="value">${E(t.asset_id || "—")}</div><div class="hint">事件 ${E(t.event_id || "未关联")}</div></div><div class="stat"><div class="label">实际 Token / 工具调用</div><div class="value">${fmt(t.token_total)}</div><div class="hint">${fmt(t.tools)} 次采集 · 输入 ${fmt(t.token_input)} / 输出 ${fmt(t.token_output)}</div></div><div class="stat"><div class="label">执行耗时</div><div class="value">${t.duration_ms == null ? "—" : (t.duration_ms / 1000).toFixed(1) + " s"}</div><div class="hint">${date(t.created_at)}</div></div></div>` +
+    `<div class="stats"><div class="stat"><div class="label">诊断状态</div><div class="value">${badge(t.status)}</div><div class="hint">${E(t.stage)}</div></div><div class="stat"><div class="label">主机 / 事件 ID</div><div class="value">${E(t.alert?.host_id || t.asset?.zabbix_hostid || "—")}</div><div class="hint">事件 ${E(t.event_id || "未关联")}</div></div><div class="stat"><div class="label">实际 Token / 工具调用</div><div class="value">${fmt(t.token_total)}</div><div class="hint">${fmt(t.tools)} 次采集 · 输入 ${fmt(t.token_input)} / 输出 ${fmt(t.token_output)}</div></div><div class="stat"><div class="label">执行耗时</div><div class="value">${t.duration_ms == null ? "—" : (t.duration_ms / 1000).toFixed(1) + " s"}</div><div class="hint">${date(t.created_at)}</div></div></div>` +
     panel(
       "告警与资产信息",
       `<p>${E(t.alert?.event_name || "手动诊断 / 连接测试")}</p><p class="muted small">主机：${E(t.asset?.name || t.alert?.host_name || "未关联")} · Host ID：${E(t.asset?.zabbix_hostid || t.alert?.host_id || "—")} · 类型：${E(labels[t.report?.device_type || t.asset?.device_type] || "待确认")}</p>`,
@@ -418,6 +384,12 @@ async function report(id) {
     `<div class="panel"><div class="section-heading"><div><h2>证据与工具执行记录</h2><p class="muted small">Zabbix 为监控证据；SSH 为采集当时快照。日志内容需要独立权限。</p></div>${can("logs.read") ? btn("toggle-logs", state.includeLogs ? "隐藏原始日志" : "读取日志证据", id) : ""}</div>${t.evidence.length ? t.evidence.map((e) => `<details class="evidence"><summary>${E(e.provider)} / ${E(e.tool)} ${badge(e.status)} · ${date(e.collected_at)}</summary><pre>${E(JSON.stringify(e.payload, null, 2))}</pre></details>`).join("") : '<div class="empty">暂无采集证据</div>'}</div>`
   );
 }
+const configHelp = {
+  web_protocol: "用于生成飞书登录回调和报告链接；HTTPS 证书由外部入口配置。",
+  web_public_host: "用户实际访问的平台域名/IP和端口，例如 172.20.200.94:8088。",
+  zabbix_frontend_url: "用于从告警卡片和报告打开 Zabbix 网页。",
+  zabbix_webhook_secret: "验证 Zabbix 推送告警的身份，需与 Zabbix 告警媒介中的密钥一致。",
+};
 const configGroups = {
   ai: [
     ["openai_base_url", "模型 Base URL"],
@@ -492,43 +464,13 @@ function toolFields(values, options) {
   try { disabled = JSON.parse(values.disabled_tools || "[]"); } catch {}
   return `<fieldset class="group-picker"><legend>允许 AI 使用的 Zabbix 只读工具</legend><div class="group-options">${options.tools.map(name => `<label class="check-field"><input type="checkbox" name="enabled_tool" value="${E(name)}" ${disabled.includes(name) ? "" : "checked"}>${E(name)}</label>`).join("")}</div><p class="muted small">取消勾选可禁用；任何远端写入工具始终不获授权。</p></fieldset>`;
 }
-function parseAssetList(text) {
-  // CSV and Excel TSV, including quoted fields. Never ask users to write JSON.
-  const rows = [], row = []; let cell = "", quoted = false;
-  const input = String(text || "").replace(/^\uFEFF/, "");
-  const separator = input.includes("\t") ? "\t" : ",";
-  for (let i = 0; i <= input.length; i++) {
-    const c = input[i];
-    if (quoted) {
-      if (c === '"' && input[i + 1] === '"') {cell += '"'; i++;}
-      else if (c === '"') quoted = false;
-      else if (c === undefined) throw Error("清单引号未闭合");
-      else cell += c;
-    } else if (c === '"' && !cell) quoted = true;
-    else if (c === separator) {row.push(cell); cell = "";}
-    else if (c === "\n" || c === undefined) {
-      row.push(cell.replace(/\r$/, "")); cell = "";
-      if (row.some(v => v.trim())) rows.push([...row]); row.length = 0;
-    } else cell += c;
-  }
-  if (rows[0]?.[0] === "资产名称") rows.shift();
-  if (!rows.length || rows.length > 1000) throw Error("请填写 1–1000 行资产");
-  return rows.map((r, index) => {
-    if (r.length < 3 || r.length > 4) throw Error(`第 ${index + 1} 行需填写 3–4 列`);
-    return {name: r[0].trim(), zabbix_hostid: r[1].trim() || null, device_type: r[2].trim(), address: (r[3] || "").trim()};
-  });
-}
 function formValues(form) {
   const data = Object.fromEntries(new FormData(form));
   if (form.id === "editor-form") {
-    if (state.editor.type === "asset") {
-      data.enabled = form.elements.enabled.checked;
-      data.zabbix_hostid = data.zabbix_hostid || null;
-      data.group_ids = new FormData(form).getAll("group_ids").map(Number);
-    } else if (state.editor.type === "member") data.enabled = form.elements.enabled.checked;
+    if (state.editor.type === "member") data.enabled = form.elements.enabled.checked;
   }
   if (form.id === "diagnostic-form") {
-    data.asset_id = data.asset_id ? Number(data.asset_id) : null;
+    data.zabbix_hostid = data.zabbix_hostid || null;
     data.event_id = data.event_id || null; data.service = data.service || null;
     data.time_window = Number(data.time_window);
   }
@@ -562,17 +504,12 @@ async function verifyAction(action, id, button) {
   else if (action === "verify-mcp") await request(P + "/tools/discover?provider=" + id, {values: formValues(form)});
   else if (action === "test-model") await request("/api/v1/test/ai", form ? {values: formValues(form)} : undefined);
   else if (action === "verify-feishu" || action === "verify-feishu-groups") await request("/api/v1/test/feishu" + (action === "verify-feishu-groups" ? "?check_groups=true" : ""), {values: formValues(form)});
-  else if (action === "verify-binding") await request(P + "/assets/" + id + "/validate");
   else if (action === "validate-diagnostic") await request(P + "/tasks/validate", formValues(form));
   else if (action === "validate-editor") {
-    const kind = state.editor.type, values = formValues(form);
-    await request(P + "/validate", {kind, values: kind === "import" ? {assets: parseAssetList(values.csv)} : values});
+    await request(P + "/members/validate", formValues(form));
   } else if (action === "reset-prompts") {
     for (const [key, value] of Object.entries(state.options.prompts)) form.elements[key].value = value;
     show("已恢复项目默认提示词，保存后生效。");
-  } else if (action === "import-template") {
-    const url = URL.createObjectURL(new Blob(["\uFEFF资产名称,Zabbix Host ID,设备类型,内网 IP\n测试Linux,10001,linux,172.20.1.10\n"], {type: "text/csv;charset=utf-8"}));
-    const link = document.createElement("a"); link.href = url; link.download = "assets-template.csv"; link.click(); URL.revokeObjectURL(url);
   } else if (action === "validate-mute") {
     const values = formValues(form); values.hours = Number(values.hours);
     await request("/api/v1/alert-mutes/validate", values);
@@ -604,7 +541,7 @@ async function configPage(page) {
   if (page === "settings")
     extra += panel(
       "备份与升级",
-      `<p class="muted small">升级前停止本项目 Worker，使用离线迁移工具备份 SQLite 和持久化主密钥。升级会删除旧 SSH 配置并保留历史报告，具体步骤见仓库 docs/UPGRADING.md。</p>${btn("runtime-status", "查看服务与队列状态")}<pre id="runtime-result"></pre>`,
+      `<p class="muted small">升级前停止本项目 Worker，使用离线迁移工具备份 SQLite 和持久化主密钥。数据库与配对主密钥需一起备份；升级步骤见仓库 docs/UPGRADING.md。</p>${btn("runtime-status", "查看服务与队列状态")}<pre id="runtime-result"></pre>`,
     );
   return (
     intro(hints[page], page === "ai" ? btn("test-model", "验证模型连接") + btn("reset-prompts", "恢复默认提示词") : page === "feishu" ? btn("verify-feishu", "验证飞书应用") + btn("verify-feishu-groups", "验证群访问权限") : "") +
@@ -614,7 +551,7 @@ async function configPage(page) {
         : page === "feishu"
           ? "飞书应用与告警策略"
           : "系统设置",
-      `<form id="settings-form" data-group="${page}"><div class="form-grid">${fields.map(([key, label, type, options]) => field(key, label, values[key] || "", type === "select" ? "text" : type || "text", key.includes("prompt") ? "已提供项目默认提示词；可编辑。留空后使用默认值。平台只读与证据规则始终生效。" : "", options || null, type === "textarea")).join("")}</div>${page === "ai" ? budgetFields(values, options) : ""}${page === "settings" && can("*") ? toolFields(values, options) : ""}<div class="form-actions">${btn("validate-settings", "验证填写内容")}<button class="button primary" type="submit">保存配置</button></div><p class="muted small" role="status" data-verify-result></p></form>`,
+      `<form id="settings-form" data-group="${page}"><div class="form-grid">${fields.map(([key, label, type, options]) => field(key, label, values[key] || "", type === "select" ? "text" : type || "text", key.includes("prompt") ? "已提供项目默认提示词；可编辑。留空后使用默认值。平台只读与证据规则始终生效。" : (configHelp[key] || ""), options || null, type === "textarea")).join("")}</div>${page === "ai" ? budgetFields(values, options) : ""}${page === "settings" && can("*") ? toolFields(values, options) : ""}<div class="form-actions">${btn("validate-settings", "验证填写内容")}<button class="button primary" type="submit">保存配置</button></div><p class="muted small" role="status" data-verify-result></p></form>`,
     ) +
     extra
   );
@@ -623,7 +560,7 @@ async function auditPage() {
   const data = await paged(P + "/audit", "auditPage", 50);
   return (
     intro(
-      "登录、配置变更、资产操作、报告访问和诊断操作",
+      "登录、配置变更、报告访问和诊断操作",
       btn("refresh", "刷新"),
     ) +
     panel(
@@ -665,7 +602,6 @@ async function navigate() {
     if (page === "overview") html = await overview();
     else if (page === "alerts") html = await alerts();
     else if (page === "diagnostics") html = await diagnostics();
-    else if (page === "assets") html = await assets();
     else if (page === "tools") html = await tools();
     else if (page === "connections") html = await connections();
     else if (page === "history") html = await history();
@@ -694,41 +630,7 @@ async function openEditor(type, id) {
   let title,
     fields,
     note = "";
-  if (type === "asset") {
-    const r = state.assetRows.find((x) => x.id === Number(id)) || {};
-    const groups = await api(P + "/groups");
-    title = id ? "编辑资产" : "登记资产";
-    fields =
-      field("name", "资产名称", r.name || "") +
-      field("zabbix_hostid", "Zabbix Host ID", r.zabbix_hostid || "") +
-      field(
-        "device_type",
-        "设备类型",
-        r.device_type || "linux",
-        "text",
-        "",
-        Array.from(
-          ["linux", "windows", "vmware", "network", "other", "unknown"],
-          (x) => [x, labels[x] || x],
-        ),
-      ) +
-      `<fieldset class="field wide group-picker"><legend>主机组（可多选）</legend><div class="group-options">${groups.length ? groups.map((g) => `<label class="check-field"><input type="checkbox" name="group_ids" value="${g.id}" ${(r.group_ids || []).includes(g.id) ? "checked" : ""}><span>${E(g.name)}</span></label>`).join("") : '<span class="muted small">暂无主机组，可在资产页新增。</span>'}</div></fieldset>` +
-      field("address", "展示用内网 IP（可选）", r.address || "", "text", "仅作资产展示；SSH MCP 通过 Host ID 确定实际连接地址。") +
-      field(
-        "enabled",
-        "启用资产",
-        r.enabled === undefined || !!r.enabled,
-        "checkbox",
-      );
-    note = "SSH 连接信息在独立 SSH MCP 维护；平台无需上传私钥或公钥。";
-  } else if (type === "group") {
-    title = id ? "编辑主机组" : "新增主机组";
-    fields = field(
-      "name",
-      "主机组名称",
-      (state.groupRows || []).find((g) => g.id === Number(id))?.name || "",
-    );
-  } else if (type === "member") {
+  if (type === "member") {
     const member = (state.members || []).find((m) => m.open_id === id);
     title = id ? "编辑成员" : "授权成员";
     fields =
@@ -739,17 +641,6 @@ async function openEditor(type, id) {
         ["auditor", "只读审计"],
       ]) +
       field("enabled", "启用该成员", member ? !!member.enabled : true, "checkbox");
-  } else if (type === "import") {
-    title = "批量导入资产";
-    fields = field(
-      "csv",
-      "粘贴 Excel 表格或 CSV 清单",
-      "",
-      "textarea",
-      "四列依次为：资产名称、Zabbix Host ID、设备类型、内网 IP（可空）。设备类型填写 linux/windows/network/vmware/other/unknown；最多 1000 台。",
-      null,
-      true,
-    ) + btn("import-template", "下载导入模板");
   }
   $("#editor-title").textContent = title;
   $("#editor-fields").innerHTML = fields;
@@ -769,34 +660,26 @@ document.addEventListener("click", async (event) => {
     if (action === "refresh") await navigate();
     else if (action === "go-history") go("history");
     else if (action === "report") go("report/" + id);
-    else if (action === "new-asset" || action === "edit-asset")
-      await openEditor("asset", id);
-    else if (action === "new-group") await openEditor("group");
-    else if (action === "edit-group") await openEditor("group", id);
-    else if (action === "delete-group") {
-      await api(P + "/groups/" + id, "DELETE");
-      toast("本地主机组已删除，资产保留。");
-      await navigate();
-    } else if (action === "unmute") {
+    else if (action === "unmute") {
       const [host, trigger] = id.split(":");
       await api("/api/v1/alert-mutes/" + host + "/" + trigger, "DELETE");
       toast("屏蔽已解除");
       await navigate();
     } else if (action === "new-member" || action === "edit-member")
       await openEditor("member", id);
-    else if (action === "import-assets") await openEditor("import");
-    else if (action === "diagnose-asset") {
-      state.selectedAsset = id;
-      state.selectedEvent = "";
-      go("diagnostics");
+    else if (action === "search-hosts") {
+      const form = b.closest("form"), output = form.querySelector("#host-search-result");
+      output.textContent = "正在从 Zabbix MCP 查询…";
+      try {
+        const response = await api(P + "/hosts?q=" + encodeURIComponent(form.querySelector("#host-search").value.trim()));
+        if (!output.isConnected) return;
+        state.hostRows = response.items;
+        form.elements.zabbix_hostid.innerHTML = '<option value="">请选择监控主机</option>' + state.hostRows.map(h => `<option value="${E(h.zabbix_hostid)}">${E(h.name)} · Host ID ${E(h.zabbix_hostid)} · ${E(labels[h.device_type] || h.device_type)}</option>`).join("");
+        output.textContent = `已查询 ${response.items.length} 台主机。${response.at_limit ? "达到100台上限，请输入更精确名称或Host ID。" : "主机信息不在平台落库。"}`;
+      } catch (err) { if (output.isConnected) output.textContent = "查询失败：" + err.message; }
     } else if (action === "analyze-event") {
       state.selectedEvent = id;
-      state.selectedAsset = "";
       go("diagnostics");
-    } else if (action === "sync-assets") {
-      const r = await api(P + "/assets-sync", "POST");
-      toast(`已同步 ${r.count} 台。${r.note}`);
-      await navigate();
     } else if (action === "discover") {
       const results = await Promise.all(["zabbix_mcp", "ssh_mcp"].map(provider => api(P + "/tools/discover?provider=" + provider, "POST")));
       toast(results.map(r => `${r.provider}：${r.ok ? "连接成功，" + r.authorized_tools.length + " 个工具" : "失败，" + r.detail}`).join("；"));
@@ -806,19 +689,7 @@ document.addEventListener("click", async (event) => {
         null,
         2,
       );
-    else if (action === "asset-prev" || action === "asset-next") {
-      state.assetPage = Math.max(1, Math.min(
-        state.assetPageCount,
-        state.assetPage + (action === "asset-next" ? 1 : -1),
-      ));
-      await navigate();
-    } else if (action === "search-assets") {
-      state.assetQuery = $("#asset-search").value;
-      state.assetType = $("#asset-type").value;
-      state.assetGroup = $("#asset-group").value;
-      state.assetPage = 1;
-      await navigate();
-    } else if (action === "task-prev" || action === "task-next") {
+    else if (action === "task-prev" || action === "task-next") {
       state.taskPage = Math.max(1, Math.min(
         state.taskPageCount,
         state.taskPage + (action === "task-next" ? 1 : -1),
@@ -899,16 +770,10 @@ document.addEventListener("submit", async (event) => {
       let path,
         method = id ? "PUT" : "POST",
         payload = data;
-      if (type === "asset") {
-        path = "/assets" + (id ? "/" + id : "");
-      } else if (type === "group") path = "/groups" + (id ? "/" + id : "");
-      else if (type === "member") {
+      if (type === "member") {
         path = "/members";
         method = "PUT";
         data.enabled = form.elements.enabled.checked;
-      } else if (type === "import") {
-        path = "/assets-import";
-        payload = { assets: parseAssetList(data.csv) };
       }
       await api(P + path, method, payload);
       $("#editor").close();

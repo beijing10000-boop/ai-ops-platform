@@ -6,7 +6,7 @@
 2. 为每台主机填写其真实 Zabbix Host ID，保证唯一。SSH MCP 内部主机 ID 与 Zabbix Host ID 不同。
 3. 为 AI 平台签发独立 MCP 客户端令牌，限定主机组和诊断动作。
 4. 平台 Web → 连接管理 → SSH MCP：填写 `/mcp` 地址、令牌、开关与超时，验证后保存。
-5. 平台资产页可同步 Zabbix，用“验证关联”检查映射，再发起诊断。可信告警检测到 Linux 类型时可直接按 Host ID 解析，无需在平台重复登记 SSH 信息。
+5. 平台 AI 诊断页直接查询并选择 Zabbix 主机，用“验证诊断参数与关联”检查后发起诊断。告警按事件 Host ID 解析；平台不维护本地主机资产，主机类型来自 Zabbix OS/aiops.device_type 标签。
 
 当前十类剧本：CPU（cpu/processes）、内存（memory/memory_processes/kernel）、磁盘（disk）、IO（io/cpu）、服务（service/sockets/logs/memory/disk）、网络（network/sockets）、系统（system/kernel）、不可达（system）、瓶颈（cpu/memory/io/network）、日志（logs）。服务与日志需要合法服务名。目录排行、IP 连接与流量等其它能力在独立 SSH MCP 使用；平台不再复制其管理与执行实现。
 
