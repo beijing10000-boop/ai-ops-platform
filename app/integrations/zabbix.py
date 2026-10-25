@@ -517,7 +517,15 @@ async def monitoring_hosts(read_setting, query="", host_id=None):
             args["searchByAny"] = True
     async with asyncio.timeout(20):
         async with connect(read_setting) as session:
-            response = await call(session, "host_get", args)
+            remote = next(
+                (t for t in await discover(session) if t.name == "host_get"), None
+            )
+            if remote is None:
+                raise ValueError("Zabbix MCP 没有授权 host_get")
+            response = await call(
+                session, "host_get", args, schema=remote.inputSchema,
+                host_id=host_id if host_id else None,
+            )
     if response.isError:
         raise ValueError("Zabbix MCP 拒绝查询主机")
     rows = records(response)
