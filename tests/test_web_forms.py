@@ -115,6 +115,38 @@ def test_editor_and_diagnostic_preflights_are_read_only():
     assert client.get("/api/v1/alert-mutes").json() == []
 
 
+def test_mute_management_lists_active_and_recent_expired_with_role_checks():
+    import time
+
+    now = int(time.time())
+    with main.connection() as db:
+        db.execute(
+            "INSERT INTO alert_mutes(host_id,trigger_id,expires_at) VALUES (?,?,?)",
+            ("11848", "21001", now + 3600),
+        )
+        db.execute(
+            "INSERT INTO alert_mutes(host_id,trigger_id,expires_at) VALUES (?,?,?)",
+            ("11848", "21002", now - 60),
+        )
+        db.execute(
+            "INSERT INTO alert_mutes(host_id,trigger_id,expires_at) VALUES (?,?,?)",
+            ("11848", "21003", now - 120),
+        )
+    client = client_for("ops_admin")
+    active = client.get("/api/v1/alert-mutes")
+    assert active.status_code == 200
+    assert [(r["host_id"], r["trigger_id"]) for r in active.json()] == [
+        ("11848", "21001")
+    ]
+    expired = client.get("/api/v1/alert-mutes?status=expired")
+    assert expired.status_code == 200
+    assert [r["trigger_id"] for r in expired.json()] == ["21002", "21003"]
+    assert all(r["expires_at"] <= now for r in expired.json())
+    assert client.get("/api/v1/alert-mutes?status=invalid").status_code == 422
+    assert client_for("operator").get("/api/v1/alert-mutes").status_code == 403
+    assert client_for("auditor").get("/api/v1/alert-mutes?status=expired").status_code == 403
+
+
 def test_new_verification_endpoints_enforce_auth_csrf_and_roles():
     client = client_for("operator")
     assert client.post("/api/v1/test/feishu").status_code == 403
