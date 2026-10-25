@@ -324,7 +324,7 @@ async def validate_diagnostic(body: TaskInput, who=Depends(require("diagnostics.
         return await check_binding(asset["id"], who)
     return {
         "ok": True,
-        "message": "诊断参数通过；此任务仅查询监控，不执行 SSH 或 AI 分析。",
+        "message": "诊断参数通过；本次验证不执行 SSH 或 AI 分析。实际任务将先查询监控，按设备类型、配置与主机关联决定是否补查。",
     }
 
 
