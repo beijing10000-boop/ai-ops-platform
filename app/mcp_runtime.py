@@ -705,7 +705,11 @@ async def run(
                 # linux() resolves the exact Zabbix Host ID via SSH MCP and
                 # reuses the same scoped fixed-action playbook as interactive calls.
                 precollected_ssh = None
-                if can_ssh and executed < limits["calls"] and time.monotonic() < deadline - 15:
+                if (
+                    can_ssh
+                    and executed < limits["calls"]
+                    and time.monotonic() < deadline - 15
+                ):
                     precollected_ssh = await linux(
                         {
                             "diagnostic_type": kind,
