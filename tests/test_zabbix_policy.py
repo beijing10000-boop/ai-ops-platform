@@ -85,6 +85,7 @@ def test_initmax_mcp_schema_translates_output_and_inventory_tags_without_writes(
             "hostids": ["11848"],
             "selectInventory": ["os", "type"],
             "selectTags": ["tag", "value"],
+            "selectHostGroups": ["groupid", "name"],
         },
         host_id="11848",
     )
@@ -95,6 +96,7 @@ def test_initmax_mcp_schema_translates_output_and_inventory_tags_without_writes(
     assert wire["extra_params"] == {
         "selectInventory": ["os", "type"],
         "selectTags": ["tag", "value"],
+        "selectHostGroups": ["groupid", "name"],
     }
     assert "server" not in wire and "raw_json" not in wire
 
