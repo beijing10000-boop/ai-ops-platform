@@ -509,9 +509,18 @@ def infer_device(host):
         (
             "linux",
             (
-                "linux", "ubuntu", "debian", "rocky", "centos",
-                "rhel", "red hat", "almalinux", "suse", "fedora",
-                "openeuler", "euleros",
+                "linux",
+                "ubuntu",
+                "debian",
+                "rocky",
+                "centos",
+                "rhel",
+                "red hat",
+                "almalinux",
+                "suse",
+                "fedora",
+                "openeuler",
+                "euleros",
             ),
         ),
     ]:
