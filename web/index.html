@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Zabbix AI Ops · 统一诊断平台</title>
+    <link rel="stylesheet" href="/assets/apple.css" />
+  </head>
+  <body>
+    <div id="login" class="auth-screen">
+      <section class="auth-card">
+        <div class="brand-icon">Z</div>
+        <p class="eyebrow">INTELLIGENT OPERATIONS</p>
+        <h1>Zabbix AI Ops</h1>
+        <p class="muted">连接监控、证据与处理决策。</p>
+        <a class="button primary" href="/api/v1/auth/login"
+          >使用飞书账号登录 →</a
+        >
+        <p class="muted small">仅授权成员可访问。首次部署请完成初始化。</p>
+        <a href="/setup">首次初始化</a>
+        <p id="login-error" role="alert"></p>
+      </section>
+    </div>
+    <div id="app" hidden>
+      <aside class="sidebar">
+        <a class="brand" href="#overview"
+          ><span class="brand-icon">Z</span
+          ><span
+            ><strong>Zabbix AI Ops</strong><small>统一智能运维平台</small></span
+          ></a
+        >
+        <p class="nav-caption">工作空间</p>
+        <nav id="navigation" aria-label="主导航"></nav>
+        <div class="sidebar-bottom">
+          <span class="status-dot"></span><span id="version">版本加载中</span
+          ><button
+            id="theme-toggle"
+            class="icon-button"
+            aria-label="切换深浅色主题"
+          >
+            ◐
+          </button>
+        </div>
+      </aside>
+      <div class="workspace">
+        <header class="topbar">
+          <div>
+            <span class="eyebrow">OPERATIONS WORKSPACE</span>
+            <h1 id="page-title">总览</h1>
+          </div>
+          <div class="user-bar">
+            <span class="tag" id="role-label"></span><span id="username"></span
+            ><button id="logout" class="button quiet">退出</button>
+          </div>
+        </header>
+        <main id="content" tabindex="-1"></main>
+        <footer class="footer">
+          Zabbix AI Ops · 监控事实与实时证据分开记录 · 页面时间均为北京时间
+        </footer>
+      </div>
+    </div>
+    <div id="toast" role="status" hidden></div>
+    <dialog id="editor">
+      <form id="editor-form">
+        <div class="section-heading">
+          <h2 id="editor-title"></h2>
+          <button
+            type="button"
+            class="icon-button"
+            id="close-editor"
+            aria-label="关闭"
+          >
+            ×
+          </button>
+        </div>
+        <div id="editor-fields" class="form-grid"></div>
+        <div
+          id="editor-feedback"
+          class="editor-feedback"
+          role="alert"
+          hidden
+        ></div>
+        <div class="form-actions">
+          <span class="muted small" id="editor-note"></span
+          ><button type="button" class="button" data-action="validate-editor">验证填写内容</button><button class="button primary" type="submit">保存</button>
+        </div>
+      </form>
+    </dialog>
+    <script defer src="/assets/app.js"></script>
+  </body>
+</html>

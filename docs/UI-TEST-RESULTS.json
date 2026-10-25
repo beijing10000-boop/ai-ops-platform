@@ -1,0 +1,217 @@
+{
+  "browser": "Chromium headless",
+  "fixture": "disposable local database; no production data",
+  "checks": [
+    {
+      "width": 1280,
+      "page": "overview",
+      "ok": true
+    },
+    {
+      "width": 1280,
+      "page": "alerts",
+      "ok": true
+    },
+    {
+      "width": 1280,
+      "page": "diagnostics",
+      "ok": true
+    },
+    {
+      "width": 1280,
+      "page": "assets",
+      "ok": true
+    },
+    {
+      "width": 1280,
+      "page": "tools",
+      "ok": true
+    },
+    {
+      "width": 1280,
+      "page": "connections",
+      "ok": true
+    },
+    {
+      "width": 1280,
+      "page": "history",
+      "ok": true
+    },
+    {
+      "width": 1280,
+      "page": "feishu",
+      "ok": true
+    },
+    {
+      "width": 1280,
+      "page": "ai",
+      "ok": true
+    },
+    {
+      "width": 1280,
+      "page": "settings",
+      "ok": true
+    },
+    {
+      "width": 1280,
+      "page": "audit",
+      "ok": true
+    },
+    {
+      "width": 1440,
+      "page": "overview",
+      "ok": true
+    },
+    {
+      "width": 1440,
+      "page": "alerts",
+      "ok": true
+    },
+    {
+      "width": 1440,
+      "page": "diagnostics",
+      "ok": true
+    },
+    {
+      "width": 1440,
+      "page": "assets",
+      "ok": true
+    },
+    {
+      "width": 1440,
+      "page": "tools",
+      "ok": true
+    },
+    {
+      "width": 1440,
+      "page": "connections",
+      "ok": true
+    },
+    {
+      "width": 1440,
+      "page": "history",
+      "ok": true
+    },
+    {
+      "width": 1440,
+      "page": "feishu",
+      "ok": true
+    },
+    {
+      "width": 1440,
+      "page": "ai",
+      "ok": true
+    },
+    {
+      "width": 1440,
+      "page": "settings",
+      "ok": true
+    },
+    {
+      "width": 1440,
+      "page": "audit",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "overview",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "alerts",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "diagnostics",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "assets",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "tools",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "connections",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "history",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "feishu",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "ai",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "settings",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "audit",
+      "ok": true
+    },
+    {
+      "workflow": "asset pagination boundaries",
+      "ok": true
+    },
+    {
+      "workflow": "asset create/edit + validation without SSH credentials",
+      "ok": true
+    },
+    {
+      "workflow": "group assignment/filter + device-aware editing",
+      "ok": true
+    },
+    {
+      "workflow": "group create/edit/delete + stored HTML escaping",
+      "ok": true
+    },
+    {
+      "workflow": "two MCP forms + draft validation + masked token persistence",
+      "ok": true
+    },
+    {
+      "workflow": "budget number inputs + tool checkboxes + default prompt restore",
+      "ok": true
+    },
+    {
+      "workflow": "member create/edit/disable persistence",
+      "ok": true
+    },
+    {
+      "workflow": "Web mute create + early unmute",
+      "ok": true
+    },
+    {
+      "workflow": "history pagination + filter resets page",
+      "ok": true
+    },
+    {
+      "workflow": "late answer after page navigation",
+      "ok": true
+    },
+    {
+      "workflow": "report, evidence, theme toggle",
+      "ok": true
+    }
+  ],
+  "javascript_errors": [],
+  "http_5xx": []
+}

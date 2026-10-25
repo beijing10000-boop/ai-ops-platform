@@ -1,0 +1,754 @@
+"""One authenticated management API for assets, tools, tasks and evidence."""
+
+import json
+import re
+import sqlite3
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, Field
+from . import inventory
+from .main import connection, read_setting, SettingsUpdate, draft_reader
+from .security.rbac import require, enforce, ROLES, audit
+from .orchestrator import tasks
+from .integrations.ssh_mcp import SERVICE
+from .diagnostics.playbooks import PLAYBOOKS, classify
+
+router = APIRouter(prefix="/api/v1/platform")
+
+
+def write(call):
+    try:
+        return call()
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, "名称、Host ID 重复，或关联对象不存在") from None
+
+
+@router.get("/overview")
+def overview(who=Depends(require("overview.read"))):
+    with connection() as db:
+        active = db.execute(
+            "SELECT COUNT(*) FROM alert_events a WHERE a.event_value='1' AND NOT EXISTS(SELECT 1 FROM alert_events r WHERE r.event_id=a.event_id AND r.event_value='0')"
+        ).fetchone()[0]
+        counts = dict(
+            db.execute(
+                "SELECT status,COUNT(*) FROM diagnostic_tasks WHERE created_at>=datetime('now','-1 day') GROUP BY status"
+            )
+        )
+        tokens = db.execute(
+            "SELECT SUM(token_total),COUNT(token_total),AVG(duration_ms) FROM diagnostic_tasks WHERE completed_at>=datetime('now','-1 day')"
+        ).fetchone()
+        hosts = db.execute(
+            "SELECT COUNT(*),SUM(CASE WHEN zabbix_hostid IS NOT NULL AND enabled=1 THEN 1 ELSE 0 END) FROM assets WHERE device_type='linux'"
+        ).fetchone()
+        health = [
+            dict(zip(("provider", "status", "checked_at", "detail"), r))
+            for r in db.execute(
+                "SELECT provider,status,checked_at,detail FROM integration_health"
+            )
+        ]
+    with connection() as db:
+        ai_counts = dict(
+            db.execute(
+                "SELECT status,COUNT(*) FROM diagnostic_tasks WHERE kind='analysis' AND created_at>=datetime('now','-1 day') GROUP BY status"
+            )
+        )
+    ai_finished = sum(ai_counts.get(k, 0) for k in ("success", "partial", "failed"))
+    finished = sum(counts.get(k, 0) for k in ("success", "partial", "failed"))
+    return {
+        "scope": "平台已接收的告警；任务与用量为最近 24 小时",
+        "unrecovered_received_events": active,
+        "tasks_24h": sum(counts.values()),
+        "ai_runs_24h": sum(ai_counts.values()),
+        "ai_success_rate_24h": round(100 * ai_counts.get("success", 0) / ai_finished, 1)
+        if ai_finished
+        else None,
+        "completed_24h": counts.get("success", 0),
+        "partial_24h": counts.get("partial", 0),
+        "failed_24h": counts.get("failed", 0),
+        "completion_rate_24h": round(
+            100 * (counts.get("success", 0) + counts.get("partial", 0)) / finished, 1
+        )
+        if finished
+        else None,
+        "token_total_24h": tokens[0],
+        "usage_available_runs_24h": tokens[1],
+        "average_duration_ms_24h": tokens[2],
+        "linux_hosts": hosts[0],
+        "linked_linux_hosts": hosts[1] or 0,
+        "mcp_configured": bool(read_setting("mcp_url")),
+        "ssh_mcp_configured": bool(
+            read_setting("ssh_mcp_url")
+            and read_setting("ssh_mcp_token")
+            and read_setting("ssh_mcp_enabled") == "true"
+        ),
+        "health": health,
+    }
+
+
+@router.get("/assets")
+def assets(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
+    q: str = Query("", max_length=160),
+    device_type: str = "all",
+    group_id: int | None = None,
+    who=Depends(require("inventory.read")),
+):
+    return inventory.asset_page(page, page_size, q, device_type, group_id)
+
+
+@router.post("/assets", status_code=201)
+def add_asset(body: inventory.AssetInput, who=Depends(require("inventory.manage"))):
+    return write(lambda: inventory.save_asset(body, who["open_id"]))
+
+
+@router.put("/assets/{asset_id}")
+def edit_asset(
+    asset_id: int, body: inventory.AssetInput, who=Depends(require("inventory.manage"))
+):
+    return write(lambda: inventory.save_asset(body, who["open_id"], asset_id))
+
+
+@router.delete("/assets/{asset_id}")
+def disable_asset(asset_id: int, who=Depends(require("inventory.manage"))):
+    with connection() as db:
+        if not db.execute(
+            "UPDATE assets SET enabled=0,revision=revision+1 WHERE id=?",
+            (asset_id,),
+        ).rowcount:
+            raise HTTPException(404, "资产不存在")
+    audit(who["open_id"], "asset_disabled", asset_id)
+    return {"ok": True}
+
+
+class ImportAssets(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    assets: list[inventory.AssetInput] = Field(min_length=1, max_length=1000)
+
+
+@router.post("/assets-import")
+def import_assets(body: ImportAssets, who=Depends(require("inventory.manage"))):
+    # Validate everything before beginning the all-or-nothing transaction.
+    checked = write(lambda: [a.checked() for a in body.assets])
+
+    def save():
+        ids = []
+        with connection() as db:
+            for asset in checked:
+                values = inventory.asset_values(asset)
+                ident = db.execute(
+                    "INSERT INTO assets("
+                    + ",".join(values)
+                    + ") VALUES ("
+                    + ",".join("?" for _ in values)
+                    + ")",
+                    tuple(values.values()),
+                ).lastrowid
+                ids.append(ident)
+                db.executemany(
+                    "INSERT INTO asset_group_members VALUES (?,?)",
+                    ((ident, g) for g in set(asset.group_ids)),
+                )
+        return ids
+
+    ids = write(save)
+    audit(who["open_id"], "asset_batch_import", len(ids))
+    return {"count": len(ids), "ids": ids}
+
+
+class GroupInput(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+
+
+@router.get("/groups")
+def groups(who=Depends(require("inventory.read"))):
+    with connection() as db:
+        return [
+            dict(zip(("id", "name", "zabbix_groupid"), r))
+            for r in db.execute("SELECT * FROM asset_groups ORDER BY name")
+        ]
+
+
+@router.post("/groups")
+def add_group(body: GroupInput, who=Depends(require("inventory.manage"))):
+    if not body.name.strip():
+        raise HTTPException(422, "主机组名称不能为空")
+
+    def save():
+        with connection() as db:
+            return db.execute(
+                "INSERT INTO asset_groups(name) VALUES (?)", (body.name.strip(),)
+            ).lastrowid
+
+    ident = write(save)
+    audit(who["open_id"], "group_created", ident)
+    return {"id": ident}
+
+
+@router.post("/assets-sync")
+async def sync_assets(who=Depends(require("inventory.manage"))):
+    from .integrations import zabbix
+
+    try:
+        async with zabbix.connect(read_setting) as session:
+            if "host_get" not in zabbix.enabled_names(read_setting):
+                raise ValueError("host_get 已被禁用")
+            response = await zabbix.call(
+                session,
+                "host_get",
+                {
+                    "selectHostGroups": ["groupid", "name"],
+                    "selectInventory": ["os", "type"],
+                    "selectTags": ["tag", "value"],
+                    "limit": 1000,
+                },
+            )
+            if response.isError:
+                raise ValueError("MCP 返回错误")
+            records = zabbix.records(response)
+    except Exception as exc:
+        raise HTTPException(502, "资产同步失败：" + type(exc).__name__) from None
+    with connection() as db:
+        count = 0
+        for host in records:
+            hid = str(host.get("hostid", ""))
+            if not re.fullmatch(r"[0-9]{1,32}", hid):
+                continue
+            # Preserve administrator type overrides and enabled status.
+            db.execute(
+                "INSERT INTO assets(name,zabbix_hostid,device_type) VALUES (?,?,?) ON CONFLICT(zabbix_hostid) DO UPDATE SET name=excluded.name",
+                (
+                    str(host.get("name") or host.get("host") or hid)[:160],
+                    hid,
+                    inventory.infer_device(host),
+                ),
+            )
+            aid = db.execute(
+                "SELECT id FROM assets WHERE zabbix_hostid=?", (hid,)
+            ).fetchone()[0]
+            db.execute(
+                "DELETE FROM asset_group_members WHERE asset_id=? AND group_id IN (SELECT id FROM asset_groups WHERE zabbix_groupid IS NOT NULL)",
+                (aid,),
+            )
+            for group in host.get("hostgroups") or host.get("groups") or []:
+                gid = str(group.get("groupid", ""))
+                if not gid.isdigit():
+                    continue
+                group_name = str(group.get("name") or gid)[:160]
+                suffix = 0
+                while db.execute(
+                    "SELECT 1 FROM asset_groups WHERE name=? AND (zabbix_groupid IS NULL OR zabbix_groupid!=?)",
+                    (group_name, gid),
+                ).fetchone():
+                    suffix += 1
+                    group_name = (
+                        str(group.get("name") or gid)[:120]
+                        + f" · Zabbix {gid}"
+                        + (f" ({suffix})" if suffix > 1 else "")
+                    )
+                db.execute(
+                    "INSERT INTO asset_groups(name,zabbix_groupid) VALUES (?,?) ON CONFLICT(zabbix_groupid) DO UPDATE SET name=excluded.name",
+                    (group_name, gid),
+                )
+                db.execute(
+                    "INSERT OR IGNORE INTO asset_group_members VALUES (?,(SELECT id FROM asset_groups WHERE zabbix_groupid=?))",
+                    (aid, gid),
+                )
+            count += 1
+    audit(who["open_id"], "zabbix_assets_synced", count)
+    return {
+        "count": count,
+        "at_limit": len(records) >= 1000,
+        "note": "单次最多同步 1000 台；SSH MCP 中登记相同的 Zabbix Host ID 即可关联。",
+    }
+
+
+class TaskInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    asset_id: int | None = Field(default=None, ge=1)
+    event_id: str | None = Field(default=None, pattern=r"^[0-9]{1,32}$")
+    diagnostic_type: str = "auto"
+    profile: str = "standard"
+    question: str = Field(default="请根据实际证据诊断故障并给出建议", max_length=3000)
+    service: str | None = Field(default=None, max_length=64)
+    time_window: int = Field(default=30, ge=1, le=120)
+
+
+def validate_task(body):
+    if body.diagnostic_type not in set(PLAYBOOKS) | {"auto"} or body.profile not in (
+        "quick",
+        "standard",
+        "deep",
+    ):
+        raise HTTPException(422, "诊断类型或模式无效")
+    if body.service and not SERVICE.fullmatch(body.service):
+        raise HTTPException(422, "服务名称无效")
+    asset = inventory.get_asset(body.asset_id) if body.asset_id else None
+    if body.asset_id and (not asset or not asset["enabled"]):
+        raise HTTPException(422, "资产不存在或已禁用")
+    event = {}
+    if body.event_id:
+        with connection() as db:
+            row = db.execute(
+                "SELECT event_json FROM alert_events WHERE event_id=? AND event_value='1'",
+                (body.event_id,),
+            ).fetchone()
+        if not row or not row[0]:
+            raise HTTPException(404, "未找到已接收的告警")
+        event = json.loads(row[0])
+        bound = inventory.get_asset(zabbix_hostid=str(event.get("host_id")))
+        if asset and asset["zabbix_hostid"] != str(event.get("host_id")):
+            raise HTTPException(422, "资产与事件 Host ID 不匹配")
+        asset = bound
+    elif asset:
+        event = {
+            "host_id": asset["zabbix_hostid"] or "",
+            "host_name": asset["name"],
+            "event_name": body.question,
+        }
+    if body.diagnostic_type == "auto":
+        body.diagnostic_type = classify(event.get("event_name") or body.question)
+    return asset, event
+
+
+@router.post("/tasks/validate")
+async def validate_diagnostic(body: TaskInput, who=Depends(require("diagnostics.run"))):
+    asset, event = validate_task(body)
+    if (
+        body.profile != "quick"
+        and asset
+        and asset["device_type"] == "linux"
+        and asset["enabled"]
+    ):
+        return await check_binding(asset["id"], who)
+    return {
+        "ok": True,
+        "message": "诊断参数通过；本次验证不执行 SSH 或 AI 分析。实际任务将先查询监控，按设备类型、配置与主机关联决定是否补查。",
+    }
+
+
+@router.post("/assets/{asset_id}/validate")
+async def check_binding(asset_id: int, who=Depends(require("diagnostics.run"))):
+    import asyncio
+    from .integrations import ssh_mcp
+
+    asset = inventory.get_asset(asset_id)
+    if (
+        not asset
+        or not asset["enabled"]
+        or asset["device_type"] != "linux"
+        or not asset["zabbix_hostid"]
+    ):
+        raise HTTPException(422, "需要已启用且绑定 Zabbix Host ID 的 Linux 资产")
+    try:
+        async with asyncio.timeout(20):
+            async with ssh_mcp.configured(read_setting, timeout=15) as adapter:
+                binding = await adapter.resolve(asset["zabbix_hostid"])
+        audit(who["open_id"], "ssh_mcp_binding_verified", asset_id)
+        return {
+            "ok": True,
+            "message": "Host ID 映射验证通过；未连接目标 SSH 或执行诊断。",
+            "ssh_host_id": binding.host_id,
+            "host_revision": binding.revision,
+        }
+    except Exception as exc:
+        raise HTTPException(
+            502,
+            str(exc)
+            if isinstance(exc, ssh_mcp.IntegrationError)
+            else "SSH MCP 关联验证失败：" + type(exc).__name__,
+        ) from None
+
+
+@router.post("/tasks", status_code=202)
+def submit(body: TaskInput, who=Depends(require("diagnostics.run"))):
+    asset, event = validate_task(body)
+    request = {**body.model_dump(), "event": event}
+    task, created = tasks.create(
+        request,
+        source="web",
+        actor=who["open_id"],
+        event_id=body.event_id,
+        asset_id=asset["id"] if asset else None,
+        diagnostic_type=body.diagnostic_type,
+        profile=body.profile,
+    )
+    if created:
+        write(lambda: tasks.enqueue(task["task_id"]))
+    audit(who["open_id"], "analysis_submitted", task["task_id"], task["trace_id"])
+    return {
+        "task_id": task["task_id"],
+        "trace_id": task["trace_id"],
+        "duplicate": not created,
+    }
+
+
+@router.get("/tasks")
+def task_page(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
+    status: str = "all",
+    who=Depends(require("reports.read")),
+):
+    return tasks.page(page, page_size, status)
+
+
+@router.get("/tasks/{task_id}")
+def task_detail(
+    task_id: str, include_logs: bool = False, who=Depends(require("reports.read"))
+):
+    task = tasks.get(task_id, private=True)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    request = task.pop("request")
+    event = request.get("event") or {}
+    task["alert"] = {
+        k: event.get(k)
+        for k in (
+            "event_id",
+            "event_name",
+            "host_id",
+            "host_name",
+            "severity",
+            "event_date",
+            "event_time",
+        )
+    }
+    asset = inventory.get_asset(task["asset_id"]) if task["asset_id"] else None
+    task["asset"] = (
+        {k: asset.get(k) for k in ("id", "name", "device_type", "zabbix_hostid")}
+        if asset
+        else None
+    )
+    if include_logs:
+        enforce(who["open_id"], "logs.read")
+    task["evidence"] = tasks.evidence_page(task_id, include_logs)
+    audit(who["open_id"], "report_read", task_id, task["trace_id"])
+    return task
+
+
+@router.post("/tasks/{task_id}/cancel")
+def cancel_task(task_id: str, who=Depends(require("diagnostics.run"))):
+    with connection() as db:
+        if not db.execute(
+            "UPDATE diagnostic_tasks SET cancel_requested=1,stage=CASE WHEN status='queued' THEN 'cancelled' ELSE stage END,completed_at=CASE WHEN status='queued' THEN CURRENT_TIMESTAMP ELSE completed_at END,status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END WHERE task_id=? AND status IN ('queued','running')",
+            (task_id,),
+        ).rowcount:
+            raise HTTPException(409, "任务不存在或已结束")
+    audit(who["open_id"], "task_cancelled", task_id)
+    return {"ok": True}
+
+
+@router.post("/tasks/{task_id}/retry", status_code=202)
+def retry_task(task_id: str, who=Depends(require("diagnostics.run"))):
+    old = tasks.get(task_id, private=True)
+    if not old or old["status"] not in ("failed", "partial", "cancelled"):
+        raise HTTPException(409, "仅失败、部分完成或取消的任务可重试")
+    if old["kind"] != "analysis":
+        raise HTTPException(409, "旧版 SSH 或导入任务不能重试，请发起新的 AI 诊断")
+    request = {k: v for k, v in old["request"].items() if k != "limits"}
+    asset = inventory.get_asset(old["asset_id"]) if old["asset_id"] else None
+    if old["asset_id"] and (not asset or not asset["enabled"]):
+        raise HTTPException(422, "资产不存在或已禁用")
+    task, created = tasks.create(
+        request,
+        source=old["source"],
+        actor=who["open_id"],
+        kind=old["kind"],
+        event_id=old["event_id"],
+        asset_id=old["asset_id"],
+        diagnostic_type=old["diagnostic_type"],
+        profile=old["profile"],
+    )
+    if created:
+        write(lambda: tasks.enqueue(task["task_id"]))
+    audit(who["open_id"], "task_retried", task_id)
+    return {"task_id": task["task_id"], "duplicate": not created}
+
+
+@router.get("/tools")
+def tool_registry(who=Depends(require("tools.read"))):
+    from .integrations.zabbix import READ_TOOLS, enabled_names, input_schema
+
+    enabled = enabled_names(read_setting)
+    rows = [
+        {
+            "name": n,
+            "provider": "zabbix_mcp",
+            "device_types": [
+                "linux",
+                "windows",
+                "vmware",
+                "network",
+                "other",
+                "unknown",
+            ],
+            "description": "受限 Zabbix 只读查询",
+            "read_only": True,
+            "risk": "read",
+            "timeout": 18,
+            "max_output_chars": 10000,
+            "required_scope": "diagnostics.run",
+            "enabled": n in enabled,
+            "input_schema": input_schema(n),
+            "output_schema": {
+                "type": "object",
+                "properties": {
+                    "data": {"type": "string"},
+                    "is_error": {"type": "boolean"},
+                    "error": {"type": "string"},
+                },
+            },
+        }
+        for n in sorted(READ_TOOLS)
+    ]
+    rows.append(
+        {
+            "name": "diagnose_linux_host",
+            "provider": "ssh_mcp",
+            "device_types": ["linux"],
+            "description": "通过独立 SSH MCP 按 Zabbix Host ID 执行受限诊断",
+            "read_only": True,
+            "risk": "bounded_read",
+            "timeout": int(read_setting("ssh_mcp_timeout_seconds") or 90),
+            "max_output_chars": 32768,
+            "required_scope": "diagnostics.run",
+            "enabled": read_setting("ssh_mcp_enabled") == "true"
+            and bool(read_setting("ssh_mcp_url") and read_setting("ssh_mcp_token")),
+            "input_schema": {
+                "diagnostic_type": list(PLAYBOOKS),
+                "service": "validated unit",
+                "time_window": "1–120 minutes",
+            },
+            "output_schema": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string"},
+                    "output": {"type": "string"},
+                },
+            },
+        }
+    )
+    return {
+        "tools": rows,
+        "playbooks": PLAYBOOKS,
+    }
+
+
+@router.post("/tools/discover")
+async def discover(
+    provider: str = "zabbix_mcp",
+    body: SettingsUpdate | None = None,
+    who=Depends(require("settings.manage")),
+):
+    import asyncio
+    from .integrations import zabbix, ssh_mcp
+
+    reader = draft_reader(body, who)
+    if provider not in {"zabbix_mcp", "ssh_mcp"}:
+        raise HTTPException(422, "MCP 提供方无效")
+    try:
+        async with asyncio.timeout(20):
+            if provider == "zabbix_mcp":
+                async with zabbix.connect(reader) as session:
+                    listed = await zabbix.discover(session)
+                    names = sorted(
+                        t.name for t in listed if t.name in zabbix.enabled_names(reader)
+                    )
+                if not names:
+                    raise ValueError("未发现授权的 Zabbix 只读工具")
+            else:
+                async with ssh_mcp.configured(reader, timeout=15) as adapter:
+                    listed = await adapter.session.list_tools()
+                    available = {t.name for t in listed.tools}
+                    if "ssh_resolve_host" not in available:
+                        raise ValueError(
+                            "SSH MCP 需升级至支持 Host ID 解析的 v0.2.0 或更新版"
+                        )
+                    names = sorted(
+                        available & ({"ssh_resolve_host"} | set(ssh_mcp.TOOLS.values()))
+                    )
+        status = "success"
+        detail = json.dumps({"authorized_tools": names}, ensure_ascii=False)
+    except Exception as exc:
+        status, names = "failed", []
+        detail = (
+            str(exc)
+            if isinstance(exc, (ValueError, ssh_mcp.IntegrationError))
+            else type(exc).__name__
+        )
+        detail = detail[:250]
+    keys = (
+        ("mcp_url", "mcp_token")
+        if provider == "zabbix_mcp"
+        else (
+            "ssh_mcp_url",
+            "ssh_mcp_token",
+            "ssh_mcp_enabled",
+            "ssh_mcp_timeout_seconds",
+        )
+    )
+    # A successful unsaved draft must not claim the active configuration is healthy.
+    if all(reader(key) == read_setting(key) for key in keys):
+        with connection() as db:
+            db.execute(
+                "INSERT INTO integration_health(provider,status,detail) VALUES (?,?,?) ON CONFLICT(provider) DO UPDATE SET status=excluded.status,checked_at=CURRENT_TIMESTAMP,detail=excluded.detail",
+                (provider, status, detail),
+            )
+    audit(who["open_id"], "mcp_connection_test", provider)
+    return {
+        "ok": status == "success",
+        "provider": provider,
+        "authorized_tools": names,
+        "detail": detail,
+        "note": "发现工具仅验证连接和协议；主机映射、远端动作授权及 SSH 连通性在实际诊断时核验",
+    }
+
+
+class MemberInput(BaseModel):
+    open_id: str = Field(pattern=r"^ou_[A-Za-z0-9_-]{2,128}$")
+    role: str
+    enabled: bool = True
+
+
+@router.get("/members")
+def members(who=Depends(require("*"))):
+    with connection() as db:
+        return [
+            dict(zip(("open_id", "role", "enabled"), r))
+            for r in db.execute("SELECT * FROM members")
+        ]
+
+
+@router.put("/members")
+def save_member(body: MemberInput, who=Depends(require("*"))):
+    if body.role not in ROLES or body.role == "super_admin":
+        raise HTTPException(422, "超级管理员仅通过初始化管理员名单管理")
+    with connection() as db:
+        db.execute(
+            "INSERT INTO members VALUES (?,?,?) ON CONFLICT(open_id) DO UPDATE SET role=excluded.role,enabled=excluded.enabled",
+            (body.open_id, body.role, int(body.enabled)),
+        )
+    audit(who["open_id"], "member_updated", body.open_id)
+    return {"ok": True}
+
+
+@router.get("/audit")
+def audit_page(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    who=Depends(require("audit.read")),
+):
+    with connection() as db:
+        total = db.execute("SELECT COUNT(*) FROM audit").fetchone()[0]
+        cur = db.execute(
+            "SELECT id,action,key,actor,trace_id,created_at FROM audit ORDER BY id DESC LIMIT ? OFFSET ?",
+            (page_size, (page - 1) * page_size),
+        )
+        return {
+            "items": [inventory.row_dict(r, cur) for r in cur.fetchall()],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+
+
+@router.put("/groups/{group_id}")
+def edit_group(
+    group_id: int, body: GroupInput, who=Depends(require("inventory.manage"))
+):
+    if not body.name.strip():
+        raise HTTPException(422, "主机组名称不能为空")
+
+    def save():
+        with connection() as db:
+            row = db.execute(
+                "SELECT zabbix_groupid FROM asset_groups WHERE id=?", (group_id,)
+            ).fetchone()
+            if not row:
+                raise HTTPException(404, "主机组不存在")
+            if row[0]:
+                raise HTTPException(409, "同步组由 Zabbix 维护，本地只编辑手工组")
+            db.execute(
+                "UPDATE asset_groups SET name=? WHERE id=?",
+                (body.name.strip(), group_id),
+            )
+
+    write(save)
+    audit(who["open_id"], "group_updated", group_id)
+    return {"ok": True}
+
+
+@router.delete("/groups/{group_id}")
+def delete_group(group_id: int, who=Depends(require("inventory.manage"))):
+    with connection() as db:
+        row = db.execute(
+            "SELECT zabbix_groupid FROM asset_groups WHERE id=?", (group_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "主机组不存在")
+        if row[0]:
+            raise HTTPException(409, "同步组由 Zabbix 维护，本地只删除手工组")
+        db.execute("DELETE FROM asset_groups WHERE id=?", (group_id,))
+    audit(who["open_id"], "group_deleted", group_id)
+    return {"ok": True}
+
+
+class FormCheck(BaseModel):
+    kind: str
+    values: dict
+
+
+@router.post("/validate")
+def validate_editor(body: FormCheck, who=Depends(require("inventory.manage"))):
+    from pydantic import ValidationError
+
+    try:
+        if body.kind in {"asset", "import"}:
+            entries = (
+                [body.values] if body.kind == "asset" else body.values.get("assets", [])
+            )
+            if not isinstance(entries, list) or not 1 <= len(entries) <= 1000:
+                raise ValueError("请选择 1–1000 条资产")
+            checked = [
+                inventory.AssetInput.model_validate(a).checked() for a in entries
+            ]
+            ids = [a.zabbix_hostid for a in checked if a.zabbix_hostid]
+            if len(ids) != len(set(ids)):
+                raise ValueError("导入内容包含重复 Host ID")
+            with connection() as db:
+                for a in checked:
+                    if any(
+                        not db.execute(
+                            "SELECT 1 FROM asset_groups WHERE id=?", (gid,)
+                        ).fetchone()
+                        for gid in a.group_ids
+                    ):
+                        raise ValueError("关联的主机组不存在")
+                if body.kind == "import" and any(
+                    db.execute(
+                        "SELECT 1 FROM assets WHERE zabbix_hostid=?", (hid,)
+                    ).fetchone()
+                    for hid in ids
+                ):
+                    raise ValueError("导入 Host ID 已存在")
+        elif body.kind == "group":
+            group = GroupInput.model_validate(body.values)
+            if not group.name.strip():
+                raise ValueError("主机组名称不能为空")
+        elif body.kind == "member":
+            enforce(who["open_id"], "*")
+            member = MemberInput.model_validate(body.values)
+            if member.role not in ROLES or member.role == "super_admin":
+                raise ValueError("角色无效；超级管理员请在名单管理")
+        else:
+            raise ValueError("不支持的验证类型")
+    except ValidationError:
+        raise HTTPException(422, "表单内容无效，请核对必填项、字段类型和长度") from None
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    return {
+        "ok": True,
+        "message": "表单校验通过；未保存。唯一性和权限在实际保存时再次检查。",
+    }

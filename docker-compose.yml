@@ -1,0 +1,66 @@
+name: ai-ops-platform
+x-app-env: &app-env
+  TZ: Asia/Shanghai
+  DATA_DIR: /app/data
+  REDIS_URL: redis://redis:6379/0
+  APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:-}
+  ADMIN_API_TOKEN: ${ADMIN_API_TOKEN:-}
+  ALLOW_LEGACY_ADMIN_TOKEN: ${ALLOW_LEGACY_ADMIN_TOKEN:-false}
+  FEISHU_ADMIN_OPEN_IDS: ${FEISHU_ADMIN_OPEN_IDS:-}
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: '3'
+x-worker: &worker
+  build: .
+  restart: unless-stopped
+  environment: *app-env
+  volumes: [appdata:/app/data]
+  depends_on:
+    redis: {condition: service_healthy}
+    web: {condition: service_healthy}
+  logging: *logging
+services:
+  redis:
+    image: redis:7-alpine
+    command: [redis-server, --appendonly, 'yes', --maxmemory, 256mb, --maxmemory-policy, noeviction]
+    restart: unless-stopped
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging: *logging
+  web:
+    build: .
+    restart: unless-stopped
+    ports: ['${WEB_BIND_IP:-0.0.0.0}:${WEB_PORT:-8088}:8088']
+    environment: *app-env
+    volumes: [appdata:/app/data]
+    depends_on:
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8088/healthz", timeout=3)']
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    logging: *logging
+  alert-worker:
+    <<: *worker
+    command: [python, -m, app.worker]
+  qa-worker:
+    <<: *worker
+    command: [python, -m, app.qa_worker]
+  diagnostic-worker:
+    <<: *worker
+    command: [python, -m, app.diagnostic_worker]
+  feishu-receiver:
+    <<: *worker
+    profiles: [feishu]
+    command: [python, -m, app.feishu_bot]
+volumes:
+  appdata:
+  redisdata:

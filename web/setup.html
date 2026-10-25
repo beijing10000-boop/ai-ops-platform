@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>首次初始化 · Zabbix AI Ops</title>
+    <link rel="stylesheet" href="/assets/apple.css" />
+  </head>
+  <body class="setup-screen">
+    <main>
+      <h1>首次初始化</h1>
+      <p>
+        仅配置 Web
+        登录所需的项目，完成后此入口自动关闭。其他业务设置继续在管理后台完成。
+      </p>
+      <form id="setup">
+        <label
+          >初始化凭据<input
+            type="password"
+            name="bootstrap_token"
+            autocomplete="off"
+            required
+        /></label>
+        <small
+          >读取持久化目录中的 bootstrap.token；兼容旧部署设置的
+          ADMIN_API_TOKEN。只用于初始化。</small
+        >
+        <label
+          >访问协议<select name="web_protocol">
+            <option value="http">HTTP（仅内部测试）</option>
+            <option value="https">HTTPS（推荐）</option>
+          </select></label
+        >
+        <label
+          >Web 外部访问主机<input
+            name="web_public_host"
+            placeholder="172.20.200.93:8088"
+            required
+        /></label>
+        <label
+          >飞书应用 App ID<input
+            name="lark_app_id"
+            placeholder="cli_xxxxxxxxxxxx"
+            required
+        /></label>
+        <label
+          >飞书应用 App Secret<input
+            type="password"
+            name="lark_app_secret"
+            autocomplete="off"
+            required
+        /></label>
+        <label
+          >管理员 Open ID<input
+            name="feishu_admin_open_ids"
+            placeholder="ou_xxxx,ou_yyyy"
+            required
+        /></label>
+        <small
+          >多个管理员以英文逗号分隔；请包含自己当前飞书账户的 Open ID。</small
+        >
+        <button type="button" id="validate-setup">验证初始化信息</button><button type="submit">保存并完成初始化</button>
+      </form>
+      <div id="status" role="status"></div>
+      <p><a href="/">返回登录页</a></p>
+    </main>
+    <script defer src="/assets/setup.js"></script>
+  </body>
+</html>
