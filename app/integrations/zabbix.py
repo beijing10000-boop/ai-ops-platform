@@ -485,23 +485,60 @@ DEVICE_TYPES = {"linux", "windows", "vmware", "network", "other", "unknown"}
 
 
 def infer_device(host):
+    """Identify a verified Zabbix host using explicit tags, inventory or groups.
+
+    Group memberships must come from host.get/selectHostGroups, never from
+    untrusted alert text. In ambiguous cases fail closed to "unknown".
+    """
     tags = {
-        t.get("tag"): str(t.get("value", "")).lower()
+        str(t.get("tag", "")).strip().lower(): str(t.get("value", "")).strip().lower()
         for t in host.get("tags", [])
         if isinstance(t, dict)
     }
-    if tags.get("aiops.device_type") in DEVICE_TYPES:
-        return tags["aiops.device_type"]
-    os_name = str((host.get("inventory") or {}).get("os", "")).lower()
+    declared = tags.get("aiops.device_type")
+    if declared in DEVICE_TYPES:
+        return declared
+
+    inventory = host.get("inventory")
+    inventory = inventory if isinstance(inventory, dict) else {}
+    os_name = str(inventory.get("os") or "").lower()
     for kind, words in [
         ("windows", ("windows",)),
         ("vmware", ("vmware", "esxi", "vcenter")),
         ("network", ("huawei", "vrp", "cisco", "comware")),
-        ("linux", ("linux",)),
+        (
+            "linux",
+            (
+                "linux", "ubuntu", "debian", "rocky", "centos",
+                "rhel", "red hat", "almalinux", "suse", "fedora",
+                "openeuler", "euleros",
+            ),
+        ),
     ]:
         if any(w in os_name for w in words):
             return kind
-    return "unknown"
+
+    # Zabbix host.get exposes the selected host groups as "hostgroups".
+    # Accept older/alternative "groups" only if it is structured group data.
+    groups = host.get("hostgroups")
+    if not isinstance(groups, list):
+        groups = host.get("groups")
+    if not isinstance(groups, list):
+        return "unknown"
+    names = {
+        " ".join(str(group.get("name") or "").strip().casefold().split())
+        for group in groups
+        if isinstance(group, dict)
+    }
+    # Exact names only: an arbitrary group such as "Not Linux" does not
+    # establish a safe SSH device classification.
+    known_groups = {
+        "linux": {"linux", "linux servers", "linux hosts", "linux server"},
+        "windows": {"windows", "windows servers", "windows hosts"},
+        "vmware": {"vmware", "vmware hosts", "vmware servers", "esxi", "vcenter"},
+    }
+    matches = {kind for kind, aliases in known_groups.items() if names & aliases}
+    return next(iter(matches)) if len(matches) == 1 else "unknown"
 
 
 async def monitoring_hosts(read_setting, query="", host_id=None):
@@ -513,6 +550,7 @@ async def monitoring_hosts(read_setting, query="", host_id=None):
     args = {
         "selectInventory": ["os", "type"],
         "selectTags": ["tag", "value"],
+        "selectHostGroups": ["groupid", "name"],
         "limit": 100,
     }
     if host_id:
