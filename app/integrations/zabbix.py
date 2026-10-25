@@ -401,17 +401,75 @@ async def connect(read_setting):
             yield session
 
 
+
+class ToolSchemaMismatch(ValueError):
+    """The locally allowed read query cannot satisfy the remote MCP schema."""
+
+
+def _schema_accepts(property_schema, expected):
+    if not isinstance(property_schema, dict):
+        return False
+    declared = property_schema.get("type")
+    if declared == expected or isinstance(declared, list) and expected in declared:
+        return True
+    return any(
+        _schema_accepts(option, expected)
+        for field in ("anyOf", "oneOf", "allOf")
+        for option in property_schema.get(field, [])
+    )
+
+
+def adapt_read_args(name, checked, schema):
+    """Convert allowlisted read arguments to the remote MCP transport shape.
+
+    Must be called only after validate_args. Some initMAX MCP versions require
+    comma-separated output fields and carry selectXxx via extra_params.
+    """
+    if name not in READ_TOOLS:
+        raise ValueError("tool not authorized")
+    if not isinstance(schema, dict) or not isinstance(schema.get("properties"), dict):
+        raise ToolSchemaMismatch("远端未提供可验证的参数结构")
+    props = schema["properties"]
+    args, extra = {}, {}
+    for key, value in checked.items():
+        if key == "output" and _schema_accepts(props.get("output", {}), "string"):
+            value = ",".join(value) if isinstance(value, list) else value
+        if key in props:
+            args[key] = value
+        elif "extra_params" in props and _schema_accepts(props["extra_params"], "object"):
+            # Local policy already validated each key, value and host scope.
+            extra[key] = value
+        else:
+            # Do not silently drop host/ID scope or any parameter.
+            raise ToolSchemaMismatch(f"远端 {name} 不支持必需的只读参数 {key}")
+    if extra:
+        args["extra_params"] = extra
+    return args
+
+
+def validate_remote_schema(name, args, schema):
+    # Do not resolve remote schema URLs.
+    if re.search(r'"\\$ref"\\s*:\\s*"(?!#)', json.dumps(schema)):
+        raise ToolSchemaMismatch("远端 MCP 包含不允许的外部 Schema 引用")
+    from jsonschema.exceptions import ValidationError
+    try:
+        Draft202012Validator(schema).validate(args)
+    except ValidationError as exc:
+        # Never reflect untrusted schema messages or argument values.
+        location = ".".join(str(bit) for bit in exc.absolute_path) or "root"
+        raise ToolSchemaMismatch(
+            f"远端 {name} 参数 {location} 不兼容（{exc.validator}）"
+        ) from None
+
+
 async def call(session, name, args, *, schema=None, host_id=None):
     import asyncio
 
     checked = validate_args(name, args, host_id=host_id)
-    if schema:
-        # Never resolve remote $ref URLs; the discovered schema is untrusted.
-        if re.search(r'"\$ref"\s*:\s*"(?!#)', json.dumps(schema)):
-            raise ValueError("external schema refs forbidden")
-        Draft202012Validator(schema).validate(checked)
+    if schema is not None:
+        checked = adapt_read_args(name, checked, schema)
+        validate_remote_schema(name, checked, schema)
     return await asyncio.wait_for(session.call_tool(name, checked), timeout=18)
-
 
 DEVICE_TYPES = {"linux", "windows", "vmware", "network", "other", "unknown"}
 
