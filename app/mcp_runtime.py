@@ -82,6 +82,39 @@ def usage_counts(response):
     }
 
 
+def readable_report_answer(raw):
+    """Format JSON model output for the Web report without changing card payload.
+
+    Worker callers still receive the original JSON text for Feishu card fields.
+    All generated strings remain escaped by the browser renderer.
+    """
+    text = str(raw or "").strip()
+    if text.startswith("```"):
+        import re
+
+        text = re.sub(r"^\\x60\\x60\\x60(?:json)?\\s*|\\s*\\x60\\x60\\x60$", "", text).strip()
+    try:
+        result = json.loads(text)
+    except (TypeError, ValueError):
+        return raw
+    if not isinstance(result, dict) or not any(
+        isinstance(result.get(key), str) for key in ("cause", "action", "analysis")
+    ):
+        return raw
+    parts = []
+    for name, key in (
+        ("故障原因（AI 推断）", "cause"),
+        ("处理建议", "action"),
+        ("分析与依据", "analysis"),
+    ):
+        content = result.get(key)
+        if isinstance(content, str) and content.strip():
+            parts.append(name + "\\n" + content.strip())
+    if result.get("human_required") is True:
+        parts.append("需人工核验：是")
+    return "\\n\\n".join(parts) if parts else raw
+
+
 def format_usage(usage):
     if not usage or usage.get("available") is not True:
         return "本轮 Token 消耗：模型未返回用量"
@@ -344,8 +377,13 @@ async def run(
                     }
             outcome["_rows"] = rows
         except Exception as exc:
-            outcome = {"error": type(exc).__name__}
-            gaps.append("Zabbix " + name + " 调用失败")
+            if isinstance(exc, zabbix.ToolSchemaMismatch):
+                detail = str(exc)[:200]
+                outcome = {"error": "MCP 参数结构不匹配", "detail": detail}
+                gaps.append("Zabbix " + name + " 参数兼容失败：" + detail)
+            else:
+                outcome = {"error": type(exc).__name__}
+                gaps.append("Zabbix " + name + " 调用失败")
         if "data" in outcome:
             outcome["data"] = safe_text(outcome["data"])
         clean = {k: v for k, v in outcome.items() if k != "_rows"}
@@ -841,7 +879,7 @@ async def run(
     tasks.finish(
         task_id,
         {
-            "answer": redact(result_text, 40000),
+            "answer": redact(readable_report_answer(result_text), 40000),
             "device_type": effective_type,
             "diagnostic_type": kind,
             "limitations": list(dict.fromkeys(gaps)),
