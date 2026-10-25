@@ -496,7 +496,7 @@ def infer_device(host):
         if isinstance(t, dict)
     }
     declared = tags.get("aiops.device_type")
-    if declared in DEVICE_TYPES:
+    if declared in DEVICE_TYPES - {"unknown"}:
         return declared
 
     inventory = host.get("inventory")
