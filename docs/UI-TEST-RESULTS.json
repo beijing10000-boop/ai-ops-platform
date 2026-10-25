@@ -19,11 +19,6 @@
     },
     {
       "width": 1280,
-      "page": "assets",
-      "ok": true
-    },
-    {
-      "width": 1280,
       "page": "tools",
       "ok": true
     },
@@ -70,11 +65,6 @@
     {
       "width": 1440,
       "page": "diagnostics",
-      "ok": true
-    },
-    {
-      "width": 1440,
-      "page": "assets",
       "ok": true
     },
     {
@@ -129,11 +119,6 @@
     },
     {
       "width": 1920,
-      "page": "assets",
-      "ok": true
-    },
-    {
-      "width": 1920,
       "page": "tools",
       "ok": true
     },
@@ -168,19 +153,7 @@
       "ok": true
     },
     {
-      "workflow": "asset pagination boundaries",
-      "ok": true
-    },
-    {
-      "workflow": "asset create/edit + validation without SSH credentials",
-      "ok": true
-    },
-    {
-      "workflow": "group assignment/filter + device-aware editing",
-      "ok": true
-    },
-    {
-      "workflow": "group create/edit/delete + stored HTML escaping",
+      "workflow": "removed local inventory + live Zabbix host search/selection + preflight + escaping",
       "ok": true
     },
     {

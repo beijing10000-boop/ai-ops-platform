@@ -5,7 +5,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import pytest
-from app import main, inventory, mcp_runtime
+from app import main, mcp_runtime
 from app.integrations import ssh_mcp
 from app.orchestrator import tasks
 from app.integrations.zabbix import READ_TOOLS
@@ -127,15 +127,6 @@ def rig(monkeypatch, tmp_path):
         )
 
     client = SimpleNamespace(responses=SimpleNamespace(create=create))
-    asset = inventory.save_asset(
-        inventory.AssetInput(
-            name="asset",
-            zabbix_hostid="10",
-            device_type="linux",
-            address="172.20.1.10",
-        ),
-        "test",
-    )
 
     async def remote_call(name, args):
         if name == "ssh_resolve_host":
@@ -161,11 +152,11 @@ def rig(monkeypatch, tmp_path):
 
     adapter = ssh_mcp.SSHMCPAdapter(SimpleNamespace(call_tool=remote_call))
     monkeypatch.setattr(ssh_mcp, "configured", lambda *a, **k: Context(adapter))
-    return settings, log, responses, client, kind, asset
+    return settings, log, responses, client, kind
 
 
 def run(rig, event_name="CPU usage high", **kwargs):
-    settings, log, responses, client, kind, asset = rig
+    settings, log, responses, client, kind = rig
     result = asyncio.run(
         mcp_runtime.run(
             "中文诊断",
@@ -198,10 +189,10 @@ def test_other_device_types_never_enter_linux_ssh(rig, device_type):
     assert all(t["name"] != "host_delete" for t in rig[2][0]["tools"])
 
 
-def test_zabbix_unavailable_still_allows_registered_linux_evidence(rig):
+def test_zabbix_unavailable_does_not_guess_host_type_or_ssh_target(rig):
     rig[0]["mcp_url"] = ""
     result, task = run(rig)
-    assert ("ssh", "cpu") in rig[1]
+    assert not any(kind == "ssh" for kind, name in rig[1])
     assert task["status"] == "partial"
     assert any("MCP" in x for x in task["report"]["limitations"])
 
@@ -262,13 +253,12 @@ def test_actual_token_threshold_stops_further_tools_without_extra_request(rig):
     assert task["token_total"] == 2110  # Actual response, never an estimated cap.
 
 
-def test_asset_changed_during_reasoning_revokes_deep_check(rig):
+def test_mcp_disabled_during_reasoning_revokes_deep_check(rig):
     original = rig[3].responses.create
 
     async def change(**kwargs):
         response = await original(**kwargs)
-        with main.connection() as db:
-            db.execute("UPDATE assets SET enabled=0,revision=revision+1")
+        rig[0]["ssh_mcp_enabled"] = "false"
         return response
 
     rig[3].responses.create = change
@@ -405,24 +395,24 @@ def test_recovery_history_uses_recovery_time(state):
     assert mcp_runtime.event_clock(event) == original
 
 
-def test_queued_analysis_does_not_mix_original_event_with_rebound_asset(rig):
+def test_queued_analysis_ignores_legacy_asset_rebinding(rig):
     event = {"event_id": "1000", "host_id": "10", "event_name": "CPU usage high"}
+    with main.connection() as db:
+        aid = db.execute(
+            "INSERT INTO assets(name,zabbix_hostid,device_type) VALUES ('archived','10','linux')"
+        ).lastrowid
     task, _ = tasks.create(
-        {"event": event},
-        asset_id=rig[5]["id"],
-        event_id="1000",
-        diagnostic_type="cpu",
+        {"event": event}, asset_id=aid, event_id="1000", diagnostic_type="cpu"
     )
     with main.connection() as db:
         db.execute(
             "UPDATE assets SET zabbix_hostid='11',revision=revision+1 WHERE id=?",
-            (rig[5]["id"],),
+            (aid,),
         )
     _, result = run(rig, task_id=task["task_id"])
-    assert not any(kind == "ssh" for kind, name in rig[1])
-    assert result["status"] == "partial"
-    assert any("Host ID" in gap for gap in result["report"]["limitations"])
-    assert all(t["name"] != "diagnose_linux_host" for t in rig[2][0]["tools"])
+    assert result["status"] == "success"
+    assert ("resolve", "10") in rig[1] and ("ssh", "cpu") in rig[1]
+    assert ("resolve", "11") not in rig[1]
 
 
 def test_trusted_linux_alert_uses_remote_mapping_without_duplicate_platform_asset(rig):

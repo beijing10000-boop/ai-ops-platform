@@ -4,8 +4,6 @@ ROLES = {
     "super_admin": {"*"},
     "ops_admin": {
         "overview.read",
-        "inventory.read",
-        "inventory.manage",
         "diagnostics.run",
         "reports.read",
         "logs.read",
@@ -16,14 +14,12 @@ ROLES = {
     },
     "operator": {
         "overview.read",
-        "inventory.read",
         "diagnostics.run",
         "reports.read",
         "tools.read",
     },
     "auditor": {
         "overview.read",
-        "inventory.read",
         "reports.read",
         "audit.read",
         "tools.read",

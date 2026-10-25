@@ -13,7 +13,7 @@ from mcp.client.streamable_http import streamablehttp_client
 from openai import AsyncOpenAI
 from .main import read_setting
 from .integrations import zabbix, ssh_mcp
-from .inventory import get_asset, infer_device
+from .integrations.zabbix import infer_device
 from .diagnostics.playbooks import PLAYBOOKS, classify
 from .orchestrator import tasks
 from .security.redact import redact
@@ -154,11 +154,6 @@ async def run(
 ):
     # Accept structured alert metadata only from the trusted caller, never from question text.
     event = event or {}
-    asset = (
-        get_asset(zabbix_hostid=str(event.get("host_id")))
-        if str(event.get("host_id", "")).isdigit()
-        else None
-    )
     key = read_setting("openai_api_key")
     model = model or read_setting("openai_model")
     base = read_setting("openai_base_url")
@@ -172,7 +167,6 @@ async def run(
             raise ValueError("任务不存在")
         profile_name = task["profile"]
         kind = task["diagnostic_type"]
-        asset = get_asset(task["asset_id"]) if task["asset_id"] else asset
         event = task["request"].get("event") or event
         limits = task["request"]["limits"]
     else:
@@ -180,7 +174,6 @@ async def run(
             {"event": event, "question": question[:4000]},
             source="alert" if event else "qa",
             event_id=str(event["event_id"]) if event.get("event_id") else None,
-            asset_id=asset["id"] if asset else None,
             diagnostic_type=kind,
             profile=profile_name,
         )
@@ -205,16 +198,12 @@ async def run(
     ssh_failed = False
     result_text = ""
     budget_end = False
-    asset_revision = asset["revision"] if asset else None
-    host_id = str(event.get("host_id") or (asset or {}).get("zabbix_hostid") or "")
-    effective_type = (asset or {}).get("device_type", "unknown")
-    asset_matches_event = (
-        not asset
-        or not event.get("host_id")
-        or str(asset.get("zabbix_hostid") or "") == str(event["host_id"])
+    host_id = str(event.get("host_id") or "")
+    effective_type = "unknown"
+    host_verified = False
+    ssh_configuration = tuple(
+        read_setting(key) for key in ("ssh_mcp_enabled", "ssh_mcp_url", "ssh_mcp_token")
     )
-    if not asset_matches_event:
-        gaps.append("资产 Host ID 已变更，仅查询原事件监控，停止本次 SSH 补查")
     deadline = began + limits["seconds"]
     secret_values = [
         v
@@ -382,14 +371,8 @@ async def run(
             return {"error": "SSH MCP 已失败；本任务不自动重试或切换目标"}
         if profile_name == "quick":
             return {"error": "quick mode does not permit SSH"}
-        if (
-            effective_type != "linux"
-            or (asset and not asset["enabled"])
-            or not host_id.isdigit()
-        ):
-            return {
-                "error": "no enabled Linux asset with a Zabbix Host ID bound to this task"
-            }
+        if effective_type != "linux" or not host_id.isdigit():
+            return {"error": "no verified Linux host bound to this task"}
         if args.get("diagnostic_type", kind) != kind or set(args) - {
             "diagnostic_type",
             "time_window",
@@ -408,12 +391,14 @@ async def run(
         service = args.get("service") or task["request"].get("service")
         outputs = []
 
-        def same_asset():
-            if asset is None:
-                return True
-            current = get_asset(asset["id"])
+        def connection_current():
             return (
-                current and current["revision"] == asset_revision and current["enabled"]
+                ssh_configuration[0] == "true"
+                and tuple(
+                    read_setting(key)
+                    for key in ("ssh_mcp_enabled", "ssh_mcp_url", "ssh_mcp_token")
+                )
+                == ssh_configuration
             )
 
         def remaining():
@@ -425,8 +410,8 @@ async def run(
                 max(1, deadline - time.monotonic() - 8),
             )
 
-        if not same_asset():
-            gaps.append("资产配置在任务执行期间已变更，停止后续 SSH 检查")
+        if not connection_current():
+            gaps.append("SSH MCP 配置在任务执行期间已变更，停止补查")
             return {"error": gaps[-1]}
         if binding is None:
             started = time.monotonic()
@@ -467,8 +452,8 @@ async def run(
                 return payload
         for action in PLAYBOOKS[kind]["actions"]:
             check()
-            if not same_asset():
-                gaps.append("资产配置在任务执行期间已变更，停止后续 SSH 检查")
+            if not connection_current():
+                gaps.append("SSH MCP 配置在任务执行期间已变更，停止后续补查")
                 break
             if action in {"logs", "service"} and (
                 not isinstance(service, str) or not ssh_mcp.SERVICE.fullmatch(service)
@@ -575,7 +560,8 @@ async def run(
                     )
                     for row in host.get("_rows", []):
                         detected = infer_device(row)
-                        if str(row.get("hostid")) == host_id and detected != "unknown":
+                        if str(row.get("hostid")) == host_id:
+                            host_verified = True
                             effective_type = detected
                     monitoring.append({k: v for k, v in host.items() if k != "_rows"})
                     if (
@@ -628,14 +614,14 @@ async def run(
                         monitoring.append(
                             {k: v for k, v in hist.items() if k != "_rows"}
                         )
-                if effective_type != "linux" and (event or asset):
+                if effective_type != "linux" and event:
                     gaps.append(
                         "当前设备类型 " + effective_type + " 未启用实时深度诊断适配器"
                     )
                 ssh_definition = {
                     "type": "function",
                     "name": "diagnose_linux_host",
-                    "description": "Read current Linux evidence only when historical monitoring cannot explain the fault. Bound to this registered asset; no addresses or commands accepted.",
+                    "description": "Read current Linux evidence only when historical monitoring cannot explain the fault. Bound to the verified Zabbix Host ID; no addresses or commands accepted.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -657,12 +643,8 @@ async def run(
                     "strict": False,
                 }
                 can_ssh = bool(
-                    (
-                        not asset
-                        or (asset["enabled"] and asset["device_type"] == "linux")
-                    )
-                    and asset_matches_event
-                    and effective_type == "linux"
+                    effective_type == "linux"
+                    and host_verified
                     and host_id.isdigit()
                     and read_setting("ssh_mcp_enabled") == "true"
                     and bool(

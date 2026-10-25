@@ -15,7 +15,7 @@ PLAYBOOKS = {
         "label": "磁盘容量",
         "metrics": ["vfs.fs.size", "vfs.fs.inode"],
         "actions": ["disk"],
-        "limitation": "目录检查仅限管理员授权的数据路径，每个目录最多 3 秒，不保证完成整棵目录树；禁止自动清理",
+        "limitation": "文件系统容量与 inode 不能确定具体大目录；目录占用可在独立 SSH MCP 检查，禁止自动清理",
     },
     "io": {
         "label": "IO 性能",

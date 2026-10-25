@@ -84,3 +84,19 @@ def migrate(db):
         "CREATE INDEX IF NOT EXISTS ix_token_period ON ai_token_runs(created_at,source,model)"
     )
     db.execute("INSERT INTO platform_migrations(version) VALUES (4)")
+
+
+def row_dict(row, cur):
+    return dict(zip((x[0] for x in cur.description), row)) if row else None
+
+
+def archived_asset(asset_id):
+    """Historical report compatibility only; never used to select an execution target."""
+    from .main import connection
+
+    with connection() as db:
+        cur = db.execute(
+            "SELECT id,name,zabbix_hostid,device_type FROM assets WHERE id=?",
+            (asset_id,),
+        )
+        return row_dict(cur.fetchone(), cur)

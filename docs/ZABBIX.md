@@ -22,9 +22,9 @@ event_source=0，接受 event_value=1 的问题与 0 的恢复。**所有 0–5 
 
 可选 event_detail=`{EVENT.OPDATA}`、latest_value=`{ITEM.LASTVALUE1}`。未展开宏和缺失数据不能当成数值；多监控项表达式的 LASTVALUE1 未必是用户期待的指标。
 
-## 资产同步与诊断
+## 主机选择与诊断
 
-按 Host ID 同步最多 1000 个可见主机和主机组，达到上限页面会提示；超出时应分批人工导入或收窄服务端读取范围。本地多个分组保留，Zabbix 同步分组按源维护。名称可重复，Host ID 唯一；平台仅维护监控资产，SSH连接信息由独立SSH MCP管理。
+平台不维护本地资产或分组。AI 诊断通过 Zabbix MCP 查询可见主机，单次最多100台；可按名称或数字 Host ID 搜索。提交和执行前按精确 Host ID 查询监控，SSH MCP 独立核验映射和主机版本。主机分组/启停由 Zabbix 与 SSH MCP 各自管理。
 
 设备类型优先可信 tag `aiops.device_type`（linux/windows/vmware/network/other）或 inventory OS；无法判断为 unknown。已知非 Linux 不运行 Linux 实时检查。Linux类型明确且远端映射就绪的告警可按Host ID补查；无法确认类型或映射时只使用监控证据。
 

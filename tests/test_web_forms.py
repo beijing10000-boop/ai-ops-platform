@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from app import main, inventory
+from app import main
 from app.integrations import ssh_mcp
 from app.orchestrator import tasks
 from tests.test_platform import client_for
@@ -82,7 +82,7 @@ def test_retired_local_ssh_apis_and_input_fields_are_absent():
         client.post(
             "/api/v1/platform/assets", json={"name": "x", "username": "root"}
         ).status_code
-        == 422
+        == 404
     )
     with main.connection() as db:
         columns = {r[1] for r in db.execute("PRAGMA table_info(assets)")}
@@ -97,10 +97,10 @@ def test_retired_local_ssh_apis_and_input_fields_are_absent():
 def test_editor_and_diagnostic_preflights_are_read_only():
     client = client_for()
     assert client.post(
-        "/api/v1/platform/validate",
-        json={"kind": "asset", "values": {"name": "new", "zabbix_hostid": "10"}},
+        "/api/v1/platform/members/validate",
+        json={"open_id": "ou_test", "role": "operator", "enabled": True},
     ).json()["ok"]
-    assert client.get("/api/v1/platform/assets").json()["total"] == 0
+    assert client.get("/api/v1/platform/assets").status_code == 404
     assert client.post(
         "/api/v1/platform/tasks/validate", json={"profile": "quick"}
     ).json()["ok"]
@@ -145,10 +145,22 @@ def test_binding_verification_only_resolves_host_and_does_not_create_tasks(monke
             pass
 
     monkeypatch.setattr(ssh_mcp, "configured", lambda *a, **k: Context())
-    asset = inventory.save_asset(
-        inventory.AssetInput(name="x", device_type="linux", zabbix_hostid="10"), "test"
+    from app.integrations import zabbix
+
+    monkeypatch.setattr(
+        zabbix,
+        "monitoring_hosts",
+        AsyncMock(
+            return_value=[
+                {"zabbix_hostid": "10", "device_type": "linux", "name": "test"}
+            ]
+        ),
     )
-    response = client_for().post(f"/api/v1/platform/assets/{asset['id']}/validate")
+    with main.connection() as db:
+        db.execute("INSERT INTO settings VALUES ('ssh_mcp_enabled','true',0)")
+    response = client_for().post(
+        "/api/v1/platform/tasks/validate", json={"zabbix_hostid": "10"}
+    )
     assert response.json()["ssh_host_id"] == 92
     adapter.resolve.assert_awaited_once_with("10")
     assert tasks.page()["total"] == 0
@@ -176,11 +188,11 @@ def test_malformed_or_wrong_host_mapping_fails_closed(bad):
 
 
 def test_legacy_schema_upgrade_removes_credentials_and_preserves_reports():
-    asset = inventory.save_asset(
-        inventory.AssetInput(name="kept", zabbix_hostid="10", device_type="linux"),
-        "test",
-    )
-    task, _ = tasks.create({"question": "kept"}, asset_id=asset["id"])
+    with main.connection() as db:
+        aid = db.execute(
+            "INSERT INTO assets(name,zabbix_hostid,device_type) VALUES ('kept','10','linux')"
+        ).lastrowid
+    task, _ = tasks.create({"question": "kept"}, asset_id=aid)
     tasks.finish(task["task_id"], {"answer": "original encrypted report"})
     with main.connection() as db:
         db.execute(
@@ -202,7 +214,9 @@ def test_legacy_schema_upgrade_removes_credentials_and_preserves_reports():
         db.executemany(
             "INSERT INTO platform_migrations(version) VALUES (?)", [(1,), (2,), (3,)]
         )
-    assert inventory.get_asset(asset["id"])["name"] == "kept"
+    from app.platform_db import archived_asset
+
+    assert archived_asset(aid)["name"] == "kept"
     assert tasks.get(task["task_id"])["report"]["answer"] == "original encrypted report"
     with main.connection() as db:
         assert db.execute("PRAGMA foreign_key_check").fetchall() == []

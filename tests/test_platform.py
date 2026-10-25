@@ -1,4 +1,4 @@
-"""Authorization, inventory, encryption and durable task behavior using real SQLite."""
+"""Authorization, encryption and durable task behavior using real SQLite."""
 
 import json
 import secrets
@@ -43,7 +43,7 @@ def test_roles_are_checked_on_direct_api_access():
     auditor = client_for("auditor")
     assert operator.get("/api/v1/settings").status_code == 403
     assert operator.get("/api/v1/platform/credentials").status_code == 404
-    assert operator.get("/api/v1/platform/assets").status_code == 200
+    assert operator.get("/api/v1/platform/assets").status_code == 404
     assert auditor.post("/api/v1/platform/tasks", json={}).status_code == 403
     assert auditor.get("/api/v1/platform/audit").status_code == 200
     assert TestClient(main.app).get("/api/v1/platform/tasks").status_code == 401
@@ -77,100 +77,9 @@ def test_csrf_is_enforced_on_new_apis():
     client.headers.pop("x-csrf-token")
     assert (
         client.post(
-            "/api/v1/platform/assets", json={"name": "linux", "device_type": "linux"}
+            "/api/v1/platform/tasks/validate", json={"profile": "quick"}
         ).status_code
         == 403
-    )
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        {"name": "bad", "address": "127.0.0.1"},
-        {"name": "bad", "address": "8.8.8.8"},
-        {"name": "bad", "address": "example.org"},
-        {
-            "name": "bad",
-            "device_type": "linux",
-            "username": "root",
-            "diagnostic_mode": "privileged",
-        },
-        {"name": "bad", "device_type": "windows", "host_key": "invalid"},
-        {"name": "bad", "device_type": "network", "proxy_id": 1},
-        {"name": "bad", "device_type": "windows", "diagnostic_paths": ["/data"]},
-        {"name": "bad", "device_type": "linux", "address": "172.20.1.1;id"},
-    ],
-)
-def test_unsafe_asset_configuration_rejected(body):
-    assert client_for().post("/api/v1/platform/assets", json=body).status_code == 422
-
-
-def test_batch_is_atomic_and_pagination_handles_1000_assets():
-    client = client_for()
-    body = {
-        "assets": [
-            {
-                "name": "node-" + str(i),
-                "zabbix_hostid": str(10000 + i),
-                "device_type": "linux",
-                "address": "172.20.1.10",
-            }
-            for i in range(1000)
-        ]
-    }
-    response = client.post("/api/v1/platform/assets-import", json=body)
-    assert response.status_code == 200 and response.json()["count"] == 1000
-    page = client.get("/api/v1/platform/assets?page=10&page_size=100").json()
-    assert page["total"] == 1000 and len(page["items"]) == 100
-    assert len({r["zabbix_hostid"] for r in page["items"]}) == 100
-    assert (
-        client.post(
-            "/api/v1/platform/assets-import",
-            json={"assets": [{"name": "would roll back"}, body["assets"][0]]},
-        ).status_code
-        == 409
-    )
-    assert client.get("/api/v1/platform/assets").json()["total"] == 1000
-    assert client.get("/api/v1/platform/assets?page_size=1001").status_code == 422
-
-
-def test_exact_host_id_binding_and_non_linux_guard(monkeypatch):
-    client = client_for()
-    monkeypatch.setattr(tasks, "enqueue", lambda _: None)
-    linux = client.post(
-        "/api/v1/platform/assets",
-        json={"name": "same-name", "device_type": "linux", "zabbix_hostid": "100"},
-    ).json()
-    windows = client.post(
-        "/api/v1/platform/assets",
-        json={"name": "same-name", "device_type": "windows", "zabbix_hostid": "101"},
-    ).json()
-    event = {
-        "event_id": "500",
-        "event_value": "1",
-        "host_id": "100",
-        "event_name": "CPU high",
-    }
-    with main.connection() as db:
-        db.execute(
-            "INSERT INTO alert_events(event_id,event_value,event_json) VALUES ('500','1',?)",
-            (json.dumps(event),),
-        )
-    assert (
-        client.post(
-            "/api/v1/platform/tasks",
-            json={"asset_id": windows["id"], "event_id": "500"},
-        ).status_code
-        == 422
-    )
-    accepted = client.post("/api/v1/platform/tasks", json={"event_id": "500"}).json()
-    task = tasks.get(accepted["task_id"])
-    assert task["asset_id"] == linux["id"] and task["diagnostic_type"] == "cpu"
-    assert (
-        client.post(
-            "/api/v1/platform/assets/" + str(windows["id"]) + "/test"
-        ).status_code
-        == 404
     )
 
 
@@ -304,29 +213,6 @@ def test_queued_question_rechecks_revoked_permissions(monkeypatch):
     )
     assert "无诊断权限" in reply.await_args.args
     ask.assert_not_awaited()
-
-
-def test_group_crud_preserves_synced_groups():
-    client = client_for()
-    gid = client.post("/api/v1/platform/groups", json={"name": "Local"}).json()["id"]
-    assert (
-        client.put(
-            f"/api/v1/platform/groups/{gid}", json={"name": "Renamed"}
-        ).status_code
-        == 200
-    )
-    with main.connection() as db:
-        sync_id = db.execute(
-            "INSERT INTO asset_groups(name,zabbix_groupid) VALUES ('Synced','77')"
-        ).lastrowid
-    assert (
-        client.put(
-            f"/api/v1/platform/groups/{sync_id}", json={"name": "Changed"}
-        ).status_code
-        == 409
-    )
-    assert client.delete(f"/api/v1/platform/groups/{sync_id}").status_code == 409
-    assert client.delete(f"/api/v1/platform/groups/{gid}").status_code == 200
 
 
 def test_imported_history_cannot_be_retried():

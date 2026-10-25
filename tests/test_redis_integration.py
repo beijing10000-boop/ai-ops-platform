@@ -11,7 +11,7 @@ import pytest
 from redis import Redis
 from rq import Queue, SimpleWorker
 from fastapi.testclient import TestClient
-from app import main, inventory, conversation_context as ctx
+from app import main, conversation_context as ctx
 from app.orchestrator import tasks
 
 
@@ -91,13 +91,9 @@ def test_real_webhook_dedup_and_rq_alert_delivery_without_feishu(real_redis):
 
 
 def test_real_diagnostic_queue_retires_old_local_ssh_jobs(real_redis):
-    asset = inventory.save_asset(
-        inventory.AssetInput(name="no-credentials", device_type="linux"), "test"
-    )
     task, _ = tasks.create(
-        {"asset_revision": asset["revision"]},
+        {},
         kind="connection",
-        asset_id=asset["id"],
         diagnostic_type="connection",
     )
     tasks.enqueue(task["task_id"])
