@@ -428,9 +428,11 @@ def adapt_read_args(name, checked, schema):
         raise ValueError("tool not authorized")
     if re.search(r'"\\$ref"\\s*:\\s*"(?!#)', json.dumps(schema)):
         raise ValueError("external schema refs forbidden")
-    if not isinstance(schema, dict) or not isinstance(schema.get("properties"), dict):
+    if not isinstance(schema, dict) or not isinstance(
+        schema.get("properties", {}), dict
+    ):
         raise ToolSchemaMismatch("远端未提供可验证的参数结构")
-    props = schema["properties"]
+    props = schema.get("properties", {})
     args, extra = {}, {}
     for key, value in checked.items():
         if key == "output" and _schema_accepts(props.get("output", {}), "string"):
@@ -531,7 +533,10 @@ async def monitoring_hosts(read_setting, query="", host_id=None):
             if remote is None:
                 raise ValueError("Zabbix MCP 没有授权 host_get")
             response = await call(
-                session, "host_get", args, schema=remote.inputSchema,
+                session,
+                "host_get",
+                args,
+                schema=remote.inputSchema,
                 host_id=host_id if host_id else None,
             )
     if response.isError:
