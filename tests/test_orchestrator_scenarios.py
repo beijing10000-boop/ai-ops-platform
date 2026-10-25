@@ -65,6 +65,10 @@ def rig(monkeypatch, tmp_path):
                     "hostid": "10",
                     "inventory": {"os": kind["type"]},
                     "tags": [{"tag": "aiops.device_type", "value": kind["type"]}],
+                    "hostgroups": [
+                        {"groupid": "2", "name": group}
+                        for group in kind.get("groups", [])
+                    ],
                 }
             ]
         elif name == "item_get":
@@ -175,6 +179,7 @@ def test_cpu_monitoring_precedes_ssh_and_real_provider_usage_is_aggregated(rig):
     log = rig[1]
     assert log.index(("mcp", "history_get")) < log.index(("ssh", "cpu"))
     assert ("ssh", "processes") in log
+    assert log.count(("ssh", "cpu")) == 1  # model retry uses the cached snapshot
     assert result[1]["total"] == 45 and task["token_total"] == 45
     assert task["report"]["device_type"] == "linux" and task["status"] == "success"
 
@@ -187,6 +192,39 @@ def test_other_device_types_never_enter_linux_ssh(rig, device_type):
     assert task["report"]["device_type"] == device_type
     assert all(t["name"] != "diagnose_linux_host" for t in rig[2][0]["tools"])
     assert all(t["name"] != "host_delete" for t in rig[2][0]["tools"])
+
+
+def test_linux_group_auto_collects_ssh_without_model_tool_request(rig):
+    # Host inventory and OS tag are unknown. Zabbix's verified Linux group
+    # is sufficient to classify the host, but SSH still requires exact mapping.
+    rig[4]["type"] = "unknown"
+    rig[4]["groups"] = ["Linux"]
+    observed = []
+
+    async def model_only(**kwargs):
+        observed.append(kwargs)
+        return SimpleNamespace(
+            output=[],
+            output_text="已阅读 SSH 和 Zabbix 证据",
+            usage={"input_tokens": 40, "output_tokens": 12, "total_tokens": 52},
+        )
+
+    rig[3].responses.create = model_only
+    _, task = run(rig, "Linux: Zabbix agent is not available (for 3m)")
+    assert task["report"]["device_type"] == "linux"
+    assert ("resolve", "10") in rig[1]
+    assert ("ssh", "system") in rig[1]
+    assert rig[1].count(("ssh", "system")) == 1
+    assert observed and "已自动执行的 SSH MCP" in str(observed[0]["input"])
+    assert task["status"] == "success"
+
+
+def test_unverified_group_label_never_triggers_ssh(rig):
+    rig[4]["type"] = "unknown"
+    rig[4]["groups"] = ["Not Linux", "Discovered hosts"]
+    _, task = run(rig)
+    assert task["report"]["device_type"] == "unknown"
+    assert not any(kind in {"ssh", "resolve"} for kind, _ in rig[1])
 
 
 def test_zabbix_unavailable_does_not_guess_host_type_or_ssh_target(rig):
@@ -249,7 +287,9 @@ def test_actual_token_threshold_stops_further_tools_without_extra_request(rig):
     rig[3].responses.create = create
     result, task = run(rig)
     assert len(responses) == 1 and task["report"]["budget_exhausted"]
-    assert not any(kind == "ssh" for kind, name in rig[1])
+    # Automatic verified Linux snapshot is collected before model reasoning;
+    # after hitting the token limit no extra tools are called.
+    assert rig[1].count(("ssh", "cpu")) == 1
     assert task["token_total"] == 2110  # Actual response, never an estimated cap.
 
 
@@ -263,7 +303,9 @@ def test_mcp_disabled_during_reasoning_revokes_deep_check(rig):
 
     rig[3].responses.create = change
     result, task = run(rig)
-    assert not any(kind == "ssh" for kind, name in rig[1])
+    # Already gathered data remains valid, but the changed MCP config
+    # prevents any additional SSH calls in the AI tool round.
+    assert rig[1].count(("ssh", "cpu")) == 1
     assert any("配置" in x for x in task["report"]["limitations"])
 
 
