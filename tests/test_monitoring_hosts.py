@@ -154,12 +154,19 @@ def test_direct_mcp_host_query_is_bounded_scoped_and_does_not_return_extra_field
     monkeypatch.setattr(zabbix, "connect", lambda read: Context())
     # Discovery is required by production to honor the actual MCP tool schema.
     monkeypatch.setattr(
-        zabbix, "discover",
-        AsyncMock(return_value=[
-            SimpleNamespace(name="host_get", inputSchema={
-                "type": "object", "properties": {},
-            }),
-        ]),
+        zabbix,
+        "discover",
+        AsyncMock(
+            return_value=[
+                SimpleNamespace(
+                    name="host_get",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {},
+                    },
+                )
+            ]
+        ),
     )
 
     async def call(session, name, args, **kwargs):
@@ -204,12 +211,19 @@ def test_monitoring_query_rejects_duplicates_for_exact_host_and_caps_lists(
     monkeypatch.setattr(zabbix, "connect", lambda read: Context())
     # Discovery is required by production to honor the actual MCP tool schema.
     monkeypatch.setattr(
-        zabbix, "discover",
-        AsyncMock(return_value=[
-            SimpleNamespace(name="host_get", inputSchema={
-                "type": "object", "properties": {},
-            }),
-        ]),
+        zabbix,
+        "discover",
+        AsyncMock(
+            return_value=[
+                SimpleNamespace(
+                    name="host_get",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {},
+                    },
+                )
+            ]
+        ),
     )
 
     async def call(*args, **kwargs):
