@@ -20,7 +20,6 @@ for name in (
     "assets-1440.png",
     "diagnosis-1440.png",
     "diagnosis-dark-1440.png",
-    "host-keys-1440.png",
 ):
     (OUT / name).unlink(missing_ok=True)
 with socket.socket() as sock:
@@ -116,28 +115,23 @@ try:
         page.locator("#content").get_by_text("浏览器验证资产", exact=True).wait_for()
         row = page.locator("tr").filter(has_text="浏览器验证资产")
         row.locator('[data-action="edit-asset"]').click()
-        page.locator('dialog input[name="username"]').fill("bad user")
-        page.locator('dialog button[type="submit"]').click()
-        feedback = page.locator("#editor-feedback")
-        feedback.get_by_text("诊断模式或 SSH 用户名无效").wait_for()
-        assert feedback.is_visible(), "保存失败的提示必须显示在弹窗内"
-        assert "诊断模式或 SSH 用户名无效" not in page.locator("#toast").inner_text()
-        # A valid root account saves in standard mode without gateway approval.
-        page.locator('dialog input[name="username"]').fill("root")
+        page.locator('dialog input[name="address"]').fill("bad address")
+        page.locator('[data-action="validate-editor"]').click()
+        page.locator("#editor-feedback").get_by_text("资产地址", exact=False).wait_for()
+        assert page.locator("#editor-feedback").is_visible()
+        page.locator('dialog input[name="address"]').fill("172.20.1.20")
+        page.locator('[data-action="validate-editor"]').click()
+        page.locator("#editor-feedback").get_by_text(
+            "表单校验通过", exact=False
+        ).wait_for()
+        assert page.locator('dialog input[name="username"]').count() == 0
         page.locator('dialog button[type="submit"]').click()
         page.locator("#editor").wait_for(state="hidden")
-        row.locator('[data-action="edit-asset"]').click()
-        assert page.locator('dialog input[name="username"]').input_value() == "root"
-        assert (
-            page.locator('dialog select[name="diagnostic_mode"]').input_value()
-            == "standard"
-        )
-        approval = page.locator('dialog input[name="privileged_approved"]')
-        assert not approval.is_checked()
-        assert page.locator("#editor-feedback").is_hidden()
-        page.locator("#close-editor").click()
         checks.append(
-            {"workflow": "asset create + inline error + root edit", "ok": True}
+            {
+                "workflow": "asset create/edit + validation without SSH credentials",
+                "ok": True,
+            }
         )
         # Exercise both group names in table cells and asset-editor help text.
         payload = '<img src=x onerror="window.__storedXss=1">'
@@ -156,7 +150,6 @@ try:
         row.locator('[data-action="edit-asset"]').click()
         assert page.locator("dialog").get_by_label(payload, exact=True).is_checked()
         page.locator('dialog select[name="device_type"]').select_option("windows")
-        assert page.locator("#asset-ssh-fields").is_hidden()
         page.locator('dialog button[type="submit"]').click()
         page.locator("#editor").wait_for(state="hidden")
         row.get_by_text("Windows", exact=True).wait_for()
@@ -203,91 +196,69 @@ try:
         page.locator("#asset-group").select_option("")
         page.locator('[data-action="search-assets"]').click()
         page.locator('[data-action="asset-next"]').wait_for()
-        # Cross-page/filter selection and two-phase trust use the real UI/API/DB.
-        page.locator('[data-action="keys-select-filter"]').click()
-        page.locator("#key-target-count").get_by_text(
-            "已选 3 台", exact=False
+        page.locator('[data-page="connections"]').click()
+        page.locator('#zabbix_mcp-form input[name="mcp_url"]').fill(
+            "http://127.0.0.1:9999/mcp"
+        )
+        page.locator('#zabbix_mcp-form [data-action="validate-connection"]').click()
+        page.locator("#zabbix_mcp-form [data-verify-result]").get_by_text(
+            "填写内容校验通过", exact=False
         ).wait_for()
-        page.locator('[data-action="asset-next"]').click()
-        assert "已选 3 台" in page.locator("#key-target-count").inner_text()
-        page.locator('[data-action="keys-start"]').click()
-        page.get_by_role("heading", name="批量获取 SSH 主机公钥", exact=True).wait_for()
-        fresh = page.locator("tr").filter(has_text="UI 测试 · Linux 资产")
-        changed = page.locator("tr").filter(has_text="公钥变化样本")
-        failed_row = page.locator("tr").filter(has_text="获取失败样本")
-        fresh.get_by_text("待确认", exact=True).wait_for()
-        changed.get_by_text("公钥变化", exact=True).wait_for()
-        failed_row.get_by_text("获取失败", exact=True).wait_for()
-        for width in (1280, 1440, 1920):
-            page.set_viewport_size({"width": width, "height": 1080})
-            assert page.evaluate(
-                "document.documentElement.scrollWidth <= window.innerWidth"
-            )
-            checks.append({"width": width, "page": "host-keys", "ok": True})
-        page.set_viewport_size({"width": 1440, "height": 1080})
-        page.screenshot(path=str(OUT / "host-keys-1440.png"), full_page=True)
-        before = page.request.get(
-            base + "/api/v1/platform/assets?device_type=linux"
-        ).json()["items"]
-        new_before = next(r for r in before if r["name"] == "UI 测试 · Linux 资产")
-        old_key = next(r for r in before if r["name"] == "公钥变化样本")["host_key"]
-        assert new_before["host_key"] == "" and old_key
-        page.locator('[data-action="keys-select-new"]').click()
-        fresh.locator(".key-candidate").wait_for()
-        assert fresh.locator(".key-candidate").is_checked()
-        assert not changed.locator(".key-candidate").is_checked()
-        assert page.locator('[data-action="keys-confirm"]').is_disabled()
-        page.locator("#key-verified").check()
-        page.locator('[data-action="keys-confirm"]').click()
-        fresh.get_by_text("已保存", exact=True).wait_for()
-        middle = page.request.get(
-            base + "/api/v1/platform/assets?device_type=linux"
-        ).json()["items"]
-        assert next(r for r in middle if r["id"] == new_before["id"])["host_key"]
-        assert (
-            next(r for r in middle if r["name"] == "公钥变化样本")["host_key"]
-            == old_key
+        assert page.request.get(base + "/api/v1/settings").json()["mcp_url"] == ""
+        page.locator('#zabbix_mcp-form button[type="submit"]').click()
+        page.locator('#ssh_mcp-form input[name="ssh_mcp_url"]').fill(
+            "http://127.0.0.1:9099/mcp"
         )
-        page.reload()
-        changed.locator(".key-candidate").wait_for()
-        assert not page.locator("#key-verified").is_checked()
-        assert not changed.locator(".key-candidate").is_checked()
-        changed.locator(".key-candidate").check()
-        assert page.locator('[data-action="keys-confirm"]').is_disabled()
-        page.locator("#key-verified").check()
-        assert "替换 1 台" in page.locator('[data-action="keys-confirm"]').inner_text()
-        page.locator('[data-action="keys-confirm"]').click()
-        changed.get_by_text("已保存", exact=True).wait_for()
-        after = page.request.get(
-            base + "/api/v1/platform/assets?device_type=linux"
-        ).json()["items"]
-        assert (
-            next(r for r in after if r["name"] == "公钥变化样本")["host_key"] != old_key
+        page.locator('#ssh_mcp-form input[name="ssh_mcp_token"]').fill("test-ssh-token")
+        page.locator('#ssh_mcp-form select[name="ssh_mcp_enabled"]').select_option(
+            "true"
         )
+        page.locator('#ssh_mcp-form button[type="submit"]').click()
+        page.locator('[data-page="overview"]').click()
+        page.locator(".hero").wait_for()
+        page.locator('[data-page="connections"]').click()
+        page.locator('#ssh_mcp-form input[name="ssh_mcp_url"]').wait_for()
+        assert (
+            page.locator('#ssh_mcp-form input[name="ssh_mcp_token"]').input_value()
+            == "********"
+        )
+        assert page.locator('[data-action="new-credential"]').count() == 0
         checks.append(
             {
-                "workflow": "batch keys + cross-page selection + explicit new/changed trust + reload",
+                "workflow": "two MCP forms + draft validation + masked token persistence",
                 "ok": True,
             }
         )
-        page.locator('[data-action="keys-retry"]').click()
-        page.get_by_text("待确认", exact=True).wait_for()
-        assert page.locator(".key-candidate").count() == 1
-        page.locator("tr").filter(has_text="获取失败样本").get_by_text(
-            "待确认", exact=True
+        page.locator('[data-page="ai"]').click()
+        page.locator('textarea[name="ai_alert_prompt"]').wait_for()
+        assert (
+            "Zabbix" in page.locator('textarea[name="ai_alert_prompt"]').input_value()
+        )
+        assert page.locator('textarea[name="ai_profile_budgets"]').count() == 0
+        budget = page.get_by_role("spinbutton", name="标准分析 采集次数", exact=True)
+        budget.fill("9")
+        page.locator('[data-action="validate-settings"]').click()
+        page.locator("[data-verify-result]").get_by_text(
+            "填写内容校验通过", exact=False
         ).wait_for()
-        page.locator('[data-action="keys-select-new"]').click()
-        page.locator("#key-verified").check()
-        page.locator('[data-action="keys-confirm"]').click()
-        page.locator("tr").filter(has_text="获取失败样本").get_by_text(
-            "已保存", exact=True
+        page.locator('#settings-form button[type="submit"]').click()
+        page.locator('textarea[name="ai_alert_prompt"]').fill(
+            "临时测试提示词内容，需要恢复成项目提供的默认提示词"
+        )
+        page.locator('[data-action="reset-prompts"]').click()
+        assert (
+            "运维经理" in page.locator('textarea[name="ai_alert_prompt"]').input_value()
+        )
+        page.locator('[data-page="settings"]').click()
+        page.locator('input[name="enabled_tool"]').first.uncheck()
+        assert page.locator('textarea[name="disabled_tools"]').count() == 0
+        page.locator('[data-action="validate-settings"]').click()
+        page.locator("[data-verify-result]").get_by_text(
+            "填写内容校验通过", exact=False
         ).wait_for()
-        page.locator('[data-action="keys-back"]').click()
-        page.get_by_role("heading", name="最近的公钥获取批次", exact=True).wait_for()
-        assert page.locator('[data-action="keys-open"]').count() == 2
         checks.append(
             {
-                "workflow": "batch keys failed-only retry + persisted recent batches",
+                "workflow": "budget number inputs + tool checkboxes + default prompt restore",
                 "ok": True,
             }
         )

@@ -3,7 +3,6 @@ from types import SimpleNamespace
 import pytest
 from app.integrations import zabbix
 from app.security.redact import redact
-from app.diagnostics.actions import build, gateway_request
 
 
 @pytest.mark.parametrize(
@@ -62,60 +61,8 @@ def test_remote_schema_cannot_fetch_external_reference():
     asyncio.run(run())
 
 
-@pytest.mark.parametrize(
-    "unit",
-    [
-        "nginx;id",
-        "$(id)",
-        "`id`",
-        "--help",
-        "nginx\nreboot",
-        "a/b",
-        "nginx.service && rm -rf /",
-        "nginx.service\x00",
-    ],
-)
-def test_service_injections_rejected_before_connection(unit):
-    with pytest.raises(ValueError):
-        build("logs", unit, 30)
-
-
-def test_no_arbitrary_file_shell_or_mutation_actions():
-    for action in (
-        "execute_shell",
-        "restart",
-        "stop",
-        "write_file",
-        "upload",
-        "download",
-        "delete",
-        "du_all",
-    ):
-        with pytest.raises(ValueError):
-            build(action)
-    assert "sudo" not in build("cpu")
-    assert "python" not in build("cpu")
-    assert "--since" in build("kernel")
-    assert "-n 120" in build("logs", "nginx.service", 30)
-    assert gateway_request("cpu") == "aiops-v1 cpu 30"
-
-
 def test_redaction_removes_credentials_before_model_submission():
     text = "Authorization: Bearer xyzsecret password=hunter2 api_key=secret123 https://u:p@example.org\n-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n-----END OPENSSH PRIVATE KEY-----"
     result = redact(text)
     for secret in ("xyzsecret", "hunter2", "secret123", "u:p@", "\nsecret\n"):
         assert secret not in result
-
-
-@pytest.mark.parametrize(
-    "path",
-    ["/", "/root", "/proc", "/var/log/../lib", "/data;id", "/opt/$(id)", "/data/a b"],
-)
-def test_directory_checks_reject_unbounded_and_injected_paths(path):
-    with pytest.raises(ValueError):
-        build("directory", path)
-
-
-def test_directory_check_is_short_low_priority_and_single_filesystem():
-    command = build("directory", "/data/app")
-    assert "timeout -k 1 3 nice -n 19 du -x -s -- /data/app" in command

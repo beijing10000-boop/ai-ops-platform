@@ -9,6 +9,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from jsonschema import Draft202012Validator
 from ..security.redact import redact
+from .ssh_mcp import client_factory, validate_endpoint
 
 READ_TOOLS = frozenset(
     {
@@ -387,11 +388,13 @@ async def connect(read_setting):
     endpoint = read_setting("mcp_url")
     if not endpoint:
         raise RuntimeError("MCP 未配置")
+    validate_endpoint(endpoint)
     token = read_setting("mcp_token")
     async with streamablehttp_client(
         endpoint,
         headers={"Authorization": "Bearer " + token} if token else {},
         timeout=15,
+        httpx_client_factory=client_factory,
     ) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()

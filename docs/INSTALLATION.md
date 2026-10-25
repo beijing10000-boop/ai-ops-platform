@@ -1,67 +1,63 @@
-# 安装与运行
+# 安装部署 v0.7.0
 
-此文针对新仓库的独立测试部署。GitHub Ubuntu CI 已验证 Docker 干净构建、启动与重启持久化；Rocky Linux 9/10 与真实业务联调尚未验收。不要将新服务直接挂载旧生产数据卷。
+默认端口 8088，默认向宿主机网卡发布，供受信任内网访问；Redis 不发布端口。公网入口应由 HTTPS 反向代理和访问控制保护。HTTP 内网不需要配置证书。镜像内应用以 UID 10001 运行，配置与主密钥存放在本项目独立数据卷。
 
-## Docker 准备
+## 1. 启动平台
 
-使用组织批准的软件源和版本。Docker 官方 CentOS 文档提供下列仓库与插件安装方式，Rocky 的兼容性需在实际目标版本验证：
-
-```bash
-sudo dnf -y install dnf-plugins-core
-sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-sudo dnf install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-sudo systemctl enable --now docker
-docker compose version
-```
-
-已有 Docker 的服务器无需重复安装。不要在现有业务机盲目替换容器运行时。
-
-## 独立启动
+已有 Docker Engine 与 Compose 插件无需重装。未安装可参考 [Docker 官方安装文档](https://docs.docker.com/engine/install/centos/)，Rocky 请先确认所用版本兼容。
 
 ```bash
-git clone --branch integration/unified-platform https://github.com/beijing10000-boop/ai-ops-platform.git
+mkdir -p /data
+cd /data
+git clone https://github.com/beijing10000-boop/ai-ops-platform.git
 cd ai-ops-platform
 docker compose up -d --build
-docker compose exec web python -m app.bootstrap
+docker compose exec -T web python -m app.bootstrap
 docker compose ps
 curl -f http://127.0.0.1:8088/healthz
+docker compose exec -T web cat /app/data/bootstrap.token
 ```
 
-私有仓库需使用你自己的 GitHub 授权，不把访问 Token 写入脚本。Compose 项目名 `ai-ops-platform`，数据卷 `appdata` 和 `redisdata` 独立于两个旧项目；同机测试用 `WEB_PORT=8089`。默认绑定 127.0.0.1，Redis 不发布宿主机端口。命名数据卷首次创建由镜像准备 UID 10001 写权限；如果改成 bind mount，需自行设置目录所有权与 SELinux 标签，不能直接复用旧路径。
+无需手写业务 `.env`。首次凭据只在服务器终端读取并填入初始化页，不要发送到聊天、工单或日志。端口占用时可使用 `WEB_PORT=8089 docker compose up -d --build` 选择宿主机发布端口；这是 Docker 启动参数，业务配置仍全部在 Web。
 
-批量获取主机公钥依赖默认启动的 `host-key-worker`，更新已有测试实例后使用 `docker compose up -d --build` 创建此服务。获取操作与核验步骤见 [Linux 诊断](LINUX-DIAGNOSTICS.md#批量获取-ssh-主机公钥)。
+## 2. Web 初始化与飞书登录
 
-## 访问和初始化
+1. 打开 `http://服务器IP:8088/setup`。
+2. 填写一次性初始化凭据、协议 HTTP、实际外部访问主机（例如 `172.20.200.94:8088`）、飞书 App ID、App Secret 和超级管理员 Open ID。
+3. 点击“验证初始化信息”，核对展示的回调地址，再保存。
+4. 在飞书开放平台配置相同的 OAuth 回调地址，如 `http://172.20.200.94:8088/api/v1/auth/callback`。使用飞书登录平台。
 
-- 本机访问 `http://127.0.0.1:8088/setup`。远程先用 SSH 隧道访问初始化页面：`ssh -L 8088:127.0.0.1:8088 user@server`。
-- 在服务器自己的终端运行 `docker compose exec web cat /app/data/bootstrap.token`，将结果输入初始化页。若显式设置 ADMIN_API_TOKEN，则使用该值。凭据只用于尚未完成的初始化。
-- 填写外部主机名/端口、协议、飞书 App ID / Secret、超级管理员 Open ID。应用生成并持久保存 `master.key` 与 `bootstrap.token`，不在日志打印。
-- 飞书网页授权重定向地址必须与 `协议://外部主机/api/v1/auth/callback` 一致。HTTPS 由可信反向代理提供；页面选择 https 不会自动签发证书。HTTP 仅适合受控测试。
-- 初始化后通过飞书登录，在 Web 配置 AI、MCP、Webhook 密钥、群白名单及业务参数，然后逐项测试。
+初始化完成后入口关闭；飞书登录、角色权限和 CSRF 保护诊断/配置接口。选择 HTTPS 仅表示外部入口采用 HTTPS，不会自动签发证书或改变 Docker 端口。
 
-APP_ENCRYPTION_KEY 可用于保留旧实例密钥；新安装可留空。密钥一旦写入数据，不可随意更换。缺失已加密实例的主密钥会拒绝启动解密，不能靠新生成密钥修复。
+## 3. Web 配置两个 MCP
 
-## 启用飞书与切换
+| 入口 | 填写内容 | 验证 |
+| --- | --- | --- |
+| 连接管理 → Zabbix MCP | 现有服务的 Streamable HTTP 地址和令牌 | 验证填写内容 → 验证连接 → 保存连接 |
+| 连接管理 → SSH MCP | 开启、`http://SSH服务IP:9099/mcp`、专用客户端令牌、超时（默认90秒） | 验证填写内容 → 验证连接 → 保存连接 |
+| AI 配置 | Base URL、部署名、API Key；默认提示词、分析模式和数字预算 | 验证填写内容、验证模型连接，再保存 |
+| 飞书管理 | 群 ID、发送开关、自动分析级别与授权成员 | 验证填写内容、验证飞书应用和群访问，再保存 |
+| 系统设置 | 外部访问地址、Webhook 密钥、Zabbix 前端、只读工具勾选 | 验证填写内容，再保存 |
 
-默认不启动接收器。复用相同 App ID 时，只有在停止旧接收器后才执行：
+地址应从应用容器可达。同一宿主机的 MCP 不要填 `127.0.0.1`，应填服务器内网 IP 或可解析服务地址；两个 MCP 的令牌相互独立。SSH MCP 至少为 v0.2.0 并包含 `ssh_resolve_host`；主机、公钥、私钥和跳板在其 Web 完成。
+
+验证连接使用当前表单，不要求先保存；配置修改后请重新检测。检测成功代表握手及工具目录有效，实际主机权限、SSH 可达性和飞书完整业务仍需诊断或真实事件核验。
+
+## 4. 主机与业务联调
+
+在 SSH MCP 中为目标主机填写正确 Zabbix Host ID，绑定凭据并核验主机公钥；给平台签发有相应主机组和动作权限的令牌。平台资产页可同步 Zabbix，用于手动诊断；Linux 告警已从可信监控确认类型时，可以直接按 Host ID 调用远端解析，无需在平台重复配置 SSH。
+
+资产页点击“验证关联”只核验远端 Host ID 映射，不执行 SSH。AI 诊断页先验证参数，再执行诊断并查看证据来源 `zabbix_mcp` / `ssh_mcp`。
+
+在 Zabbix 对接 `http://平台IP:8088/zabbix` 和系统设置中的 Webhook Bearer 密钥，参考 [Zabbix 说明](ZABBIX.md)。停止同一 App ID 的旧接收器后启动新的飞书长连接：
 
 ```bash
 docker compose --profile feishu up -d feishu-receiver
-docker compose logs --since=5m feishu-receiver qa-worker alert-worker
+docker compose logs --tail=80 feishu-receiver web alert-worker qa-worker diagnostic-worker
 ```
 
-外部 Zabbix Webhook 地址与旧平台保持原样，直到专门验收通过后再由操作者切换。测试实例和生产实例的 Redis 去重状态互不共享。
+更换飞书 App ID/Secret 后，执行 `docker compose --profile feishu restart feishu-receiver` 让长连接重新认证；其余业务配置由各任务实时读取。
 
-## 运行与备份
+## 5. 备份
 
-```bash
-docker compose logs --tail=100 web diagnostic-worker host-key-worker
-docker compose exec web python -m app.migrate backup --source /app/data/app.sqlite3 --destination /app/data/manual-snapshot.bak
-docker compose cp web:/app/data/manual-snapshot.bak ./manual-snapshot.bak
-```
-
-备份还必须包括对应 master.key（或既有 APP_ENCRYPTION_KEY）与部署参数，保存在访问受控的备份系统。备份数据库文件和密钥分别管理；数据库单独丢失密钥无法恢复。定期将历史证据归档；本版不自动清理诊断历史，需监控数据卷大小。Redis 满内存时会拒绝入队，应观察内存与磁盘。
-
-Compose 对应用和 Redis 配置日志轮转、重启策略和健康检查；healthz 是存活检查，不证明远端业务可用。连接页需另做 MCP、AI 和 SSH 实际测试。
-
-参考：[Docker 官方 CentOS 安装文档](https://docs.docker.com/engine/install/centos/)。
+升级与备份见 [UPGRADING.md](UPGRADING.md)。数据库和配对主密钥必须一同保留，不能删除数据卷或执行 `docker compose down -v`。旧实例若使用 `APP_ENCRYPTION_KEY`，必须保留其原值；新实例自动生成持久化 `master.key`。

@@ -1,82 +1,64 @@
-# Zabbix AI Ops · AI Ops Platform
+# AI Ops Platform · AI 智能运维平台
 
-把 Zabbix 告警、飞书协作和 Linux SSH 诊断汇入同一个管理入口。新仓库承接两个自研项目的整合，默认端口 **8088**，initMAX Zabbix MCP 继续独立运行。
+**v0.7.0** · 默认 Web 端口 **8088**。平台负责 Zabbix 告警、飞书协作、AI 分析与报告，通过两个独立的 Streamable HTTP MCP 服务获取证据。
 
-**当前为整合候选版本 0.6.0。代码和隔离测试已完成，真实 Zabbix / 飞书 / 目标 Linux 与 Rocky Docker 部署仍待用户环境验收。尚未发布生产版本。** 两个原仓库和原生产实例不修改。
+| 服务 | 职责 |
+| --- | --- |
+| AI Ops Platform | 登录与权限、告警、问答、分析编排、报告、审计和真实 Token 统计 |
+| Zabbix MCP | 监控指标、历史趋势、事件与主机信息 |
+| [SSH MCP Server](https://github.com/beijing10000-boop/ssh-mcp-server) | Linux 主机、SSH 凭据、跳板、公钥核验、实时诊断与动作授权 |
 
-![平台概览](docs/screenshots/overview-1440.png)
+平台已删除内置 SSH MCP、Paramiko 执行器、公钥扫描、SSH 凭据与跳板接口、强制命令网关及相关部署。平台不保存 SSH 私钥，也不直接连接目标 SSH 端口。
 
-截图使用标明来源的隔离测试数据，数字不代表生产观测。
+![平台概览：隔离测试数据](docs/screenshots/overview-1440.png)
 
-## 能做什么
+## Web 管理
 
-- 保留告警 Webhook、分级卡片、告警恢复关联、自动及手动 AI 分析、飞书群问答、四次 AI 回复链和真实 Token 统计。
-- 统一资产、多个主机组、设备类型、SSH 凭据、跳板和 Zabbix **Host ID** 映射。不根据消息里的 IP 猜测连接目标。
-- 按主机组或筛选结果批量获取 SSH 主机公钥（每批最多 1000 台），支持跨页选择、后台进度、失败重试和新旧 SHA256 指纹对比；管理员核验后才批量保存。
-- 历史监控先行；AI 判断证据不足时，按登记范围补充 Linux 实时证据。支持 CPU、内存、磁盘、I/O、服务、网络、系统、不可达、瓶颈和日志十类诊断。
-- 标准免 Agent 模式支持 root 和普通账号，不需要目标端 Python、网关、Sysmon 或 SysOM。管理员可选部署受限特权网关。
-- 精确授权九个 Zabbix 只读工具；拒绝通用参数透传、写操作及敏感字段。支持按需发现和加载 Schema。
-- task_id / trace_id、阶段、取消、重试、加密报告和证据、角色权限与审计。AI 推断与采集事实分开展示。
-- 桌面统一控制台，深浅色主题；资产分页、连接测试、工具注册表、配置、历史、Token 汇总与原始日志授权。
+- 两个 MCP 分开配置地址、令牌、开关和超时，分别验证连接；令牌加密保存。
+- AI 模型、飞书、群、成员、Webhook、提示词均使用输入框或选项；分析预算使用数字输入表，工具权限使用勾选框。
+- 提供符合 Zabbix + 飞书 + 独立 SSH MCP 场景的中文告警与问答默认提示词，支持编辑、校验和恢复默认。
+- 初始化、配置、资产、Host ID 关联、诊断参数、主机组、成员、屏蔽规则和批量导入具有验证入口；验证不等同于生产联调。
+- 批量导入支持粘贴 Excel 表格或 CSV，提供模板，无需编写 JSON。
+- 保留分级告警、恢复关联、卡片 AI 分析、追问上下文、任务取消/重试、角色与审计、加密证据和桌面深浅色主题。
 
-Windows、VMware、网络设备可登记并使用 Zabbix 证据；本版本没有这些设备的实时执行适配器，绝不发送 Linux 命令。
+先查 Zabbix 历史，证据不足时才由固定剧本调用独立 SSH MCP。目标通过可信任务的 **Zabbix Host ID** 精确解析，固定远端主机 ID 和版本；映射失败或配置变化时停止补查，不按 IP/名称猜测，不切换到本地 SSH。快速模式只查监控，非 Linux 不使用 Linux 诊断。
 
-## 启动测试实例
+## 安装
 
-安装 Docker Engine 与 Compose 插件后：
+已安装 Docker Engine 与 Compose 插件的 Linux 服务器：
 
 ```bash
-git clone --branch integration/unified-platform https://github.com/beijing10000-boop/ai-ops-platform.git
+mkdir -p /data
+cd /data
+git clone https://github.com/beijing10000-boop/ai-ops-platform.git
 cd ai-ops-platform
 docker compose up -d --build
-docker compose exec web python -m app.bootstrap
-docker compose ps
-curl -f http://127.0.0.1:8088/healthz
+docker compose exec -T web python -m app.bootstrap
+docker compose exec -T web cat /app/data/bootstrap.token
 ```
 
-首次进入 `/setup`，在服务器本地读取初始化凭据并填入页面：
+在受信任内网打开 `http://服务器IP:8088/setup`，输入一次性凭据和飞书应用、管理员 Open ID、实际外部地址，验证后保存。登录后在 Web 完成两个 MCP、AI 和飞书配置，无需创建业务 `.env`。
 
-```bash
-docker compose exec web cat /app/data/bootstrap.token
-```
+独立 SSH MCP 需为 **v0.2.0 或更新版本**，支持 `ssh_resolve_host` 与 `expected_revision`。在其 Web 登记主机并填写 Zabbix Host ID，为平台签发专用客户端令牌。
 
-App ID、App Secret、管理员 Open ID、外部地址在初始化页填写；AI、MCP、飞书群、预算等都在 Web 设置。不需要把业务参数散落在 `.env`。默认只监听宿主机 loopback；远程访问和 OAuth 请按 [安装说明](docs/INSTALLATION.md) 配置访问链路。
-
-复用旧飞书应用时，先停止旧接收器，再显式启用新接收器：
+完成飞书配置并停止使用同一 App ID 的旧接收器后启动：
 
 ```bash
 docker compose --profile feishu up -d feishu-receiver
 ```
 
-请先完成 [真实环境验收](docs/ACCEPTANCE.md)，再决定切换生产。与现有实例同机测试时使用 `WEB_PORT=8089 docker compose up -d --build`，避免端口冲突。
-
-## 文档
+现有整合版升级会删除旧平台 SSH 配置；请先备份数据库和配对主密钥，按 [升级说明](docs/UPGRADING.md) 操作。
 
 | 文档 | 内容 |
-|---|---|
-| [源码整合审计](docs/INTEGRATION-AUDIT.md) | 实际源码映射、问题、保留与移除决定 |
-| [架构](docs/ARCHITECTURE.md) | 服务、数据流、授权、时间与预算 |
-| [安装](docs/INSTALLATION.md) | Docker、首次初始化、访问、运行和备份 |
-| [升级与迁移](docs/UPGRADING.md) | 两套旧数据导入、密钥、幂等、回滚 |
-| [配置](docs/CONFIGURATION.md) | Web 参数、模式预算、角色 |
-| [Linux 诊断](docs/LINUX-DIAGNOSTICS.md) | A/B 模式、账号、公钥、跳板、网关 |
-| [Zabbix](docs/ZABBIX.md) / [飞书](docs/FEISHU.md) | 对接与恢复、回复链、卡片回调 |
-| [验收](docs/ACCEPTANCE.md) / [测试报告](docs/TEST-REPORT.md) | 已验证范围和待真实验证项 |
-| [排障](docs/TROUBLESHOOTING.md) / [安全](SECURITY.md) | 故障定位、凭据与权限边界 |
+| --- | --- |
+| [安装部署](docs/INSTALLATION.md) | 首次部署、HTTP 内网访问、初始化与启动 |
+| [升级与回滚](docs/UPGRADING.md) | 旧 SSH 配置清理、备份与恢复 |
+| [Web 配置与验证](docs/CONFIGURATION.md) | 表单、验证按钮与默认提示词 |
+| [架构](docs/ARCHITECTURE.md) / [SSH MCP 接入](docs/LINUX-DIAGNOSTICS.md) | 双 MCP、身份映射、预算与失败处理 |
+| [Zabbix](docs/ZABBIX.md) / [飞书](docs/FEISHU.md) | 告警、恢复、群与卡片 |
+| [安全](SECURITY.md) / [排障](docs/TROUBLESHOOTING.md) | 权限、密钥和常见问题 |
+| [验证范围](docs/TEST-REPORT.md) / [真实验收](docs/ACCEPTANCE.md) | 自动回归与生产联调边界 |
 
-## 开发与验证
+开发验证：`python -m pip install -r requirements-dev.txt`，`python -m pytest -q`，`python -m ruff check --select F401,F811,F821,F841 app tests`，`python -m ruff format --check app tests`，`node --check web/assets/app.js`。浏览器回归使用 `python tests/browser_smoke.py`；临时 Redis 由测试自行启动，未安装 Redis 的相关测试会跳过。
 
-Python 3.11+。独立测试环境安装 `requirements-dev.txt`，准备本机 Redis 可执行文件：
-
-```bash
-python -m pip install -r requirements-dev.txt
-AIOPS_REDIS_SERVER=/usr/bin/redis-server python -m pytest -q
-python -m ruff check --select F821 app tests
-python -m ruff format --check app tests
-python -m playwright install --with-deps chromium
-python tests/browser_smoke.py
-```
-
-Redis 集成测试自行启动随机端口的临时实例，不使用生产 Redis。浏览器回归只访问自建测试进程与临时数据库；测试文件不进入应用镜像。未安装 Redis 时相关用例会 skip，不能将 skip 计作通过。
-
-来源版本见 [SOURCE-REVISIONS.json](docs/SOURCE-REVISIONS.json)。许可证与第三方边界见 [THIRD-PARTY-NOTICES.md](docs/THIRD-PARTY-NOTICES.md)。
+来源记录见 [SOURCE-REVISIONS.json](docs/SOURCE-REVISIONS.json)，依赖说明见 [THIRD-PARTY-NOTICES.md](docs/THIRD-PARTY-NOTICES.md)。

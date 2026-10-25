@@ -6,7 +6,6 @@ ROLES = {
         "overview.read",
         "inventory.read",
         "inventory.manage",
-        "credentials.manage",
         "diagnostics.run",
         "reports.read",
         "logs.read",

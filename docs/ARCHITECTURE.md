@@ -1,59 +1,25 @@
-# 架构与数据流
+# 双 MCP 架构
 
-## 进程和存储
-
-| 服务 | 职责 |
-|---|---|
-| web | 8088 FastAPI、统一 SPA、OAuth、配置、Webhook、任务 API |
-| alert-worker | ai-alerts 队列、原始通知、自动和卡片手动分析、恢复关联 |
-| qa-worker | ai-questions 队列、飞书直接回复链、进度卡片更新 |
-| diagnostic-worker | ai-diagnostics 队列、手动诊断与真实 SSH 连接测试 |
-| host-key-worker | ai-host-keys 队列、批量 SSH 握手获取候选公钥；不自动信任 |
-| feishu-receiver | 可选 profile，飞书长连接，入队与卡片回调 |
-| redis | 队列、消息和事件去重、临时上下文与进行中标志 |
-| 外部 initMAX MCP | 已部署的 Zabbix API 协议服务，不并入本平台进程 |
-
-所有应用服务共享一个 `app.sqlite3` 和主密钥。配置、SSH 私钥与口令、任务请求、报告和证据使用 Fernet 加密；索引、资产地址、事件 JSON、任务状态和审计元数据仍是数据库明文，需保护完整数据卷。SQLite 开启 WAL、外键，增量 schema 记录在 platform_migrations。Redis 开启 AOF；noeviction 在满内存时拒绝写入，避免无声丢失队列。
+AI Ops Platform 运行 Web、alert-worker、qa-worker、diagnostic-worker、Redis 与可选飞书接收器。diagnostic-worker 负责 AI 分析编排，不是 SSH 执行器。SQLite 保存加密业务配置、报告与证据；所有应用服务共享同一数据卷。
 
 ```mermaid
 flowchart TD
-  W["Zabbix Webhook"] --> Q["告警 / 问答 / 诊断队列"]
-  F["飞书与 Web"] --> Q
-  Q --> O["统一编排与任务状态"]
-  O --> Z["受限 Zabbix MCP 查询"]
-  Z --> M["AI 核验证据缺口"]
-  M --> L["已绑定 Linux 固定动作"]
-  M --> R["加密报告与证据"]
-  L --> R
-  R --> F
+    A[Zabbix 告警] --> P[AI Ops Platform]
+    F[飞书问答与卡片] --> P
+    W[Web 诊断] --> P
+    P --> M[AI 模型]
+    P --> Z[Zabbix MCP]
+    P --> S[独立 SSH MCP]
+    S --> L[已登记 Linux 主机]
+    P --> R[报告与审计]
 ```
 
-## 一次诊断
+Zabbix MCP 用独立会话获取九类受限只读数据。平台不透传通用 API 方法或敏感字段。SSH MCP 第二会话按需建立，不直接向模型暴露任意远端工具；由固定剧本选择动作，平台没有 SSH 库、命令构建、主机公钥扫描、凭据管理或内置 MCP 服务。
 
-1. Web 或受信任告警调用方提供结构化事件；资产只按 Host ID 精确绑定。消息正文不能指定 SSH 地址、密钥或任意命令。
-2. 保存 task_id / trace_id、操作者、配置预算快照，事件级活动唯一索引阻止同一事件并发分析。
-3. 告警先采集主机、事件、相关监控项和最多两个数值项的有限历史摘要，按告警时间回溯 30 分钟。快速模式预算更小。缺少可用时间时使用当前时间并依赖报告说明。
-4. AI 只能发现或加载授权工具。历史 item ID 必须先验证属于本任务主机。设备类型闸门和登记资产再次确认 Linux 资格。
-5. 需要实时数据时，AI 提供证据缺口原因，平台执行匹配剧本的固定动作。每个动作前复核资产版本；凭据或跳板更改使连接状态失效。时间、数量、输出均有上限。
-6. 保存分来源证据、采集时间、耗时、失败与脱敏结果；AI 报告属于推断。当前 SSH 快照不能单独证明过去时刻的根因。
-7. 卡片返回简短结论和登录后可见的报告链接；完整报告与日志按权限查阅。
+可信告警或选定资产提供 Zabbix Host ID；仅在 Linux 类型明确时启用 SSH 补查。远端 `ssh_resolve_host` 要求唯一、已登记且授权就绪；解析结果的主机 ID 与 revision 在本任务固定，每个动作传 `expected_revision`。远端配置变化、映射错误、权限失败与超时都会停止后续补查；不重解析并转向另一资产、不按地址匹配、不回退旧本地实现。
 
-## 工具和预算
+独立 HTTP 客户端禁止跟随重定向和隐式环境代理，TLS 验证开启。HTTP 由管理员明确填写，用于受信任内网。令牌不进入模型；返回值递归脱敏、限长并单独加密记录，保留 provider、job_id、Host ID 和版本。
 
-只有 host_get、hostgroup_get、hostinterface_get、event_get、problem_get、trigger_get、item_get、history_get、trend_get 被授权。远端发现额外工具不会扩大权限。远端 Schema 只用于校验，拒绝外部引用；模型获得平台收窄后的 Schema。禁止 params、raw_json、任意 server 覆盖和密钥字段。
+整体任务的轮次、采集次数、Token 和时间预算统一生效，解析主机和诊断动作逐个计数。任务取消会停止平台的后续调用；远端已经开始的同步 SSH 不保证立即停止，受 SSH MCP 自身超时限制。无远端自动重试或 exactly-once 保证。
 
-| 模式 | 模型交互轮 | MCP + SSH 调用 | 单轮工具 | 总时限 | Token 阈值 | 单结果字符 |
-|---|---:|---:|---:|---:|---:|---:|
-| quick | 2 | 4 | 3 | 65 秒 | 12000 | 2000 |
-| standard | 4 | 8 | 4 | 110 秒 | 24000 | 4000 |
-| deep | 6 | 16 | 8 | 150 秒 | 48000 | 6000 |
-
-快速模式禁止 SSH。相同查询任务内缓存；种子查询也消耗调用数。轮数预算之外至多增加一次禁止工具的总结响应，仍受总时间与 Token 阈值约束。Token 根据提供商实际返回的 usage 统计；阈值在响应后检查，一次响应的输入和输出可能使总量越过阈值，不能当作计费硬上限。usage 不全时显示不可用，不用字符估算冒充实际 Token。上下文各轮有长度上限。
-
-任务超时、证据缺失或工具部分失败保留 partial；队列异常、模型配置缺失等保存 failed；取消保留已有证据。Worker 丢失超过十分钟的 running 任务在历史读取时标记失败，支持人工重试，不自动无限重试。队列、数据库和飞书发消息不是跨系统事务，重大切换前需排空队列并核对通知状态。
-
-## 接口边界
-
-`/api/v1/platform/*` 包含资产/组/凭据/跳板、任务、报告、工具、成员和审计。`/api/v1/platform/host-keys` 提供批量获取、进度、失败重试及显式确认；候选公钥存在独立表，确认事务核对资产修订号后才写入可信公钥。旧 `/zabbix`、`/api/v1/ask`、OAuth 和设置接口保留。只在显式启用旧 API Token 时接受 legacy-admin，正常页面使用服务器端会话和 CSRF。
-
-可选 `python -m app.mcp_server` 提供受信任本地 stdio MCP；只允许登记资产和固定剧本，无公开 HTTP MCP、无自由 Shell。运行它的本地用户拥有该服务的诊断权限，应像保护 worker 主机一样保护调用环境。
+历史监控、实时证据与模型推断分开呈现；partial、failed、cancelled 不作为故障根因已被证实。用户角色、会话与 CSRF 沿用平台权限，原始日志读取需要独立权限。

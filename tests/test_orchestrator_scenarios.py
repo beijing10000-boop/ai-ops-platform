@@ -1,14 +1,12 @@
 """Deterministic model/MCP fixtures test orchestration; real transport tests are separate."""
 
 import asyncio
-import io
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-import paramiko
 import pytest
 from app import main, inventory, mcp_runtime
-from app.diagnostics import ssh
+from app.integrations import ssh_mcp
 from app.orchestrator import tasks
 from app.integrations.zabbix import READ_TOOLS
 
@@ -53,6 +51,9 @@ def rig(monkeypatch, tmp_path):
         "mcp_url": "http://fixture.invalid/mcp",
         "ai_tool_loading": "full",
         "ai_analysis_profile": "standard",
+        "ssh_mcp_enabled": "true",
+        "ssh_mcp_url": "http://ssh-fixture.invalid/mcp",
+        "ssh_mcp_token": "ssh-fixture-token",
     }
     monkeypatch.setattr(mcp_runtime, "read_setting", lambda key: settings.get(key, ""))
 
@@ -126,27 +127,40 @@ def rig(monkeypatch, tmp_path):
         )
 
     client = SimpleNamespace(responses=SimpleNamespace(create=create))
-    key = paramiko.RSAKey.generate(2048)
-    buf = io.StringIO()
-    key.write_private_key(buf)
-    cid = inventory.save_credential("fixture", buf.getvalue(), "", "test")["id"]
     asset = inventory.save_asset(
         inventory.AssetInput(
             name="asset",
             zabbix_hostid="10",
             device_type="linux",
             address="172.20.1.10",
-            host_key=key.get_name() + " " + key.get_base64(),
-            credential_id=cid,
         ),
         "test",
     )
 
-    def execute(asset_id, action, *args, **kwargs):
-        log.append(("ssh", action))
-        return {"status": "success", "output": "fixture " + action, "duration_ms": 1}
+    async def remote_call(name, args):
+        if name == "ssh_resolve_host":
+            log.append(("resolve", args["zabbix_hostid"]))
+            payload = {
+                "status": "success",
+                "zabbix_hostid": "10",
+                "host_id": 99,
+                "revision": 5,
+            }
+        else:
+            action = name.removeprefix("ssh_diagnose_")
+            log.append(("ssh", action))
+            assert args["host_id"] == 99 and args["expected_revision"] == 5
+            payload = {
+                "status": "success",
+                "host_id": 99,
+                "action": action,
+                "output": "fixture " + action,
+                "duration_ms": 1,
+            }
+        return SimpleNamespace(isError=False, structuredContent=payload)
 
-    monkeypatch.setattr(ssh, "execute", execute)
+    adapter = ssh_mcp.SSHMCPAdapter(SimpleNamespace(call_tool=remote_call))
+    monkeypatch.setattr(ssh_mcp, "configured", lambda *a, **k: Context(adapter))
     return settings, log, responses, client, kind, asset
 
 
@@ -193,25 +207,24 @@ def test_zabbix_unavailable_still_allows_registered_linux_evidence(rig):
 
 
 def test_ssh_failure_keeps_zabbix_basic_analysis(rig, monkeypatch):
-    def fail(*args, **kwargs):
-        raise ssh.DiagnosticError("SSH 超时")
+    async def fail(*args, **kwargs):
+        raise ssh_mcp.IntegrationError("SSH MCP 超时")
 
-    monkeypatch.setattr(ssh, "execute", fail)
+    monkeypatch.setattr(ssh_mcp.SSHMCPAdapter, "diagnose", fail)
     result, task = run(rig)
     assert ("mcp", "history_get") in rig[1]
     assert task["status"] == "partial" and "依据现有证据" in task["report"]["answer"]
 
 
 def test_missing_commands_are_partial_evidence_not_silent_success(rig, monkeypatch):
-    monkeypatch.setattr(
-        ssh,
-        "execute",
-        lambda *a, **k: {
+    async def partial(*a, **k):
+        return {
             "status": "partial",
             "output": "CAPABILITY_MISSING:iostat",
             "duration_ms": 1,
-        },
-    )
+        }
+
+    monkeypatch.setattr(ssh_mcp.SSHMCPAdapter, "diagnose", partial)
     result, task = run(rig, "IO latency")
     assert task["status"] == "partial"
     evidence = tasks.evidence_page(task["task_id"], True)
@@ -410,3 +423,48 @@ def test_queued_analysis_does_not_mix_original_event_with_rebound_asset(rig):
     assert result["status"] == "partial"
     assert any("Host ID" in gap for gap in result["report"]["limitations"])
     assert all(t["name"] != "diagnose_linux_host" for t in rig[2][0]["tools"])
+
+
+def test_trusted_linux_alert_uses_remote_mapping_without_duplicate_platform_asset(rig):
+    with main.connection() as db:
+        db.execute("DELETE FROM assets")
+    _, task = run(rig)
+    assert task["status"] == "success"
+    assert ("resolve", "10") in rig[1] and ("ssh", "cpu") in rig[1]
+
+
+def test_mapping_failure_never_executes_or_retries_ssh(rig, monkeypatch):
+    resolve = AsyncMock(side_effect=ssh_mcp.IntegrationError("重复关联"))
+    monkeypatch.setattr(ssh_mcp.SSHMCPAdapter, "resolve", resolve)
+    _, task = run(rig)
+    assert task["status"] == "partial"
+    resolve.assert_awaited_once_with("10")
+    assert not any(kind == "ssh" for kind, _ in rig[1])
+    assert ("mcp", "history_get") in rig[1]
+
+
+def test_remote_revision_rejection_stops_remaining_actions(rig, monkeypatch):
+    calls = []
+
+    async def stale(self, binding, action, **kwargs):
+        calls.append((binding.host_id, binding.revision, action))
+        return {"status": "failed", "error": "Host revision changed"}
+
+    monkeypatch.setattr(ssh_mcp.SSHMCPAdapter, "diagnose", stale)
+    _, task = run(rig)
+    assert task["status"] == "partial" and calls == [(99, 5, "cpu")]
+    assert ("resolve", "10") in rig[1]
+
+
+def test_ssh_token_from_remote_evidence_never_enters_model_or_report(rig, monkeypatch):
+    secret = rig[0]["ssh_mcp_token"]
+    original = ssh_mcp.SSHMCPAdapter.diagnose
+
+    async def with_secret(self, *args, **kwargs):
+        payload = await original(self, *args, **kwargs)
+        return {**payload, "output": "remote " + secret, "nested": {"token": secret}}
+
+    monkeypatch.setattr(ssh_mcp.SSHMCPAdapter, "diagnose", with_secret)
+    _, task = run(rig)
+    assert secret not in json.dumps(tasks.evidence_page(task["task_id"], True))
+    assert secret not in json.dumps(rig[2], default=str)

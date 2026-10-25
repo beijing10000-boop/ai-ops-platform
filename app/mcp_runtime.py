@@ -12,7 +12,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from openai import AsyncOpenAI
 from .main import read_setting
-from .integrations import zabbix
+from .integrations import zabbix, ssh_mcp
 from .inventory import get_asset, infer_device
 from .diagnostics.playbooks import PLAYBOOKS, classify
 from .orchestrator import tasks
@@ -200,6 +200,9 @@ async def run(
     monitoring = []
     gaps = []
     remote_tools = []
+    ssh = None
+    binding = None
+    ssh_failed = False
     result_text = ""
     budget_end = False
     asset_revision = asset["revision"] if asset else None
@@ -218,6 +221,7 @@ async def run(
         for v in (
             key,
             read_setting("mcp_token"),
+            read_setting("ssh_mcp_token"),
             read_setting("lark_app_secret"),
             read_setting("zabbix_webhook_secret"),
         )
@@ -372,12 +376,20 @@ async def run(
         return outcome
 
     async def linux(args):
-        nonlocal executed
+        nonlocal executed, ssh, binding, ssh_failed
         check()
+        if ssh_failed:
+            return {"error": "SSH MCP 已失败；本任务不自动重试或切换目标"}
         if profile_name == "quick":
             return {"error": "quick mode does not permit SSH"}
-        if not asset or effective_type != "linux" or not asset["enabled"]:
-            return {"error": "no enabled Linux asset bound to this task"}
+        if (
+            effective_type != "linux"
+            or (asset and not asset["enabled"])
+            or not host_id.isdigit()
+        ):
+            return {
+                "error": "no enabled Linux asset with a Zabbix Host ID bound to this task"
+            }
         if args.get("diagnostic_type", kind) != kind or set(args) - {
             "diagnostic_type",
             "time_window",
@@ -395,66 +407,122 @@ async def run(
             return {"error": "invalid time window"}
         service = args.get("service") or task["request"].get("service")
         outputs = []
-        from .diagnostics.ssh import execute
-        from .diagnostics.actions import SERVICE
 
-        actions = [
-            (action, service if action in {"logs", "service"} else None)
-            for action in PLAYBOOKS[kind]["actions"]
-        ]
-        if kind == "disk":
-            actions.extend(("directory", path) for path in asset["diagnostic_paths"])
-        for action, parameter in actions:
-            check()
+        def same_asset():
+            if asset is None:
+                return True
             current = get_asset(asset["id"])
-            if (
-                not current
-                or current["revision"] != asset_revision
-                or not current["enabled"]
-            ):
+            return (
+                current and current["revision"] == asset_revision and current["enabled"]
+            )
+
+        def remaining():
+            check()
+            if executed >= limits["calls"] or time.monotonic() >= deadline - 10:
+                raise ssh_mcp.IntegrationError("SSH MCP 诊断预算不足，停止补查")
+            return min(
+                int(read_setting("ssh_mcp_timeout_seconds") or 90),
+                max(1, deadline - time.monotonic() - 8),
+            )
+
+        if not same_asset():
+            gaps.append("资产配置在任务执行期间已变更，停止后续 SSH 检查")
+            return {"error": gaps[-1]}
+        if binding is None:
+            started = time.monotonic()
+            try:
+                timeout = remaining()
+                # The second connection is lazy: quick mode and ordinary Q&A do not open it.
+                ssh = await stack.enter_async_context(
+                    ssh_mcp.configured(read_setting, timeout=timeout)
+                )
+                ssh.timeout = remaining()
+                executed += 1
+                tasks.stage(task_id, "ssh_mcp:resolve")
+                binding = await ssh.resolve(host_id)
+                payload = {
+                    "status": "success",
+                    "provider": "ssh_mcp",
+                    "host_id": binding.host_id,
+                    "host_revision": binding.revision,
+                    "zabbix_hostid": binding.zabbix_hostid,
+                }
+            except Exception as exc:
+                ssh_failed = True
+                payload = {
+                    "status": "failed",
+                    "error": safe_text(str(exc), 250)
+                    if isinstance(exc, ssh_mcp.IntegrationError)
+                    else type(exc).__name__,
+                }
+                gaps.append("SSH MCP 主机映射或连接不可用；不按 IP 或名称回退")
+            tasks.evidence(
+                task_id,
+                "ssh_mcp",
+                "ssh_resolve_host",
+                payload,
+                int((time.monotonic() - started) * 1000),
+            )
+            if ssh_failed:
+                return payload
+        for action in PLAYBOOKS[kind]["actions"]:
+            check()
+            if not same_asset():
                 gaps.append("资产配置在任务执行期间已变更，停止后续 SSH 检查")
                 break
             if action in {"logs", "service"} and (
-                not service or not SERVICE.fullmatch(service)
+                not isinstance(service, str) or not ssh_mcp.SERVICE.fullmatch(service)
             ):
                 gaps.append("缺少经验证的服务名称，跳过 " + action)
                 continue
-            if executed >= limits["calls"] or time.monotonic() > deadline - 35:
-                gaps.append("SSH 诊断预算不足，停止补查")
-                break
-            signature = "ssh:" + action + ":" + str(parameter) + ":" + str(window)
+            signature = "ssh:" + action + ":" + str(service) + ":" + str(window)
             if signature in cache:
                 outputs.append(cache[signature])
                 continue
-            tasks.stage(task_id, "linux_ssh:" + action)
-            executed += 1
-            start = time.monotonic()
+            started = time.monotonic()
             try:
-                payload = await asyncio.to_thread(
-                    execute,
-                    asset["id"],
+                ssh.timeout = remaining()
+                tasks.stage(task_id, "ssh_mcp:" + action)
+                executed += 1
+                payload = await ssh.diagnose(
+                    binding,
                     action,
-                    parameter,
-                    window,
-                    lambda: tasks.cancelled(task_id) or time.monotonic() > deadline,
+                    service=service if action in {"logs", "service"} else None,
+                    minutes=window,
                 )
-                for field in ("output", "stderr"):
-                    if field in payload:
-                        payload[field] = safe_text(payload[field], 32768)
+                # Keep JSON valid while recursively removing secrets from both evidence and model input.
+                from .security.redact import redact_data
+
+                def clean(value):
+                    if isinstance(value, dict):
+                        return {k: clean(v) for k, v in value.items()}
+                    if isinstance(value, list):
+                        return [clean(v) for v in value[:1000]]
+                    return safe_text(value, 32768) if isinstance(value, str) else value
+
+                payload = clean(redact_data(payload))
             except Exception as exc:
-                payload = {"error": redact(str(exc), 250), "status": "failed"}
-                gaps.append("SSH " + action + " 失败或权限不足")
+                ssh_failed = True
+                payload = {
+                    "status": "failed",
+                    "error": safe_text(str(exc), 250)
+                    if isinstance(exc, ssh_mcp.IntegrationError)
+                    else type(exc).__name__,
+                }
             tasks.evidence(
                 task_id,
-                "linux_ssh",
+                "ssh_mcp",
                 action,
                 payload,
-                int((time.monotonic() - start) * 1000),
+                int((time.monotonic() - started) * 1000),
             )
             cache[signature] = payload
             outputs.append(payload)
             if payload.get("status") != "success":
-                gaps.append("SSH " + action + " 数据不完整")
+                gaps.append("SSH MCP " + action + " 数据不完整")
+            if ssh_failed or payload.get("status") in {"failed", "cancelled"}:
+                ssh_failed = True
+                break
         return {
             "diagnostic_type": kind,
             "current_snapshot": True,
@@ -476,6 +544,7 @@ async def run(
                                 if token
                                 else {},
                                 timeout=15,
+                                httpx_client_factory=ssh_mcp.client_factory,
                             )
                         )
                         session = await stack.enter_async_context(
@@ -588,13 +657,27 @@ async def run(
                     "strict": False,
                 }
                 can_ssh = bool(
-                    asset
-                    and asset["enabled"]
-                    and asset["device_type"] == "linux"
+                    (
+                        not asset
+                        or (asset["enabled"] and asset["device_type"] == "linux")
+                    )
                     and asset_matches_event
                     and effective_type == "linux"
+                    and host_id.isdigit()
+                    and read_setting("ssh_mcp_enabled") == "true"
+                    and bool(
+                        read_setting("ssh_mcp_url") and read_setting("ssh_mcp_token")
+                    )
                     and profile_name != "quick"
                 )
+                if (
+                    effective_type == "linux"
+                    and profile_name != "quick"
+                    and not can_ssh
+                ):
+                    gaps.append(
+                        "SSH MCP 未启用、未配置或缺少可信 Linux 主机关联；实时证据未采集"
+                    )
                 if client is None:
                     client = await stack.enter_async_context(
                         AsyncOpenAI(

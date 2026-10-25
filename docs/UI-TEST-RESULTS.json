@@ -168,7 +168,15 @@
       "ok": true
     },
     {
-      "workflow": "asset create + rejected root edit",
+      "workflow": "asset pagination boundaries",
+      "ok": true
+    },
+    {
+      "workflow": "asset create/edit + validation without SSH credentials",
+      "ok": true
+    },
+    {
+      "workflow": "group assignment/filter + device-aware editing",
       "ok": true
     },
     {
@@ -176,7 +184,27 @@
       "ok": true
     },
     {
+      "workflow": "two MCP forms + draft validation + masked token persistence",
+      "ok": true
+    },
+    {
+      "workflow": "budget number inputs + tool checkboxes + default prompt restore",
+      "ok": true
+    },
+    {
+      "workflow": "member create/edit/disable persistence",
+      "ok": true
+    },
+    {
       "workflow": "Web mute create + early unmute",
+      "ok": true
+    },
+    {
+      "workflow": "history pagination + filter resets page",
+      "ok": true
+    },
+    {
+      "workflow": "late answer after page navigation",
       "ok": true
     },
     {

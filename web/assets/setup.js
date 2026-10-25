@@ -35,3 +35,17 @@ form.addEventListener("submit", async (e) => {
     status.textContent = err.message;
   }
 });
+
+document.getElementById("validate-setup").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  if (!form.reportValidity()) return;
+  button.disabled = true;
+  status.textContent = "正在校验…";
+  try {
+    const response = await fetch("/api/v1/setup/validate", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(Object.fromEntries(new FormData(form)))});
+    const result = await response.json();
+    if (!response.ok) throw Error(typeof result.detail === "string" ? result.detail : "初始化信息无效");
+    status.textContent = result.message + " 回调地址：" + result.callback_url;
+  } catch (err) {status.textContent = err.message;}
+  finally {button.disabled = false;}
+});

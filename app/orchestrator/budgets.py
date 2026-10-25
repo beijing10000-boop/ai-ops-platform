@@ -39,9 +39,6 @@ RANGES = {
 
 def validate_settings(values):
     try:
-        for key, lo, hi in [("ssh_concurrency", 1, 16), ("ssh_timeout", 3, 30)]:
-            if key in values and not lo <= int(values[key]) <= hi:
-                raise ValueError(key)
         if "ai_profile_budgets" in values:
             obj = json.loads(values["ai_profile_budgets"] or "{}")
             if not isinstance(obj, dict) or set(obj) - set(PROFILES):

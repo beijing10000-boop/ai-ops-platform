@@ -6,10 +6,10 @@ import sqlite3
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 from . import inventory
-from .main import connection, read_setting
+from .main import connection, read_setting, SettingsUpdate, draft_reader
 from .security.rbac import require, enforce, ROLES, audit
 from .orchestrator import tasks
-from .diagnostics.actions import SERVICE
+from .integrations.ssh_mcp import SERVICE
 from .diagnostics.playbooks import PLAYBOOKS, classify
 
 router = APIRouter(prefix="/api/v1/platform")
@@ -39,7 +39,7 @@ def overview(who=Depends(require("overview.read"))):
             "SELECT SUM(token_total),COUNT(token_total),AVG(duration_ms) FROM diagnostic_tasks WHERE completed_at>=datetime('now','-1 day')"
         ).fetchone()
         hosts = db.execute(
-            "SELECT COUNT(*),SUM(CASE WHEN zabbix_hostid IS NOT NULL THEN 1 ELSE 0 END),SUM(CASE WHEN credential_id IS NOT NULL AND host_key!='' AND address!='' AND enabled=1 THEN 1 ELSE 0 END),SUM(CASE WHEN last_test_status='success' AND enabled=1 THEN 1 ELSE 0 END) FROM assets WHERE device_type='linux'"
+            "SELECT COUNT(*),SUM(CASE WHEN zabbix_hostid IS NOT NULL AND enabled=1 THEN 1 ELSE 0 END) FROM assets WHERE device_type='linux'"
         ).fetchone()
         health = [
             dict(zip(("provider", "status", "checked_at", "detail"), r))
@@ -76,10 +76,12 @@ def overview(who=Depends(require("overview.read"))):
         "average_duration_ms_24h": tokens[2],
         "linux_hosts": hosts[0],
         "linked_linux_hosts": hosts[1] or 0,
-        "configured_ssh_hosts": hosts[2] or 0,
-        "tested_ssh_hosts": hosts[3] or 0,
         "mcp_configured": bool(read_setting("mcp_url")),
-        "linux_adapter": "available",
+        "ssh_mcp_configured": bool(
+            read_setting("ssh_mcp_url")
+            and read_setting("ssh_mcp_token")
+            and read_setting("ssh_mcp_enabled") == "true"
+        ),
         "health": health,
     }
 
@@ -98,8 +100,6 @@ def assets(
 
 @router.post("/assets", status_code=201)
 def add_asset(body: inventory.AssetInput, who=Depends(require("inventory.manage"))):
-    if body.credential_id or body.proxy_id or body.host_key or body.privileged_approved:
-        enforce(who["open_id"], "credentials.manage")
     return write(lambda: inventory.save_asset(body, who["open_id"]))
 
 
@@ -107,7 +107,6 @@ def add_asset(body: inventory.AssetInput, who=Depends(require("inventory.manage"
 def edit_asset(
     asset_id: int, body: inventory.AssetInput, who=Depends(require("inventory.manage"))
 ):
-    enforce(who["open_id"], "credentials.manage")
     return write(lambda: inventory.save_asset(body, who["open_id"], asset_id))
 
 
@@ -115,7 +114,7 @@ def edit_asset(
 def disable_asset(asset_id: int, who=Depends(require("inventory.manage"))):
     with connection() as db:
         if not db.execute(
-            "UPDATE assets SET enabled=0,revision=revision+1,last_test_status=NULL WHERE id=?",
+            "UPDATE assets SET enabled=0,revision=revision+1 WHERE id=?",
             (asset_id,),
         ).rowcount:
             raise HTTPException(404, "资产不存在")
@@ -130,7 +129,6 @@ class ImportAssets(BaseModel):
 
 @router.post("/assets-import")
 def import_assets(body: ImportAssets, who=Depends(require("inventory.manage"))):
-    enforce(who["open_id"], "credentials.manage")
     # Validate everything before beginning the all-or-nothing transaction.
     checked = write(lambda: [a.checked() for a in body.assets])
 
@@ -188,108 +186,6 @@ def add_group(body: GroupInput, who=Depends(require("inventory.manage"))):
     return {"id": ident}
 
 
-class CredentialInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    name: str = Field(min_length=1, max_length=160)
-    private_key: str = Field(min_length=32, max_length=20000)
-    passphrase: str = Field(default="", max_length=1024)
-
-
-@router.get("/credentials")
-def credentials(who=Depends(require("credentials.manage"))):
-    with connection() as db:
-        return [
-            dict(zip(("id", "name", "revision", "updated_at"), r))
-            for r in db.execute(
-                "SELECT id,name,revision,updated_at FROM ssh_credentials ORDER BY name"
-            )
-        ]
-
-
-@router.post("/credentials")
-def add_credential(body: CredentialInput, who=Depends(require("credentials.manage"))):
-    return write(
-        lambda: inventory.save_credential(
-            body.name, body.private_key, body.passphrase, who["open_id"]
-        )
-    )
-
-
-@router.put("/credentials/{credential_id}")
-def rotate_credential(
-    credential_id: int,
-    body: CredentialInput,
-    who=Depends(require("credentials.manage")),
-):
-    result = write(
-        lambda: inventory.save_credential(
-            body.name, body.private_key, body.passphrase, who["open_id"], credential_id
-        )
-    )
-    return result
-
-
-class ProxyInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    name: str = Field(min_length=1, max_length=160)
-    address: str = Field(max_length=64)
-    port: int = Field(default=22, ge=1, le=65535)
-    username: str = Field(max_length=32)
-    host_key: str = Field(max_length=4096)
-    credential_id: int = Field(ge=1)
-
-
-@router.get("/proxies")
-def proxies(who=Depends(require("credentials.manage"))):
-    with connection() as db:
-        cur = db.execute("SELECT * FROM ssh_proxies ORDER BY name")
-        return [inventory.row_dict(r, cur) for r in cur.fetchall()]
-
-
-def save_proxy(body, who, proxy_id=None):
-    if not inventory.USER_RE.fullmatch(body.username):
-        raise HTTPException(422, "SSH 用户名无效")
-    values = body.model_dump()
-    values["address"] = inventory.address(body.address)
-    values["host_key"] = inventory.host_key(body.host_key)
-    with connection() as db:
-        if proxy_id:
-            if not db.execute(
-                "UPDATE ssh_proxies SET "
-                + ",".join(k + "=?" for k in values)
-                + " WHERE id=?",
-                (*values.values(), proxy_id),
-            ).rowcount:
-                raise ValueError("跳板不存在")
-            db.execute(
-                "UPDATE assets SET revision=revision+1,last_test_status=NULL WHERE proxy_id=?",
-                (proxy_id,),
-            )
-        else:
-            proxy_id = db.execute(
-                "INSERT INTO ssh_proxies("
-                + ",".join(values)
-                + ") VALUES ("
-                + ",".join("?" for _ in values)
-                + ")",
-                tuple(values.values()),
-            ).lastrowid
-    audit(who["open_id"], "proxy_saved", proxy_id)
-    return {"id": proxy_id}
-
-
-@router.post("/proxies")
-def add_proxy(body: ProxyInput, who=Depends(require("credentials.manage"))):
-    return write(lambda: save_proxy(body, who))
-
-
-@router.put("/proxies/{proxy_id}")
-def edit_proxy(
-    proxy_id: int, body: ProxyInput, who=Depends(require("credentials.manage"))
-):
-    return write(lambda: save_proxy(body, who, proxy_id))
-
-
 @router.post("/assets-sync")
 async def sync_assets(who=Depends(require("inventory.manage"))):
     from .integrations import zabbix
@@ -319,7 +215,7 @@ async def sync_assets(who=Depends(require("inventory.manage"))):
             hid = str(host.get("hostid", ""))
             if not re.fullmatch(r"[0-9]{1,32}", hid):
                 continue
-            # Never overwrite reviewed SSH routes, credentials, type overrides or public keys.
+            # Preserve administrator type overrides and enabled status.
             db.execute(
                 "INSERT INTO assets(name,zabbix_hostid,device_type) VALUES (?,?,?) ON CONFLICT(zabbix_hostid) DO UPDATE SET name=excluded.name",
                 (
@@ -364,7 +260,7 @@ async def sync_assets(who=Depends(require("inventory.manage"))):
     return {
         "count": count,
         "at_limit": len(records) >= 1000,
-        "note": "仅以 Host ID 关联；SSH 地址与密钥须人工核验。单次最多同步 1000 台。",
+        "note": "单次最多同步 1000 台；SSH MCP 中登记相同的 Zabbix Host ID 即可关联。",
     }
 
 
@@ -379,8 +275,7 @@ class TaskInput(BaseModel):
     time_window: int = Field(default=30, ge=1, le=120)
 
 
-@router.post("/tasks", status_code=202)
-def submit(body: TaskInput, who=Depends(require("diagnostics.run"))):
+def validate_task(body):
     if body.diagnostic_type not in set(PLAYBOOKS) | {"auto"} or body.profile not in (
         "quick",
         "standard",
@@ -414,6 +309,61 @@ def submit(body: TaskInput, who=Depends(require("diagnostics.run"))):
         }
     if body.diagnostic_type == "auto":
         body.diagnostic_type = classify(event.get("event_name") or body.question)
+    return asset, event
+
+
+@router.post("/tasks/validate")
+async def validate_diagnostic(body: TaskInput, who=Depends(require("diagnostics.run"))):
+    asset, event = validate_task(body)
+    if (
+        body.profile != "quick"
+        and asset
+        and asset["device_type"] == "linux"
+        and asset["enabled"]
+    ):
+        return await check_binding(asset["id"], who)
+    return {
+        "ok": True,
+        "message": "诊断参数通过；此任务仅查询监控，不执行 SSH 或 AI 分析。",
+    }
+
+
+@router.post("/assets/{asset_id}/validate")
+async def check_binding(asset_id: int, who=Depends(require("diagnostics.run"))):
+    import asyncio
+    from .integrations import ssh_mcp
+
+    asset = inventory.get_asset(asset_id)
+    if (
+        not asset
+        or not asset["enabled"]
+        or asset["device_type"] != "linux"
+        or not asset["zabbix_hostid"]
+    ):
+        raise HTTPException(422, "需要已启用且绑定 Zabbix Host ID 的 Linux 资产")
+    try:
+        async with asyncio.timeout(20):
+            async with ssh_mcp.configured(read_setting, timeout=15) as adapter:
+                binding = await adapter.resolve(asset["zabbix_hostid"])
+        audit(who["open_id"], "ssh_mcp_binding_verified", asset_id)
+        return {
+            "ok": True,
+            "message": "Host ID 映射验证通过；未连接目标 SSH 或执行诊断。",
+            "ssh_host_id": binding.host_id,
+            "host_revision": binding.revision,
+        }
+    except Exception as exc:
+        raise HTTPException(
+            502,
+            str(exc)
+            if isinstance(exc, ssh_mcp.IntegrationError)
+            else "SSH MCP 关联验证失败：" + type(exc).__name__,
+        ) from None
+
+
+@router.post("/tasks", status_code=202)
+def submit(body: TaskInput, who=Depends(require("diagnostics.run"))):
+    asset, event = validate_task(body)
     request = {**body.model_dump(), "event": event}
     task, created = tasks.create(
         request,
@@ -432,22 +382,6 @@ def submit(body: TaskInput, who=Depends(require("diagnostics.run"))):
         "trace_id": task["trace_id"],
         "duplicate": not created,
     }
-
-
-@router.post("/assets/{asset_id}/test", status_code=202)
-def test_ssh(asset_id: int, who=Depends(require("diagnostics.run"))):
-    asset = inventory.get_asset(asset_id)
-    if not asset or asset["device_type"] != "linux" or not asset["enabled"]:
-        raise HTTPException(422, "需要已启用的 Linux 资产")
-    task, _ = tasks.create(
-        {"asset_revision": asset["revision"]},
-        actor=who["open_id"],
-        kind="connection",
-        asset_id=asset_id,
-        diagnostic_type="connection",
-    )
-    write(lambda: tasks.enqueue(task["task_id"]))
-    return {"task_id": task["task_id"], "trace_id": task["trace_id"]}
 
 
 @router.get("/tasks")
@@ -511,16 +445,12 @@ def retry_task(task_id: str, who=Depends(require("diagnostics.run"))):
     old = tasks.get(task_id, private=True)
     if not old or old["status"] not in ("failed", "partial", "cancelled"):
         raise HTTPException(409, "仅失败、部分完成或取消的任务可重试")
-    if old["kind"] == "legacy":
-        raise HTTPException(409, "导入的历史记录不能重试，请从资产页发起新诊断")
+    if old["kind"] != "analysis":
+        raise HTTPException(409, "旧版 SSH 或导入任务不能重试，请发起新的 AI 诊断")
     request = {k: v for k, v in old["request"].items() if k != "limits"}
     asset = inventory.get_asset(old["asset_id"]) if old["asset_id"] else None
     if old["asset_id"] and (not asset or not asset["enabled"]):
         raise HTTPException(422, "资产不存在或已禁用")
-    if old["kind"] == "connection":
-        if not asset or asset["device_type"] != "linux":
-            raise HTTPException(422, "需要已启用的 Linux 资产")
-        request["asset_revision"] = asset["revision"]
     task, created = tasks.create(
         request,
         source=old["source"],
@@ -576,15 +506,16 @@ def tool_registry(who=Depends(require("tools.read"))):
     rows.append(
         {
             "name": "diagnose_linux_host",
-            "provider": "linux_ssh",
+            "provider": "ssh_mcp",
             "device_types": ["linux"],
-            "description": "已登记 Linux 资产的固定诊断动作",
+            "description": "通过独立 SSH MCP 按 Zabbix Host ID 执行受限诊断",
             "read_only": True,
             "risk": "bounded_read",
-            "timeout": int(read_setting("ssh_timeout") or 15),
+            "timeout": int(read_setting("ssh_mcp_timeout_seconds") or 90),
             "max_output_chars": 32768,
             "required_scope": "diagnostics.run",
-            "enabled": True,
+            "enabled": read_setting("ssh_mcp_enabled") == "true"
+            and bool(read_setting("ssh_mcp_url") and read_setting("ssh_mcp_token")),
             "input_schema": {
                 "diagnostic_type": list(PLAYBOOKS),
                 "service": "validated unit",
@@ -602,38 +533,76 @@ def tool_registry(who=Depends(require("tools.read"))):
     return {
         "tools": rows,
         "playbooks": PLAYBOOKS,
-        "modes": {
-            "standard": "支持 root 和普通账号，无需 Python/网关；仅执行固定诊断动作",
-            "privileged": "必须管理员授权并安装固定强制命令网关；root 不是真正只读",
-        },
     }
 
 
 @router.post("/tools/discover")
-async def discover(who=Depends(require("settings.manage"))):
-    from .integrations import zabbix
+async def discover(
+    provider: str = "zabbix_mcp",
+    body: SettingsUpdate | None = None,
+    who=Depends(require("settings.manage")),
+):
+    import asyncio
+    from .integrations import zabbix, ssh_mcp
 
+    reader = draft_reader(body, who)
+    if provider not in {"zabbix_mcp", "ssh_mcp"}:
+        raise HTTPException(422, "MCP 提供方无效")
     try:
-        async with zabbix.connect(read_setting) as session:
-            listed = await zabbix.discover(session)
-            allowed = zabbix.enabled_names(read_setting)
-            names = sorted(t.name for t in listed if t.name in allowed)
+        async with asyncio.timeout(20):
+            if provider == "zabbix_mcp":
+                async with zabbix.connect(reader) as session:
+                    listed = await zabbix.discover(session)
+                    names = sorted(
+                        t.name for t in listed if t.name in zabbix.enabled_names(reader)
+                    )
+                if not names:
+                    raise ValueError("未发现授权的 Zabbix 只读工具")
+            else:
+                async with ssh_mcp.configured(reader, timeout=15) as adapter:
+                    listed = await adapter.session.list_tools()
+                    available = {t.name for t in listed.tools}
+                    if "ssh_resolve_host" not in available:
+                        raise ValueError(
+                            "SSH MCP 需升级至支持 Host ID 解析的 v0.2.0 或更新版"
+                        )
+                    names = sorted(
+                        available & ({"ssh_resolve_host"} | set(ssh_mcp.TOOLS.values()))
+                    )
         status = "success"
         detail = json.dumps({"authorized_tools": names}, ensure_ascii=False)
     except Exception as exc:
-        status = "failed"
-        detail = type(exc).__name__
-        names = []
-    with connection() as db:
-        db.execute(
-            "INSERT INTO integration_health(provider,status,detail) VALUES (?,?,?) ON CONFLICT(provider) DO UPDATE SET status=excluded.status,checked_at=CURRENT_TIMESTAMP,detail=excluded.detail",
-            ("zabbix_mcp", status, detail),
+        status, names = "failed", []
+        detail = (
+            str(exc)
+            if isinstance(exc, (ValueError, ssh_mcp.IntegrationError))
+            else type(exc).__name__
         )
+        detail = detail[:250]
+    keys = (
+        ("mcp_url", "mcp_token")
+        if provider == "zabbix_mcp"
+        else (
+            "ssh_mcp_url",
+            "ssh_mcp_token",
+            "ssh_mcp_enabled",
+            "ssh_mcp_timeout_seconds",
+        )
+    )
+    # A successful unsaved draft must not claim the active configuration is healthy.
+    if all(reader(key) == read_setting(key) for key in keys):
+        with connection() as db:
+            db.execute(
+                "INSERT INTO integration_health(provider,status,detail) VALUES (?,?,?) ON CONFLICT(provider) DO UPDATE SET status=excluded.status,checked_at=CURRENT_TIMESTAMP,detail=excluded.detail",
+                (provider, status, detail),
+            )
+    audit(who["open_id"], "mcp_connection_test", provider)
     return {
         "ok": status == "success",
+        "provider": provider,
         "authorized_tools": names,
         "detail": detail,
-        "note": "工具发现成功不代表远端 Zabbix API 账号已被核验为只读",
+        "note": "发现工具仅验证连接和协议；主机映射、远端动作授权及 SSH 连通性在实际诊断时核验",
     }
 
 
@@ -724,3 +693,62 @@ def delete_group(group_id: int, who=Depends(require("inventory.manage"))):
         db.execute("DELETE FROM asset_groups WHERE id=?", (group_id,))
     audit(who["open_id"], "group_deleted", group_id)
     return {"ok": True}
+
+
+class FormCheck(BaseModel):
+    kind: str
+    values: dict
+
+
+@router.post("/validate")
+def validate_editor(body: FormCheck, who=Depends(require("inventory.manage"))):
+    from pydantic import ValidationError
+
+    try:
+        if body.kind in {"asset", "import"}:
+            entries = (
+                [body.values] if body.kind == "asset" else body.values.get("assets", [])
+            )
+            if not isinstance(entries, list) or not 1 <= len(entries) <= 1000:
+                raise ValueError("请选择 1–1000 条资产")
+            checked = [
+                inventory.AssetInput.model_validate(a).checked() for a in entries
+            ]
+            ids = [a.zabbix_hostid for a in checked if a.zabbix_hostid]
+            if len(ids) != len(set(ids)):
+                raise ValueError("导入内容包含重复 Host ID")
+            with connection() as db:
+                for a in checked:
+                    if any(
+                        not db.execute(
+                            "SELECT 1 FROM asset_groups WHERE id=?", (gid,)
+                        ).fetchone()
+                        for gid in a.group_ids
+                    ):
+                        raise ValueError("关联的主机组不存在")
+                if body.kind == "import" and any(
+                    db.execute(
+                        "SELECT 1 FROM assets WHERE zabbix_hostid=?", (hid,)
+                    ).fetchone()
+                    for hid in ids
+                ):
+                    raise ValueError("导入 Host ID 已存在")
+        elif body.kind == "group":
+            group = GroupInput.model_validate(body.values)
+            if not group.name.strip():
+                raise ValueError("主机组名称不能为空")
+        elif body.kind == "member":
+            enforce(who["open_id"], "*")
+            member = MemberInput.model_validate(body.values)
+            if member.role not in ROLES or member.role == "super_admin":
+                raise ValueError("角色无效；超级管理员请在名单管理")
+        else:
+            raise ValueError("不支持的验证类型")
+    except ValidationError:
+        raise HTTPException(422, "表单内容无效，请核对必填项、字段类型和长度") from None
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    return {
+        "ok": True,
+        "message": "表单校验通过；未保存。唯一性和权限在实际保存时再次检查。",
+    }

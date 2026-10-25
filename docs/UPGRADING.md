@@ -1,57 +1,44 @@
-# 离线迁移、升级与回滚
+# 从整合版升级至双 MCP 版本
 
-迁移在**新平台的独立数据卷**完成，不把新应用指向原生产库。两个旧源库只读打开；不改原 schema、不就地替换主密钥。以下命令由操作者在测试机器执行，本次未访问真实旧库。
+v0.7.0 启动时执行数据库 v4 迁移：保留告警、问答、成员、监控资产、分组、任务、报告、证据和审计；删除旧 SSH 凭据/跳板/公钥扫描表、资产 SSH 字段和旧 SSH 并发/超时设置。历史 SSH 证据仍可查看，未完成的旧本地 SSH 任务标记失败，不能重试为本地执行。
 
-## 准备
+主机、SSH 私钥、公钥、跳板和动作权限应先在独立 SSH MCP 登记，填写同一 Zabbix Host ID 并签发平台专用令牌。本平台不再导入 Linux 旧项目私钥或执行器。不要把平台数据卷挂载到独立 SSH MCP。
 
-1. 固定目标代码 SHA、保存 Compose 与部署参数。两套旧实例分别制作 SQLite 一致性备份，保留各自原 Fernet 主密钥及原代码。不要仅在运行中复制 `.sqlite3` 而遗漏 WAL。
-2. 在受控测试目录 `migration-input/` 放入 `zabbix.sqlite3`、`zabbix.key`、`linux.sqlite3`、`linux.key`。这里均为备份副本；密钥文件只包含对应 Fernet 值，chmod 600，目录 chmod 700。不要上传 GitHub、发送到聊天或在终端日志打印密钥。
-3. 新仓库先 `docker compose build`，停止所有新应用服务和新接收器，确认没有 worker/stdin MCP 使用目标数据库。不要停止原生产服务，除非已进入批准的切换窗口。不要执行 `down -v`。
-4. 以下流程用于空白目标卷，`.env` 的 APP_ENCRYPTION_KEY 留空，采用新 `/app/data/master.key`。若目标已有任何真实新平台数据，应先单独完整备份并另建空白测试卷；不要删除它来绕过“目标已存在”的保护。
+## 已部署 ai-ops-platform
 
-## 导入原 Zabbix 主平台
-
-在空白目标卷只创建主密钥，暂不创建数据库：
+在原项目目录执行，保留原 Compose 项目名、数据卷和加密密钥。先停止本项目各服务，备份整个数据卷与当前部署参数，然后更新代码：
 
 ```bash
-docker compose run --rm --no-deps --user 0 web python -c 'from app.bootstrap import persistent_secret; from cryptography.fernet import Fernet; persistent_secret("/app/data/master.key", Fernet.generate_key)'
-docker compose run --rm --no-deps --user 0 -v "$PWD/migration-input:/migration-input:ro" web python -m app.migrate import-zabbix --source /migration-input/zabbix.sqlite3 --source-key-file /migration-input/zabbix.key --destination /app/data/app.sqlite3 --target-key-file /app/data/master.key
+cd /data/ai-ops-platform
+docker compose --profile feishu stop
+mkdir -p backup-v070
+docker compose run --rm --no-deps -v "$PWD/backup-v070:/backup" --user 0 web sh -c 'cp -a /app/data/. /backup/'
+git rev-parse HEAD > backup-v070/source-revision.txt
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose up -d --build --remove-orphans
+docker compose exec -T web python -m app.bootstrap
+docker compose ps
+curl -f http://127.0.0.1:8088/healthz
 ```
 
-该步骤一致性复制旧库、解密并用新密钥重加密 settings，保留告警和历史，撤销旧 OAuth 会话。目标已存在或源已是统一平台时拒绝操作。失败不会发布半个目标库，源库不变。迁移文件不能自动恢复已丢失的原密钥。
+备份目录包含敏感加密数据库与密钥，限制权限并移至受控备份系统；若以前使用 `.env` 中的 `APP_ENCRYPTION_KEY`，同时保留原部署参数。备份不要放入 Git。`--remove-orphans` 清理已移除的 host-key-worker 容器，不删除数据卷。升级过程不会更改独立 SSH MCP 或 Zabbix MCP。
 
-## 导入 Linux 旧项目
+登录 Web，进入连接管理，保留原 Zabbix MCP，配置并验证 SSH MCP；复查 AI 模型、预算、默认提示词和飞书参数。旧自定义提示词保留；需要新默认词时在 AI 配置点击“恢复默认提示词”后保存。
+
+验证通过后启动飞书：
 
 ```bash
-docker compose run --rm --no-deps --user 0 -v "$PWD/migration-input:/migration-input:ro" web python -m app.migrate import-linux --source /migration-input/linux.sqlite3 --source-key-file /migration-input/linux.key --offline-ack
+docker compose --profile feishu up -d feishu-receiver
 ```
 
-CLI 自动在目标旁生成 pre-linux-import 备份。先对源只读快照完整解密，再在事务内导入组、跳板、共享 SSH 凭据、主机、历史和审计，统一用目标主密钥加密。相同源快照指纹重复执行返回 already_imported，不重复写入。任一步失败回滚目标事务。
-
-所有迁入主机默认**禁用、模式 B 未批准**；不猜测 Host ID、不因旧 IP 相同自动关联。管理员需逐台核验 Host ID、设备类型、私网地址、主机公钥、账号、凭据和模式后再启用。已有目标设置优先，旧管理员不会覆盖现有超级管理员名单；应在新 Web 人工复核并授权需要的旧管理员。
-
-处理目标卷的运行权限并初始化增量 schema：
-
-```bash
-docker compose run --rm --no-deps --user 0 web sh -c 'chown -R 10001:10001 /app/data && chmod 700 /app/data'
-docker compose run --rm --no-deps web python -m app.bootstrap
-docker compose up -d
-```
-
-这里只调整本新 Compose 项目的 appdata 卷；不要将命令套到原生产目录。SELinux 下若挂载被拒绝，对**备份副本目录**按本机策略设置标签，不关闭整个 SELinux。
-
-## 迁移后核验
-
-核对旧告警数、Token 历史、组/主机/历史数量、导入指纹、凭据能否解密及权限状态。旧会话重新登录。新平台的本地 SSH 默认模式不等于旧 Linux root 网关模式；未经复核不能启用。先完成 docs/ACCEPTANCE.md 的测试矩阵，再安排接收器、Webhook 与用户入口切换；不会自动迁移两个 Redis 的进行中任务或去重状态。
-
-## 后续统一平台升级
-
-停止新平台接收器和 worker、排空队列，备份数据库和同版本主密钥、记录当前 SHA，更新至已验收 SHA 后重新构建。启动时执行 additive schema 迁移。不可用旧版 legacy import-zabbix 对统一平台库重新加密；统一平台恢复必须使用对应原密钥与兼容代码。
+曾在整合分支部署且工作区有本地修改时，先保留修改；`git pull --ff-only` 失败不要直接 reset。需保留原数据卷名称；若旧部署使用自定义项目名，继续使用相同项目名。
 
 ## 回滚
 
-- 迁移失败：源实例无需恢复，因为未写入源。保留失败日志类型和原备份，修正原因后在空目标重试或恢复目标 pre-import 快照。
-- 验收失败：先停止新接收器与新 Webhook 路由，再恢复旧入口和旧接收器。不得让两个独立接收器同时处理相同 App ID。旧 Redis 的队列继续由旧版本处理。
-- 目标库恢复：停止**所有新平台**进程，保存故障库与 WAL/SHM 供排查，用一致性备份恢复 `/app/data/app.sqlite3`；仅在进程全部停止且故障文件已保存后移除对应旧 WAL/SHM。配对恢复该快照的 master.key/旧环境密钥并设置 UID 10001、0600，再使用对应代码版本启动。不要把新 schema 库直接交给旧二进制猜测兼容性。
+停止所有本项目容器，保存当前故障数据，再整体恢复升级前数据卷备份和原加密密钥，切回备份记录的旧代码版本并构建启动。v4 已删除 SSH 配置，不能只回退代码而继续使用新数据库。恢复前确认没有应用进程正在写 SQLite，配对恢复数据库、WAL/SHM 和密钥。禁止 `down -v`。
 
-仓库不包含生产自动迁移或自动切换脚本。
+## 从原 zabbix-ai-ops 导入
+
+仅为旧版 Zabbix 平台提供离线 `python -m app.migrate import-zabbix`。源数据库只读打开，重加密 settings 并撤销旧会话；目标必须是新文件。先停止源/目标写入并保存原主密钥及一致性快照，在独立空卷验证后再切换。已是统一平台的数据库不得使用此工具重新加密，应整体备份恢复。命令参数见 `python -m app.migrate import-zabbix --help`。

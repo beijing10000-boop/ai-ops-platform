@@ -16,19 +16,26 @@ from pydantic import BaseModel, Field
 from cryptography.fernet import Fernet
 from redis import Redis
 from rq import Queue
+from .configuration import DEFAULT_PROMPTS
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DB = DATA_DIR / "app.sqlite3"
 MASTER_KEY = os.getenv("APP_ENCRYPTION_KEY", "")
 ADMIN_TOKEN = os.getenv("ADMIN_API_TOKEN", "")
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
-app = FastAPI(title="Zabbix AI Ops · Unified Platform", version="0.6.0")
+app = FastAPI(title="Zabbix AI Ops · Unified Platform", version="0.7.0")
 app.mount(
     "/assets",
     StaticFiles(directory=Path(__file__).parent.parent / "web" / "assets"),
     name="assets",
 )
-SENSITIVE = {"openai_api_key", "mcp_token", "lark_app_secret", "zabbix_webhook_secret"}
+SENSITIVE = {
+    "openai_api_key",
+    "mcp_token",
+    "ssh_mcp_token",
+    "lark_app_secret",
+    "zabbix_webhook_secret",
+}
 ALLOWED = SENSITIVE | {
     "openai_base_url",
     "openai_model",
@@ -48,19 +55,21 @@ ALLOWED = SENSITIVE | {
 }
 ALLOWED |= {
     "ai_profile_budgets",
-    "ssh_concurrency",
-    "ssh_timeout",
+    "ssh_mcp_enabled",
+    "ssh_mcp_url",
+    "ssh_mcp_timeout_seconds",
     "disabled_tools",
     "zabbix_frontend_url",
 }
 DEFAULTS = {
+    **DEFAULT_PROMPTS,
     "ai_min_severity": "4",
     "feishu_enabled": "false",
     "web_protocol": "http",
     "ai_analysis_profile": "standard",
     "ai_tool_loading": "dynamic",
-    "ssh_concurrency": "4",
-    "ssh_timeout": "15",
+    "ssh_mcp_enabled": "false",
+    "ssh_mcp_timeout_seconds": "90",
 }
 
 
@@ -231,7 +240,12 @@ def read_setting(key):
         ).fetchone()
     if not row:
         return DEFAULTS.get(key, "")
-    return cipher().decrypt(row[0].encode()).decode() if row[1] else row[0]
+    value = cipher().decrypt(row[0].encode()).decode() if row[1] else row[0]
+    return (
+        DEFAULT_PROMPTS.get(key, "")
+        if key in DEFAULT_PROMPTS and not value.strip()
+        else value
+    )
 
 
 def beijing_time(value):
@@ -350,8 +364,7 @@ def setup_page():
     return FileResponse(Path(__file__).parent.parent / "web" / "setup.html")
 
 
-@app.post("/api/v1/setup")
-def complete_setup(body: SetupRequest):
+def validate_setup(body):
     import re
     from urllib.parse import urlsplit
     from .bootstrap import persistent_secret
@@ -366,10 +379,17 @@ def complete_setup(body: SetupRequest):
         body.bootstrap_token, expected
     ):
         raise HTTPException(403, "初始化凭据错误")
+
     if not setup_missing():
         raise HTTPException(409, "系统已经初始化，请登录 Web 后台修改配置")
     if body.web_protocol not in ("http", "https"):
         raise HTTPException(422, "无效访问协议")
+    from .configuration import validate_form
+
+    validate_form(
+        {"web_protocol": body.web_protocol, "web_public_host": body.web_public_host},
+        read_setting,
+    )
     host = urlsplit(body.web_protocol + "://" + body.web_public_host.strip())
     if (
         not host.hostname
@@ -396,12 +416,34 @@ def complete_setup(body: SetupRequest):
         raise HTTPException(422, "飞书 App ID 格式错误")
     if not 8 <= len(body.lark_app_secret) <= 512:
         raise HTTPException(422, "飞书 App Secret 格式错误")
+    return {
+        "ok": True,
+        "message": "初始化信息和一次性凭据校验通过，尚未保存。",
+        "callback_url": body.web_protocol
+        + "://"
+        + body.web_public_host.strip().rstrip("/")
+        + "/api/v1/auth/callback",
+    }
+
+
+@app.post("/api/v1/setup/validate")
+def check_setup(body: SetupRequest):
+    return validate_setup(body)
+
+
+@app.post("/api/v1/setup")
+def complete_setup(body: SetupRequest):
+    validate_setup(body)
     entries = {
         "web_protocol": body.web_protocol,
         "web_public_host": body.web_public_host.strip(),
         "lark_app_id": body.lark_app_id,
         "lark_app_secret": body.lark_app_secret,
-        "feishu_admin_open_ids": ",".join(dict.fromkeys(ids)),
+        "feishu_admin_open_ids": ",".join(
+            dict.fromkeys(
+                i.strip() for i in body.feishu_admin_open_ids.split(",") if i.strip()
+            )
+        ),
     }
     with connection() as db:
         # Recheck inside write lock, so concurrent bootstrap requests cannot overwrite.
@@ -442,8 +484,7 @@ def get_settings():
     }
 
 
-@app.put("/api/v1/settings", dependencies=[Depends(require_admin)])
-def update_settings(body: SettingsUpdate, identity=Depends(require_admin)):
+def validate_settings_update(body, identity):
     if set(body.values) & {"feishu_admin_open_ids", "disabled_tools"}:
         from .security.rbac import enforce
 
@@ -471,6 +512,9 @@ def update_settings(body: SettingsUpdate, identity=Depends(require_admin)):
     from .orchestrator.budgets import validate_settings
 
     validate_settings(body.values)
+    from .integrations.ssh_mcp import validate_settings as validate_mcp_settings
+
+    validate_mcp_settings(body.values)
     if "feishu_admin_open_ids" in body.values:
         import re
 
@@ -488,6 +532,48 @@ def update_settings(body: SettingsUpdate, identity=Depends(require_admin)):
                 status_code=422,
                 detail="飞书管理员 Open ID 格式错误（应为 ou_ 开头，多个用英文逗号分隔）",
             )
+    from .configuration import validate_form
+
+    return validate_form(body.values, read_setting)
+
+
+def draft_reader(body, identity):
+    if body is None:
+        return read_setting
+    validate_settings_update(body, identity)
+
+    def read(key):
+        val = body.values.get(key)
+        return (
+            read_setting(key)
+            if val is None or (key in SENSITIVE and val == "********")
+            else val
+        )
+
+    return read
+
+
+@app.post("/api/v1/settings/validate")
+def validate_settings_form(body: SettingsUpdate, identity=Depends(require_admin)):
+    return validate_settings_update(body, identity)
+
+
+@app.get("/api/v1/settings/options", dependencies=[Depends(require_admin)])
+def settings_options():
+    from .orchestrator.budgets import PROFILES, RANGES
+    from .integrations.zabbix import READ_TOOLS
+
+    return {
+        "prompts": DEFAULT_PROMPTS,
+        "profiles": PROFILES,
+        "ranges": RANGES,
+        "tools": sorted(READ_TOOLS),
+    }
+
+
+@app.put("/api/v1/settings", dependencies=[Depends(require_admin)])
+def update_settings(body: SettingsUpdate, identity=Depends(require_admin)):
+    validate_settings_update(body, identity)
     with connection() as db:
         for key, val in body.values.items():
             if key in SENSITIVE and val == "********":
@@ -499,6 +585,10 @@ def update_settings(body: SettingsUpdate, identity=Depends(require_admin)):
                 "INSERT INTO settings(key,value,secret) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, secret=excluded.secret",
                 (key, stored, int(key in SENSITIVE)),
             )
+            if key in {"mcp_url", "mcp_token", "disabled_tools"}:
+                db.execute("DELETE FROM integration_health WHERE provider='zabbix_mcp'")
+            elif key.startswith("ssh_mcp_"):
+                db.execute("DELETE FROM integration_health WHERE provider='ssh_mcp'")
             db.execute(
                 "INSERT INTO audit(action,key,actor) VALUES(?,?,?)",
                 ("settings_update", key, identity["open_id"]),
@@ -676,6 +766,14 @@ class MuteRequest(BaseModel):
     host_id: str = Field(pattern=r"^[0-9]{1,20}$")
     trigger_id: str = Field(pattern=r"^[0-9]{1,20}$")
     hours: int = Field(ge=1, le=168)
+
+
+@app.post("/api/v1/alert-mutes/validate", dependencies=[Depends(require_admin)])
+def validate_mute(body: MuteRequest):
+    return {
+        "ok": True,
+        "message": f"规则格式有效：主机 {body.host_id} / 触发器 {body.trigger_id}，屏蔽 {body.hours} 小时；未应用。实际关联和群效果须用告警验证。",
+    }
 
 
 @app.post("/api/v1/alert-mutes", dependencies=[Depends(require_admin)])
@@ -858,31 +956,94 @@ def runtime_status():
 
 @app.post("/api/v1/test/mcp", dependencies=[Depends(require_admin)])
 async def test_mcp():
-    """Read-only tool discovery. Never execute MCP write operations."""
-    endpoint = read_setting("mcp_url")
-    if not endpoint:
-        raise HTTPException(status_code=422, detail="please configure MCP URL first")
-    from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
-    from .integrations.zabbix import READ_TOOLS
+    from .platform_api import discover
 
-    token = read_setting("mcp_token")
-    headers = {"Authorization": "Bearer " + token} if token else {}
+    # Compatibility endpoint for existing API clients, using the same safe connection test.
+    return await discover(provider="zabbix_mcp", who={"open_id": "system"})
+
+
+@app.post("/api/v1/test/feishu")
+async def test_feishu(
+    body: SettingsUpdate | None = None,
+    check_groups: bool = False,
+    identity=Depends(require_admin),
+):
+    import httpx
+    import asyncio
+    from .feishu_client import ROOT
+
+    reader = draft_reader(body, identity)
+    if not reader("lark_app_id") or not reader("lark_app_secret"):
+        raise HTTPException(422, "请填写飞书 App ID 与 App Secret")
     try:
-        async with streamablehttp_client(endpoint, headers=headers, timeout=10) as (
-            read,
-            write,
-            _,
-        ):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                tools = await session.list_tools()
-                allowed = sorted(t.name for t in tools.tools if t.name in READ_TOOLS)
-                return {"ok": True, "read_only_tools": allowed, "count": len(allowed)}
+        async with httpx.AsyncClient(
+            timeout=15, follow_redirects=False, trust_env=False
+        ) as client:
+            response = await client.post(
+                ROOT + "/auth/v3/tenant_access_token/internal",
+                json={
+                    "app_id": reader("lark_app_id"),
+                    "app_secret": reader("lark_app_secret"),
+                },
+            )
+            response.raise_for_status()
+            result = response.json()
+        if result.get("code", 0) != 0 or not result.get("tenant_access_token"):
+            raise HTTPException(
+                502, "飞书应用认证失败，错误码：" + str(result.get("code", "unknown"))
+            )
+        if check_groups:
+            groups = sorted(
+                {
+                    g.strip()
+                    for key in ("allowed_chat_ids", "feishu_alert_chat_ids")
+                    for g in reader(key).split(",")
+                    if g.strip()
+                }
+            )
+            if not groups:
+                raise HTTPException(422, "请先填写需要验证的飞书群 ID")
+            if len(groups) > 20:
+                raise HTTPException(422, "单次最多验证 20 个群，请分批检查")
+            checks = []
+            async with httpx.AsyncClient(
+                timeout=8, follow_redirects=False, trust_env=False
+            ) as client:
+                async with asyncio.timeout(20):
+                    for group in groups:
+                        response = await client.get(
+                            ROOT + "/im/v1/chats/" + group,
+                            headers={
+                                "Authorization": "Bearer "
+                                + result["tenant_access_token"]
+                            },
+                        )
+                        data = response.json()
+                        checks.append(
+                            {
+                                "chat_id": group,
+                                "ok": response.is_success and data.get("code", 0) == 0,
+                            }
+                        )
+            failed = [row["chat_id"] for row in checks if not row["ok"]]
+            return {
+                "ok": not failed,
+                "message": "群访问读取检查："
+                + (
+                    "全部通过；未发送消息，发送与卡片权限仍需真实联调。"
+                    if not failed
+                    else "未通过：" + ",".join(failed)
+                ),
+                "groups": checks,
+            }
+        return {
+            "ok": True,
+            "message": "飞书应用认证成功；未发送消息。登录回调、群权限和长连接需分别核验。",
+        }
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(
-            status_code=502, detail="MCP connection failed: " + type(exc).__name__
-        )
+        raise HTTPException(502, "飞书连接验证失败：" + type(exc).__name__) from None
 
 
 class AskRequest(BaseModel):
@@ -890,7 +1051,9 @@ class AskRequest(BaseModel):
 
 
 @app.post("/api/v1/test/ai", dependencies=[Depends(require_admin)])
-async def test_ai_model():
+async def test_ai_model(
+    body: SettingsUpdate | None = None, identity=Depends(require_admin)
+):
     """Test model availability without tools; report Azure errors without leaking credentials."""
     import asyncio
     import logging
@@ -903,9 +1066,10 @@ async def test_ai_model():
         RateLimitError,
     )
 
-    key = read_setting("openai_api_key")
-    model = read_setting("openai_model")
-    base_url = read_setting("openai_base_url")
+    reader = draft_reader(body, identity)
+    key = reader("openai_api_key")
+    model = reader("openai_model")
+    base_url = reader("openai_base_url")
     if not all((key, model, base_url)):
         raise HTTPException(
             status_code=422, detail="请先保存 AI Base URL、模型及 API Key"
@@ -1058,6 +1222,3 @@ from . import feishu_auth  # noqa: E402,F401
 from .platform_api import router as platform_router  # noqa: E402
 
 app.include_router(platform_router)
-from .host_keys_api import router as host_keys_router  # noqa: E402
-
-app.include_router(host_keys_router)

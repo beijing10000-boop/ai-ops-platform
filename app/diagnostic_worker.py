@@ -1,10 +1,8 @@
-"""RQ entry point for manual diagnostics and SSH connection checks."""
+"""RQ entry point for AI analysis through the two external MCP connections."""
 
 import asyncio
 import logging
-import time
-from .main import connection, REDIS_URL, read_setting
-from .inventory import get_asset
+from .main import REDIS_URL, read_setting
 from .orchestrator import tasks
 from .security.rbac import permits
 
@@ -21,44 +19,14 @@ def process(task_id):
             error_type="PermissionRevoked",
         )
         return
-    if task["kind"] == "connection":
-        tasks.start(task_id)
-        began = time.monotonic()
-        asset = get_asset(task["asset_id"])
-        try:
-            if not asset or asset["revision"] != task["request"].get("asset_revision"):
-                raise ValueError("资产配置已变更，请重新测试")
-            from .diagnostics.ssh import execute
-
-            result = execute(
-                task["asset_id"],
-                "connection",
-                cancelled=lambda: tasks.cancelled(task_id),
-            )
-            tasks.evidence(
-                task_id, "linux_ssh", "connection", result, result["duration_ms"]
-            )
-            tasks.finish(
-                task_id,
-                result,
-                status=result["status"],
-                duration_ms=int((time.monotonic() - began) * 1000),
-            )
-            with connection() as db:
-                db.execute(
-                    "UPDATE assets SET last_test_status=?,last_test_at=CURRENT_TIMESTAMP WHERE id=? AND revision=?",
-                    (result["status"], asset["id"], asset["revision"]),
-                )
-            return result
-        except Exception as exc:
-            tasks.finish(
-                task_id,
-                {"message": str(exc)[:200]},
-                status="cancelled" if tasks.cancelled(task_id) else "failed",
-                error_type=type(exc).__name__,
-                duration_ms=int((time.monotonic() - began) * 1000),
-            )
-            return
+    if task["kind"] != "analysis":
+        tasks.finish(
+            task_id,
+            {"message": "本地 SSH 任务已停用，请在独立 SSH MCP 管理"},
+            status="failed",
+            error_type="LocalSSHRemoved",
+        )
+        return
     from .mcp_runtime import run
 
     request = task["request"]

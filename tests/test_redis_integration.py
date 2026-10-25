@@ -90,7 +90,7 @@ def test_real_webhook_dedup_and_rq_alert_delivery_without_feishu(real_redis):
         )
 
 
-def test_real_diagnostic_queue_records_connection_failure(real_redis):
+def test_real_diagnostic_queue_retires_old_local_ssh_jobs(real_redis):
     asset = inventory.save_asset(
         inventory.AssetInput(name="no-credentials", device_type="linux"), "test"
     )
@@ -107,7 +107,7 @@ def test_real_diagnostic_queue_records_connection_failure(real_redis):
         burst=True, with_scheduler=False, logging_level="WARNING"
     )
     assert tasks.get(task["task_id"])["status"] == "failed"
-    assert tasks.get(task["task_id"])["error_type"] == "ValueError"
+    assert tasks.get(task["task_id"])["error_type"] == "LocalSSHRemoved"
 
 
 def test_real_context_keeps_exact_reply_branch_and_chat_isolation(real_redis):
@@ -128,35 +128,3 @@ def test_real_context_keeps_exact_reply_branch_and_chat_isolation(real_redis):
     assert not ctx.is_pending("oc_two", "om_working")
     ctx.clear_pending("oc_one", "om_working")
     assert not ctx.is_pending("oc_one", "om_working")
-
-
-def test_real_host_key_queue_is_separate_and_does_not_trust_candidates(
-    real_redis, monkeypatch
-):
-    import paramiko
-    from app.inventory import host_keys
-
-    monkeypatch.setattr(host_keys, "REDIS_URL", main.REDIS_URL)
-    key = paramiko.RSAKey.generate(2048)
-    public = key.get_name() + " " + key.get_base64()
-    monkeypatch.setattr(host_keys, "fetch_key", lambda _: public)
-    asset = inventory.save_asset(
-        inventory.AssetInput(
-            name="key-probe", device_type="linux", address="10.0.0.10"
-        ),
-        "legacy-admin",
-    )
-    scan_id = host_keys.create([asset["id"]], "legacy-admin")["scan_id"]
-    queue = Queue("ai-host-keys", connection=real_redis)
-    assert len(queue) == 1 and len(Queue("ai-diagnostics", connection=real_redis)) == 0
-    job = queue.fetch_job("host-keys-" + scan_id)
-    assert job.func_name == "app.inventory.host_keys.collect"
-    SimpleWorker([queue], connection=real_redis).work(
-        burst=True, with_scheduler=False, logging_level="WARNING"
-    )
-    job.refresh()
-    assert job.is_finished
-    result = host_keys.detail(scan_id)
-    assert result["counts"] == {"new": 1}
-    assert result["items"][0]["host_key"] == public
-    assert inventory.get_asset(asset["id"])["host_key"] == ""

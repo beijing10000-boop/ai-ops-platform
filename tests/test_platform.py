@@ -5,10 +5,9 @@ import secrets
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-import paramiko
 import pytest
 from fastapi.testclient import TestClient
-from app import main, feishu_auth, inventory, diagnostic_worker
+from app import main, feishu_auth, diagnostic_worker
 from app.orchestrator import tasks
 
 
@@ -43,7 +42,7 @@ def test_roles_are_checked_on_direct_api_access():
     operator = client_for("operator")
     auditor = client_for("auditor")
     assert operator.get("/api/v1/settings").status_code == 403
-    assert operator.get("/api/v1/platform/credentials").status_code == 403
+    assert operator.get("/api/v1/platform/credentials").status_code == 404
     assert operator.get("/api/v1/platform/assets").status_code == 200
     assert auditor.post("/api/v1/platform/tasks", json={}).status_code == 403
     assert auditor.get("/api/v1/platform/audit").status_code == 200
@@ -135,47 +134,6 @@ def test_batch_is_atomic_and_pagination_handles_1000_assets():
     assert client.get("/api/v1/platform/assets?page_size=1001").status_code == 422
 
 
-def test_credentials_are_encrypted_and_rotation_invalidates_verification():
-    import io
-
-    key = paramiko.RSAKey.generate(2048)
-    text = io.StringIO()
-    key.write_private_key(text)
-    client = client_for()
-    data = client.post(
-        "/api/v1/platform/credentials",
-        json={"name": "dedicated", "private_key": text.getvalue(), "passphrase": ""},
-    ).json()
-    cid = data["id"]
-    with main.connection() as db:
-        row = db.execute(
-            "SELECT private_key FROM ssh_credentials WHERE id=?", (cid,)
-        ).fetchone()
-        assert row[0] != text.getvalue()
-        assert main.cipher().decrypt(row[0].encode()).decode() == text.getvalue()
-    assets = client.post(
-        "/api/v1/platform/assets",
-        json={"name": "registered", "device_type": "linux", "credential_id": cid},
-    ).json()
-    with main.connection() as db:
-        db.execute(
-            "UPDATE assets SET last_test_status='success' WHERE id=?", (assets["id"],)
-        )
-    response = client.put(
-        "/api/v1/platform/credentials/" + str(cid),
-        json={"name": "dedicated", "private_key": text.getvalue(), "passphrase": ""},
-    )
-    assert response.status_code == 200
-    assert inventory.get_asset(assets["id"])["last_test_status"] is None
-    assert inventory.get_asset(assets["id"])["revision"] == 2
-    public = client.get("/api/v1/platform/credentials").json()[0]
-    assert (
-        "private_key" not in public
-        and "passphrase" not in public
-        and public["revision"] == 2
-    )
-
-
 def test_exact_host_id_binding_and_non_linux_guard(monkeypatch):
     client = client_for()
     monkeypatch.setattr(tasks, "enqueue", lambda _: None)
@@ -212,7 +170,7 @@ def test_exact_host_id_binding_and_non_linux_guard(monkeypatch):
         client.post(
             "/api/v1/platform/assets/" + str(windows["id"]) + "/test"
         ).status_code
-        == 422
+        == 404
     )
 
 
@@ -371,87 +329,9 @@ def test_group_crud_preserves_synced_groups():
     assert client.delete(f"/api/v1/platform/groups/{gid}").status_code == 200
 
 
-def test_connection_retry_after_asset_change_uses_current_revision(monkeypatch):
-    from app.diagnostics import ssh
-
-    monkeypatch.setattr(tasks, "enqueue", lambda _: None)
-    monkeypatch.setattr(
-        ssh, "execute", lambda *a, **k: {"status": "success", "duration_ms": 1}
-    )
-    client = client_for()
-    body = {"name": "retry-target", "device_type": "linux"}
-    asset = client.post("/api/v1/platform/assets", json=body).json()
-    old = client.post(f"/api/v1/platform/assets/{asset['id']}/test").json()
-    tasks.finish(old["task_id"], {"message": "old failure"}, status="failed")
-    body["username"] = "new-diagnostic"
-    assert (
-        client.put(f"/api/v1/platform/assets/{asset['id']}", json=body).status_code
-        == 200
-    )
-    retry = client.post(f"/api/v1/platform/tasks/{old['task_id']}/retry")
-    assert retry.status_code == 202
-    new = tasks.get(retry.json()["task_id"], private=True)
-    assert (
-        new["request"]["asset_revision"] == inventory.get_asset(asset["id"])["revision"]
-    )
-    assert (
-        new["request"]["asset_revision"]
-        != tasks.get(old["task_id"], private=True)["request"]["asset_revision"]
-    )
-    diagnostic_worker.process(new["task_id"])
-    assert tasks.get(new["task_id"])["status"] == "success"
-    assert inventory.get_asset(asset["id"])["last_test_status"] == "success"
-
-
-@pytest.mark.parametrize("change", [{"enabled": False}, {"device_type": "windows"}])
-def test_connection_retry_rejects_unavailable_target(monkeypatch, change):
-    monkeypatch.setattr(tasks, "enqueue", lambda _: None)
-    client = client_for()
-    body = {"name": "retry-target", "device_type": "linux"}
-    asset = client.post("/api/v1/platform/assets", json=body).json()
-    old = client.post(f"/api/v1/platform/assets/{asset['id']}/test").json()
-    tasks.finish(old["task_id"], {}, status="failed")
-    assert (
-        client.put(
-            f"/api/v1/platform/assets/{asset['id']}", json={**body, **change}
-        ).status_code
-        == 200
-    )
-    response = client.post(f"/api/v1/platform/tasks/{old['task_id']}/retry")
-    assert response.status_code == 422
-    assert tasks.page()["total"] == 1
-
-
 def test_imported_history_cannot_be_retried():
     old, _ = tasks.create({"legacy_id": 1}, kind="legacy")
     tasks.finish(old["task_id"], {}, status="failed")
     response = client_for().post(f"/api/v1/platform/tasks/{old['task_id']}/retry")
     assert response.status_code == 409
     assert tasks.page()["total"] == 1
-
-
-@pytest.mark.parametrize("operation", ["create", "edit", "import"])
-def test_standard_mode_accepts_root_without_gateway_approval(operation):
-    client = client_for()
-    body = {"name": "root-target", "device_type": "linux", "username": "root"}
-    if operation == "create":
-        response = client.post("/api/v1/platform/assets", json=body)
-        assert response.status_code == 201
-        asset = response.json()
-    elif operation == "edit":
-        original = client.post(
-            "/api/v1/platform/assets",
-            json={"name": "root-target", "device_type": "linux"},
-        ).json()
-        response = client.put(f"/api/v1/platform/assets/{original['id']}", json=body)
-        assert response.status_code == 200
-        asset = response.json()
-    else:
-        response = client.post(
-            "/api/v1/platform/assets-import", json={"assets": [body]}
-        )
-        assert response.status_code == 200
-        asset = client.get("/api/v1/platform/assets").json()["items"][0]
-    assert asset["username"] == "root"
-    assert asset["diagnostic_mode"] == "standard"
-    assert not asset["privileged_approved"]

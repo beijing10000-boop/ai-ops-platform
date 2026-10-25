@@ -4,7 +4,6 @@ import os
 import secrets
 import tempfile
 import time
-import paramiko
 from cryptography.fernet import Fernet
 
 if os.getenv("AIOPS_UI_TEST") != "1":
@@ -14,7 +13,6 @@ os.environ["APP_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 os.environ["ALLOW_LEGACY_ADMIN_TOKEN"] = "false"
 from app.main import app, connection
 from app import feishu_auth, inventory
-from app.inventory import host_keys
 from app.orchestrator import tasks
 from fastapi.responses import RedirectResponse
 
@@ -77,40 +75,6 @@ tasks.finish(
     status="partial",
     duration_ms=1500,
 )
-
-
-# Only this explicitly isolated QA entry point replaces network discovery.
-# Production host_key_worker always performs the real SSH handshake.
-qa_keys = [paramiko.RSAKey.generate(2048) for _ in range(2)]
-qa_public = [key.get_name() + " " + key.get_base64() for key in qa_keys]
-inventory.save_asset(
-    inventory.AssetInput(
-        name="公钥变化样本",
-        device_type="linux",
-        address="10.20.0.11",
-        host_key=qa_public[0],
-    ),
-    "ui-test",
-)
-qa_failed = inventory.save_asset(
-    inventory.AssetInput(
-        name="获取失败样本", device_type="linux", address="10.20.0.12"
-    ),
-    "ui-test",
-)
-qa_attempts = {}
-
-
-def qa_probe(row):
-    ident = row["id"]
-    qa_attempts[ident] = qa_attempts.get(ident, 0) + 1
-    if ident == qa_failed["id"] and qa_attempts[ident] == 1:
-        raise ValueError("隔离测试：首次 SSH 握手超时")
-    return qa_public[1]
-
-
-host_keys.fetch_key = qa_probe
-host_keys.enqueue = lambda scan_id, total: host_keys.collect(scan_id)
 
 
 @app.get("/__ui_login")

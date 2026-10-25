@@ -37,7 +37,11 @@ LEVELS = {
 
 
 def alert_instructions(custom: str) -> str:
-    return BASE_PROMPT + ("\n补充要求：" + custom if custom else "")
+    return (
+        (custom + "\n" if custom else "")
+        + BASE_PROMPT
+        + "\n结构要求优先；结论、建议、依据分别填写 cause、action、analysis 的中文内容，供平台渲染卡片。"
+    )
 
 
 def cfg(key):
