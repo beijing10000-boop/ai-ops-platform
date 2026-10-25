@@ -197,6 +197,111 @@ def test_direct_mcp_host_query_is_bounded_scoped_and_does_not_return_extra_field
         asyncio.run(zabbix.monitoring_hosts(lambda _: "", host_id="11"))
 
 
+@pytest.mark.parametrize(
+    "host,expected",
+    [
+        (
+            {
+                "hostid": "11848",
+                "inventory": {},
+                "hostgroups": [
+                    {"groupid": "1", "name": "Discovered hosts"},
+                    {"groupid": "2", "name": "Linux servers"},
+                ],
+            },
+            "linux",
+        ),
+        (
+            {"hostid": "11848", "hostgroups": [{"name": "Windows servers"}]},
+            "windows",
+        ),
+        (
+            {"hostid": "11848", "groups": [{"name": "Linux servers"}]},
+            "linux",
+        ),
+        (
+            {"hostid": "11848", "hostgroups": [{"name": "Not Linux servers"}]},
+            "unknown",
+        ),
+        (
+            {
+                "hostid": "11848",
+                "hostgroups": [{"name": "Linux servers"}, {"name": "Windows servers"}],
+            },
+            "unknown",
+        ),
+        (
+            {
+                "hostid": "11848",
+                "tags": [{"tag": "aiops.device_type", "value": "network"}],
+                "inventory": {"os": "Linux Rocky"},
+                "hostgroups": [{"name": "Linux servers"}],
+            },
+            "network",
+        ),
+        (
+            {"hostid": "11848", "inventory": {"os": "Rocky Linux 9.7"}},
+            "linux",
+        ),
+        (
+            {"hostid": "11848", "hostgroups": [{"name": "Discovered hosts"}]},
+            "unknown",
+        ),
+    ],
+)
+def test_device_type_detected_from_verified_zabbix_metadata(host, expected):
+    assert zabbix.infer_device(host) == expected
+
+
+def test_monitoring_host_query_requests_authoritative_groups(monkeypatch):
+    calls = []
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr(zabbix, "connect", lambda read: Session())
+    monkeypatch.setattr(
+        zabbix,
+        "discover",
+        AsyncMock(
+            return_value=[
+                SimpleNamespace(
+                    name="host_get",
+                    inputSchema={"type": "object", "properties": {}},
+                )
+            ]
+        ),
+    )
+
+    async def fake_call(session, name, args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(
+            isError=False,
+            content=[
+                SimpleNamespace(
+                    text=json.dumps(
+                        [{
+                            "hostid": "11848",
+                            "name": "172-20-200-93",
+                            "inventory": {},
+                            "hostgroups": [{"groupid": "2", "name": "Linux servers"}],
+                        }]
+                    )
+                )
+            ],
+        )
+
+    monkeypatch.setattr(zabbix, "call", fake_call)
+    rows = asyncio.run(zabbix.monitoring_hosts(lambda _: "", host_id="11848"))
+    assert rows[0]["device_type"] == "linux"
+    assert calls[0]["hostids"] == ["11848"]
+    assert calls[0]["selectHostGroups"] == ["groupid", "name"]
+
+
 @pytest.mark.parametrize("count", [2, 150])
 def test_monitoring_query_rejects_duplicates_for_exact_host_and_caps_lists(
     monkeypatch, count
