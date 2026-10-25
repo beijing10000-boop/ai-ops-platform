@@ -22,6 +22,8 @@ for name in (
     "diagnosis-dark-1440.png",
     "settings-1440.png",
     "connections-1440.png",
+    "alerts-1440.png",
+    "settings-ai-1440.png",
 ):
     (OUT / name).unlink(missing_ok=True)
 with socket.socket() as sock:
@@ -97,8 +99,39 @@ try:
                 assert page.evaluate(
                     "document.documentElement.scrollWidth <= window.innerWidth"
                 ), (width, name, "horizontal overflow")
+                if name == "settings":
+                    for tab in ("基础设置", "飞书配置", "AI 配置", "服务与维护"):
+                        page.get_by_role("tab", name=tab, exact=True).click()
+                        assert page.evaluate(
+                            "document.documentElement.scrollWidth <= window.innerWidth"
+                        ), (width, tab)
                 checks.append({"width": width, "page": name, "ok": True})
         page.set_viewport_size({"width": 1440, "height": 1080})
+        page.locator('nav [data-page="alerts"]').click()
+        page.locator('[data-action="alert-next"]').click()
+        page.locator(".pagination").get_by_text("第 2 页 / 2 页").wait_for()
+        page.locator('#alert-filter select[name="status"]').select_option("recovered")
+        page.locator('#alert-filter button[type="submit"]').click()
+        page.locator(".pagination").get_by_text("第 1 页 / 1 页").wait_for()
+        assert page.locator("tbody tr").count() == 8
+        page.locator('#alert-filter input[name="q"]').fill("测试主机-3")
+        page.locator('#alert-filter button[type="submit"]').click()
+        page.locator("tbody tr").filter(has_text="测试主机-3").wait_for()
+        assert page.locator("tbody tr").count() == 1
+        page.locator('[data-action="analyze-event"]').click()
+        page.locator(".context-banner").wait_for()
+        assert page.locator('input[name="event_id"]').input_value() == "8003"
+        page.locator('[data-action="clear-event"]').click()
+        page.locator(".context-banner").wait_for(state="detached")
+        assert page.locator('input[name="event_id"]').input_value() == ""
+        page.locator('nav [data-page="alerts"]').click()
+        page.locator('[data-action="reset-alert-filter"]').click()
+        checks.append(
+            {
+                "workflow": "alert pagination + recovery/search filters + diagnostic event context",
+                "ok": True,
+            }
+        )
         assert page.locator('nav [data-page="assets"]').count() == 0
         for retired in ("tools", "feishu", "ai"):
             assert page.locator(f'nav [data-page="{retired}"]').count() == 0
@@ -202,7 +235,8 @@ try:
             }
         )
         page.locator('[data-page="settings"]').click()
-        page.locator('textarea[name="ai_alert_prompt"]').wait_for()
+        page.get_by_role("tab", name="基础设置", exact=True).click()
+        page.locator('textarea[name="ai_alert_prompt"]').wait_for(state="attached")
         general = page.locator("#settings-settings-form")
         feishu = page.locator("#feishu-settings-form")
         ai = page.locator("#ai-settings-form")
@@ -213,8 +247,27 @@ try:
             set(page.locator("[id]").evaluate_all("nodes => nodes.map(n => n.id)"))
         )
         general.locator('input[name="web_public_host"]').fill("draft-host:8088")
+        dialogs = []
+
+        def handle_dialog(dialog):
+            dialogs.append(dialog.message)
+            if len(dialogs) == 1:
+                dialog.dismiss()
+            else:
+                dialog.accept()
+
+        page.on("dialog", handle_dialog)
+        page.locator('nav [data-page="history"]').click()
+        page.wait_for_function("location.hash === '#settings/general'")
+        assert len(dialogs) == 1
+        assert page.locator("#page-title").inner_text() == "系统配置"
+        assert (
+            general.locator('input[name="web_public_host"]').input_value()
+            == "draft-host:8088"
+        )
+        page.get_by_role("tab", name="飞书配置", exact=True).click()
         feishu.locator('input[name="allowed_chat_ids"]').fill("oc_browser_draft")
-        page.locator('[data-action="scroll-section"][data-id="settings-ai"]').click()
+        page.get_by_role("tab", name="AI 配置", exact=True).click()
         assert (
             general.locator('input[name="web_public_host"]').input_value()
             == "draft-host:8088"
@@ -260,6 +313,7 @@ try:
         ai.locator("[data-verify-result]").get_by_text("草稿连接验证通过").wait_for()
         assert draft_checks[-1][1]["openai_model"] == "draft-model"
         assert "lark_app_id" not in draft_checks[-1][1]
+        page.get_by_role("tab", name="飞书配置", exact=True).click()
         for action in ("verify-feishu", "verify-feishu-groups"):
             with page.expect_response(
                 lambda response: "/api/v1/test/feishu" in response.url
@@ -268,6 +322,7 @@ try:
             assert draft_checks[-1][1]["allowed_chat_ids"] == "oc_browser_draft"
             assert "openai_model" not in draft_checks[-1][1]
         page.unroute("**/api/v1/test/**")
+        page.get_by_role("tab", name="AI 配置", exact=True).click()
         page.locator('textarea[name="ai_alert_prompt"]').fill(
             "临时测试提示词内容，需要恢复成项目提供的默认提示词"
         )
@@ -275,6 +330,7 @@ try:
         assert (
             "运维经理" in page.locator('textarea[name="ai_alert_prompt"]').input_value()
         )
+        page.get_by_role("tab", name="基础设置", exact=True).click()
         general.locator('input[name="enabled_tool"]').first.uncheck()
         assert page.locator('textarea[name="disabled_tools"]').count() == 0
         general.locator('[data-action="validate-settings"]').click()
@@ -287,6 +343,7 @@ try:
                 "ok": True,
             }
         )
+        page.get_by_role("tab", name="飞书配置", exact=True).click()
         page.locator('[data-action="new-member"]').click()
         page.locator('dialog input[name="open_id"]').fill("ou_browser_member")
         page.locator('dialog button[type="submit"]').click()
@@ -311,6 +368,16 @@ try:
         page.locator("#close-editor").click()
         checks.append(
             {"workflow": "member create/edit/disable persistence", "ok": True}
+        )
+        assert (
+            general.locator('input[name="web_public_host"]').input_value()
+            == "draft-host:8088"
+        )
+        checks.append(
+            {
+                "workflow": "unsaved navigation guard + tab changes and member updates retain drafts",
+                "ok": True,
+            }
         )
         # Mute management belongs to the alert center, not settings or sidebar.
         assert page.locator('nav [data-page="mutes"]').count() == 0
@@ -358,6 +425,16 @@ try:
         )
         page.locator("#task-status").select_option("all")
         page.locator(".pagination").get_by_text("第 1 页 / 2 页").wait_for()
+        task_id = page.locator('tbody [data-action="report"]').first.get_attribute(
+            "data-id"
+        )
+        page.locator('#history-filter input[name="q"]').fill(task_id)
+        page.locator('#history-filter button[type="submit"]').click()
+        page.locator(".pagination").get_by_text("第 1 页 / 1 页").wait_for()
+        assert page.locator('tbody [data-action="report"]').count() == 2
+        page.locator('#history-filter input[name="q"]').fill("")
+        page.locator('#history-filter button[type="submit"]').click()
+        page.locator(".pagination").get_by_text("第 1 页 / 2 页").wait_for()
         # A response completing after navigation must not write into a removed form.
         pending = []
         page.route("**/api/v1/ask", lambda route: pending.append(route))
@@ -381,8 +458,17 @@ try:
         page.locator('[data-action="search-hosts"]').wait_for()
         page.screenshot(path=str(OUT / "diagnostics-1440.png"), full_page=True)
         page.locator('[data-page="settings"]').click()
-        page.locator("#ai-settings-form").wait_for()
+        page.get_by_role("tab", name="基础设置", exact=True).click()
         page.screenshot(path=str(OUT / "settings-1440.png"), full_page=True)
+        page.get_by_role("tab", name="AI 配置", exact=True).click()
+        page.screenshot(path=str(OUT / "settings-ai-1440.png"), full_page=True)
+        page.get_by_role("tab", name="服务与维护", exact=True).click()
+        page.locator('[data-action="runtime-status"]').click()
+        page.locator("#runtime-result .runtime-summary").wait_for()
+        assert not page.locator("#runtime-result pre").count()
+        page.locator('[data-page="alerts"]').click()
+        page.locator("#alert-filter").wait_for()
+        page.screenshot(path=str(OUT / "alerts-1440.png"), full_page=True)
         page.locator('[data-page="connections"]').click()
         page.locator("#connection-tools").wait_for()
         page.screenshot(path=str(OUT / "connections-1440.png"), full_page=True)
@@ -394,7 +480,11 @@ try:
             page.goto(base + "/#" + old)
             page.wait_for_url(base + "/#" + new)
             page.locator(
-                "#ai-settings-form" if old != "tools" else "#connection-tools"
+                "#ai-settings-form"
+                if old == "ai"
+                else "#feishu-settings-form"
+                if old == "feishu"
+                else "#connection-tools"
             ).wait_for()
         checks.append(
             {
@@ -405,11 +495,59 @@ try:
         page.locator('[data-page="history"]').click()
         page.locator('[data-action="report"]').first.click()
         page.get_by_text("证据与工具执行记录", exact=True).wait_for()
+        assert page.locator(".report-answer h3").count() == 3
+        with page.expect_download() as downloaded:
+            page.locator('[data-action="download-report"]').click()
+        exported = Path(downloaded.value.path()).read_text()
+        assert "AI 运维诊断报告" in exported and "诊断不足" in exported
+        assert "Trace ID" in exported
+        unsafe = page.evaluate(
+            "OpsUI.answer('## 结论\\n<img src=x onerror=window.bad=1> **证据**\\n```html\\n<script>window.bad=1</script>\\n```')"
+        )
+        assert (
+            "<img" not in unsafe
+            and "<script>" not in unsafe
+            and "<strong>证据</strong>" in unsafe
+        )
         page.screenshot(path=str(OUT / "diagnosis-1440.png"), full_page=True)
         page.locator("#theme-toggle").click()
         assert page.locator("html").get_attribute("data-theme") == "dark"
         page.screenshot(path=str(OUT / "diagnosis-dark-1440.png"), full_page=True)
         checks.append({"workflow": "report, evidence, theme toggle", "ok": True})
+        running_id = page.request.get(base + "/__ui_running").json()["task_id"]
+        detail_requests = []
+        page.on(
+            "request",
+            lambda request: (
+                detail_requests.append(request.url)
+                if request.url.endswith("/tasks/" + running_id)
+                else None
+            ),
+        )
+        page.goto(base + "/#report/" + running_id)
+        page.locator("details.evidence summary").first.click()
+        with page.expect_response(
+            lambda response: response.url.endswith("/tasks/" + running_id + "/status")
+        ):
+            pass
+        assert len(detail_requests) == 1
+        assert page.locator("details.evidence").first.get_attribute("open") is not None
+        page.request.post(base + "/__ui_progress")
+        with page.expect_response(
+            lambda response: response.url.endswith("/tasks/" + running_id)
+        ):
+            pass
+        page.wait_for_function(
+            "document.querySelectorAll('details.evidence').length === 2"
+        )
+        assert page.locator("details.evidence").first.get_attribute("open") is not None
+        assert "AI 分析中" in page.locator(".report-progress").inner_text()
+        checks.append(
+            {
+                "workflow": "safe report formatting/export + lightweight polling preserves open evidence",
+                "ok": True,
+            }
+        )
         for role in ("operator", "auditor", "ops_admin"):
             page.goto(base + "/__ui_login?role=" + role)
             page.locator('nav [data-page="connections"]').click()
@@ -420,7 +558,7 @@ try:
             if role == "ops_admin":
                 page.locator("#ssh_mcp-form").wait_for()
                 page.locator('nav [data-page="settings"]').click()
-                page.locator("#ai-settings-form").wait_for()
+                page.locator("#ai-settings-form").wait_for(state="attached")
                 assert page.locator('input[name="feishu_admin_open_ids"]').count() == 0
                 assert page.locator('input[name="enabled_tool"]').count() == 0
                 assert page.locator('[data-action="new-member"]').count() == 0

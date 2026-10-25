@@ -33,7 +33,7 @@ def process(task_id):
     try:
         return asyncio.run(
             run(
-                read_setting("ai_qa_prompt")
+                read_setting("ai_alert_prompt" if task["event_id"] else "ai_qa_prompt")
                 or "根据实际证据用中文输出结论、依据、建议和诊断不足。",
                 request.get("question", "请诊断告警"),
                 task_id=task_id,

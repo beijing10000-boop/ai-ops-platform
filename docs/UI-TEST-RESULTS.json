@@ -108,6 +108,10 @@
       "ok": true
     },
     {
+      "workflow": "alert pagination + recovery/search filters + diagnostic event context",
+      "ok": true
+    },
+    {
       "workflow": "removed local inventory + live Zabbix host search/selection + preflight + escaping",
       "ok": true
     },
@@ -128,7 +132,11 @@
       "ok": true
     },
     {
-      "workflow": "Web mute create + early unmute",
+      "workflow": "unsaved navigation guard + tab changes and member updates retain drafts",
+      "ok": true
+    },
+    {
+      "workflow": "alert center tabs + Web mute create/unmute + legacy link",
       "ok": true
     },
     {
@@ -145,6 +153,10 @@
     },
     {
       "workflow": "report, evidence, theme toggle",
+      "ok": true
+    },
+    {
+      "workflow": "safe report formatting/export + lightweight polling preserves open evidence",
       "ok": true
     },
     {

@@ -23,7 +23,7 @@ DB = DATA_DIR / "app.sqlite3"
 MASTER_KEY = os.getenv("APP_ENCRYPTION_KEY", "")
 ADMIN_TOKEN = os.getenv("ADMIN_API_TOKEN", "")
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
-app = FastAPI(title="Zabbix AI Ops · Unified Platform", version="0.7.2")
+app = FastAPI(title="Zabbix AI Ops · Unified Platform", version="0.8.0")
 app.mount(
     "/assets",
     StaticFiles(directory=Path(__file__).parent.parent / "web" / "assets"),
@@ -478,10 +478,28 @@ def complete_setup(body: SetupRequest):
 
 @app.get("/api/v1/settings", dependencies=[Depends(require_admin)])
 def get_settings():
+    values = settings_snapshot()
     return {
-        k: ("********" if k in SENSITIVE and read_setting(k) else read_setting(k))
+        k: ("********" if k in SENSITIVE and values[k] else values[k])
         for k in sorted(ALLOWED)
     }
+
+
+def settings_snapshot():
+    """One database read per management page, without a process-level cache."""
+    with connection() as db:
+        rows = db.execute("SELECT key,value,secret FROM settings").fetchall()
+    values = {key: DEFAULTS.get(key, "") for key in ALLOWED}
+    encryption = cipher()
+    for key, value, secret in rows:
+        if key in ALLOWED:
+            values[key] = (
+                encryption.decrypt(value.encode()).decode() if secret else value
+            )
+    for key, prompt in DEFAULT_PROMPTS.items():
+        if not values[key].strip():
+            values[key] = prompt
+    return values
 
 
 def validate_settings_update(body, identity):
@@ -574,10 +592,22 @@ def settings_options():
 @app.put("/api/v1/settings", dependencies=[Depends(require_admin)])
 def update_settings(body: SettingsUpdate, identity=Depends(require_admin)):
     validate_settings_update(body, identity)
+    changed = []
     with connection() as db:
         for key, val in body.values.items():
             if key in SENSITIVE and val == "********":
                 continue
+            previous = db.execute(
+                "SELECT value,secret FROM settings WHERE key=?", (key,)
+            ).fetchone()
+            if previous:
+                old = (
+                    cipher().decrypt(previous[0].encode()).decode()
+                    if previous[1]
+                    else previous[0]
+                )
+                if old == val:
+                    continue
             stored = (
                 cipher().encrypt(val.encode()).decode() if key in SENSITIVE else val
             )
@@ -593,7 +623,8 @@ def update_settings(body: SettingsUpdate, identity=Depends(require_admin)):
                 "INSERT INTO audit(action,key,actor) VALUES(?,?,?)",
                 ("settings_update", key, identity["open_id"]),
             )
-    return {"ok": True}
+            changed.append(key)
+    return {"ok": True, "changed": changed}
 
 
 def record_ai_question(
@@ -951,17 +982,22 @@ def logs_overview():
 
 @app.get("/api/v1/status", dependencies=[Depends(require_admin)])
 def runtime_status():
+    from rq import Worker
+
     result = {
         "database": "ok",
         "redis": "unknown",
         "queues": {},
+        "workers": {},
         "version": app.version,
     }
     try:
         client = Redis.from_url(REDIS_URL, socket_connect_timeout=2, socket_timeout=3)
         result["redis"] = "ok" if client.ping() else "unavailable"
+        workers = Worker.all(connection=client)
         for q in ("ai-alerts", "ai-questions", "ai-diagnostics"):
             result["queues"][q] = len(Queue(q, connection=client))
+            result["workers"][q] = sum(q in w.queue_names() for w in workers)
     except Exception:
         result["redis"] = "unavailable"
     return result

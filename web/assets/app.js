@@ -14,7 +14,7 @@ async function mutesPanel() {
     api("/api/v1/alert-mutes?status=active"),
     api("/api/v1/alert-mutes?status=expired"),
   ]);
-  return alertTabs("mutes") + intro("管理当前平台的飞书告警屏蔽，规则只存储在当前 94 平台，不会自动从旧 93 平台迁入。", btn("refresh", "刷新列表")) +
+  return alertTabs("mutes") + intro("管理当前平台的飞书告警屏蔽，支持按到期时间自动恢复通知。", btn("refresh", "刷新列表")) +
     panel(
     "当前生效的飞书告警屏蔽（" + rows.length + " 条）",
     `<form id="mute-form"><div class="form-grid">${field("host_id", "Zabbix Host ID")}${field("trigger_id", "触发器 ID")}${field(
@@ -36,42 +36,38 @@ async function mutesPanel() {
         rows
           .map(
             (r) =>
-              `<tr><td>${E(r.host_id)}</td><td>${E(r.trigger_id)}</td><td>${date(r.created_at)}</td><td>${date(new Date(r.expires_at * 1000).toISOString())}</td><td>${btn("unmute", "提前解除", r.host_id + ":" + r.trigger_id, "small")}</td></tr>`,
+              `<tr><td>${E(r.host_id)}</td><td>${E(r.trigger_id)}</td><td>${E(r.created_at)}</td><td>${date(new Date(r.expires_at * 1000).toISOString())}</td><td>${btn("unmute", "提前解除", r.host_id + ":" + r.trigger_id, "small")}</td></tr>`,
           )
           .join(""),
       ),
-    "仅影响本平台的问题通知；不修改 Zabbix，也不会屏蔽恢复通知。若列表为空，请确认规则是否到期，或是否存在于 93 的旧数据库。",
+    "仅影响本平台的问题通知；不修改 Zabbix，也不会屏蔽恢复通知。下方可查看最近到期的规则。",
     "mutes-active",
   ) + panel(
     "最近已过期的屏蔽记录",
     table(
       ["主机 ID", "触发器 ID", "设置时间", "到期时间（北京时间）", "状态"],
       expired.map(r =>
-        `<tr><td>${E(r.host_id)}</td><td>${E(r.trigger_id)}</td><td>${date(r.created_at)}</td><td>${date(new Date(r.expires_at * 1000).toISOString())}</td><td>已过期</td></tr>`
+        `<tr><td>${E(r.host_id)}</td><td>${E(r.trigger_id)}</td><td>${E(r.created_at)}</td><td>${date(new Date(r.expires_at * 1000).toISOString())}</td><td>已过期</td></tr>`
       ).join(""),
     ),
     "只展示最近 100 条已到期的规则；不会继续屏蔽任何告警。",
   );
 }
 const $ = (s) => document.querySelector(s),
-  E = (v) =>
-    String(v ?? "").replace(
-      /[&<>"']/g,
-      (c) =>
-        ({
-          "&": "&amp;",
-          "<": "&lt;",
-          ">": "&gt;",
-          '"': "&quot;",
-          "'": "&#39;",
-        })[c],
-    );
+  E = OpsUI.escape;
 const state = {
   user: null,
   csrf: "",
   auditPage: 1,
   taskPage: 1,
   taskStatus: "all",
+  taskQuery: "",
+  alertPage: 1,
+  alertStatus: "all",
+  alertSeverity: "",
+  alertQuery: "",
+  configTab: "general",
+  lastHash: "",
   editor: null,
   includeLogs: false,
   hostRows: [],
@@ -84,6 +80,14 @@ const labels = {
   running: "执行中",
   queued: "等待执行",
   cancelled: "已取消",
+  active: "未收到恢复",
+  recovered: "已恢复",
+  sent: "已通知",
+  muted: "暂时屏蔽",
+  disabled: "未开启",
+  pending: "等待分析",
+  not_required: "未触发分析",
+  suppressed_unpaired: "未发送问题通知",
   linux: "Linux",
   windows: "Windows",
   vmware: "VMware",
@@ -120,6 +124,11 @@ const date = (v) =>
     : "—";
 const badge = (s) =>
   `<span class="tag ${E(s)}">${E(labels[s] || s || "—")}</span>`;
+const sourceLabel = value => ({web: "Web 诊断", alert: "告警分析", qa: "监控问答", feishu: "飞书", ui_test: "界面测试"}[value] || value);
+function stageLabel(value) {
+  if (String(value).startsWith("ssh_mcp:")) return "SSH 采集中 · " + ({resolve: "核验主机", cpu: "CPU", memory: "内存", processes: "进程", memory_processes: "内存进程", disk: "磁盘", io: "磁盘 IO", network: "网络", sockets: "连接", system: "系统", service: "服务", logs: "日志", kernel: "内核"}[value.split(":")[1]] || "补充证据");
+  return labels[value] || ({collecting: "收集证据", zabbix_history: "查询监控历史", ai_reasoning: "AI 分析中", retired: "旧任务已停用"}[value]) || value || "等待执行";
+}
 const btn = (action, text, id = "", kind = "", disabled = false) =>
   `<button type="button" class="button ${kind}" data-action="${action}" data-id="${E(id)}" ${disabled ? "disabled" : ""}>${text}</button>`;
 async function paged(path, key, pageSize = 25, filters = {}) {
@@ -180,13 +189,16 @@ async function api(path, method = "GET", body) {
       $("#app").hidden = true;
       $("#login").hidden = false;
     }
-    throw new Error(
+    const error = new Error(
       typeof result.detail === "string"
         ? result.detail
         : Array.isArray(result.detail)
           ? result.detail.map((error) => error.msg || "输入无效").join("；")
-          : "请求失败，请稍后重试",
+          : result.detail?.message || "请求失败，请稍后重试",
     );
+    error.status = response.status;
+    error.detail = result.detail;
+    throw error;
   }
   return result;
 }
@@ -208,13 +220,13 @@ function field(
     control = `<textarea aria-label="${E(label)}" name="${name}" >${E(value)}</textarea>`;
   else
     control = `<input aria-label="${E(label)}" name="${name}" type="${type}" value="${E(value)}" ${type === "password" ? 'autocomplete="new-password"' : ""}>`;
-  return `<div class="field ${wide ? "wide" : ""}">${type === "checkbox" ? "" : `<span>${label}</span>`}${control}${help ? `<small>${E(help)}</small>` : ""}</div>`;
+  return `<div class="field ${wide ? "wide" : ""}">${type === "checkbox" ? "" : `<span>${label}</span>`}${type === "password" ? `<div class="secret-control">${control}${btn("toggle-secret", "显示", "", "quiet small")}</div>` : control}${help ? `<small>${E(help)}</small>` : ""}</div>`;
 }
 function taskRows(rows) {
   return rows
     .map(
       (r) =>
-        `<tr><td><button class="link-button mono" data-action="report" data-id="${E(r.task_id)}">${E(r.task_id.slice(0, 12))}</button><small>${date(r.created_at)}</small></td><td>${E(PLAY[r.diagnostic_type] || r.diagnostic_type)}<small>${E(r.source)} · ${E(labels[r.profile] || r.profile)}</small></td><td>${badge(r.status)}<small>${E(r.stage)}</small></td><td>${fmt(r.tools)}</td><td>${r.duration_ms == null ? "—" : (r.duration_ms / 1000).toFixed(1) + " s"}</td><td>${fmt(r.token_total)}<small>${r.token_total == null ? "未返回用量" : "模型实际用量"}</small></td><td>${btn("report", "查看", r.task_id, "small")}</td></tr>`,
+        `<tr><td><button class="link-button mono" data-action="report" data-id="${E(r.task_id)}">${E(r.task_id.slice(0, 12))}</button><small>${date(r.created_at)}</small></td><td>${E(PLAY[r.diagnostic_type] || r.diagnostic_type)}<small>${E(sourceLabel(r.source))} · ${E(labels[r.profile] || r.profile)}</small></td><td>${badge(r.status)}<small>${E(stageLabel(r.stage))}</small></td><td>${fmt(r.tools)}</td><td>${r.duration_ms == null ? "—" : (r.duration_ms / 1000).toFixed(1) + " s"}</td><td>${fmt(r.token_total)}<small>${r.token_total == null ? "未返回用量" : "模型实际用量"}</small></td><td>${btn("report", "查看", r.task_id, "small")}</td></tr>`,
     )
     .join("");
 }
@@ -231,55 +243,46 @@ const PLAY = {
   logs: "日志异常",
 };
 async function overview() {
-  const [o, t] = await Promise.all([
-    api(P + "/overview"),
-    api(P + "/tasks?page_size=6"),
-  ]);
-  const stat = (label, value, hint) =>
-    `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div><div class="hint">${hint}</div></div>`;
-  return (
-    intro(
-      "最近 24 小时 · 统计截止当前 · 北京时间",
-      btn("refresh", "刷新数据"),
-    ) +
-    `<div class="hero"><div><span class="eyebrow">EVIDENCE BEFORE ACTION</span><h2>让每一次诊断，都有据可循。</h2><p class="muted small">告警历史、Linux 实时检查与 AI 分析，汇聚到同一条诊断记录。</p></div><div class="hero-mark">✧</div></div><div class="stats">${stat("未收到恢复的事件", fmt(o.unrecovered_received_events), "限平台已接收事件，非全量 Zabbix 告警")}${stat("AI 分析次数", fmt(o.ai_runs_24h), "最近 24 小时创建")}${stat("AI 分析成功率", o.ai_success_rate_24h == null ? "—" : o.ai_success_rate_24h + "%", "已完成 / AI 已结束任务")}${stat("Token 消耗", fmt(o.token_total_24h), `最近 24 小时 · ${fmt(o.usage_available_runs_24h)} 次返回实际用量`)}</div><div class="grid-two">${panel("连接与诊断能力", `<div class="health-row"><div>Zabbix MCP<p>以最近一次主动连接检测为准</p></div>${badge(o.health.find((x) => x.provider === "zabbix_mcp")?.status || (o.mcp_configured ? "未检测" : "未配置"))}</div><div class="health-row"><div>SSH MCP<p>独立服务，按 Host ID 补充实时证据</p></div>${badge(o.health.find((x) => x.provider === "ssh_mcp")?.status || (o.ssh_mcp_configured ? "未检测" : "未配置"))}</div><p class="muted small">主机由 Zabbix MCP 与 SSH MCP 管理，通过 Zabbix Host ID 关联。</p>`)}${panel("诊断概况", `<div class="health-row"><span>已完成 / 部分完成</span><strong>${fmt(o.completed_24h)} / ${fmt(o.partial_24h)}</strong></div><div class="health-row"><span>失败任务</span><strong>${fmt(o.failed_24h)}</strong></div><div class="health-row"><span>平均分析耗时</span><strong>${o.average_duration_ms_24h == null ? "—" : (o.average_duration_ms_24h / 1000).toFixed(1) + " s"}</strong></div><div class="notice small">缺失数据会明确标记。AI 结论属于分析推断，监控与 SSH 证据可在任务详情核验。</div>`)}</div><div class="panel"><div class="section-heading"><div><h2>最近诊断</h2><p class="muted small">告警分析、问答与手动诊断</p></div>${btn("go-history", "全部记录 →", "", "quiet")}</div>${table(["任务 / 时间", "诊断类型 / 来源", "状态", "工具", "耗时", "Token", "操作"], taskRows(t.items))}</div>`
-  );
+  const [o, t] = await Promise.all([api(P + "/overview"), api(P + "/tasks?page_size=6")]);
+  const stat = (label, value, hint, tone = "") => `<div class="stat ${tone}"><div class="label">${label}</div><div class="value">${value}</div><div class="hint">${hint}</div></div>`;
+  const readiness = [["model", "AI 模型", "settings/ai"], ["zabbix_mcp", "Zabbix MCP", "connections"], ["ssh_mcp", "SSH MCP", "connections"], ["feishu", "飞书应用", "settings/feishu"], ["webhook", "告警接入", "settings/general"]];
+  const health = (provider, title, configured) => {
+    const record = o.health.find(row => row.provider === provider);
+    return `<div class="health-row"><div><strong>${title}</strong><p>${record ? "最近检测：" + date(record.checked_at) : "配置完成后，请主动验证连接"}</p></div><span class="tag ${record?.status || ""}">${record ? (record.status === "success" ? "最近检测通过" : "最近检测失败") : configured ? "待验证" : "未配置 / 未启用"}</span></div>`;
+  };
+  return intro("最近 24 小时 · 仅统计本平台收到的事件和执行的分析", btn("refresh", "刷新数据")) +
+    `<div class="hero"><div><span class="eyebrow">运维工作台</span><h2>监控异常，循证诊断。</h2><p class="muted small">从告警定位问题，关联 Zabbix 历史与 Linux 实时证据。</p></div><div class="actions">${btn("go-alerts", "查看告警")}${can("diagnostics.run") ? btn("go-page", "新建诊断 →", "diagnostics", "primary") : ""}</div></div>` +
+    `<div class="stats">${stat("未收到恢复的事件", fmt(o.unrecovered_received_events), "平台累计接收，非 Zabbix 全量", o.unrecovered_received_events ? "attention" : "")}${stat("AI 分析次数", fmt(o.ai_runs_24h), "最近 24 小时创建")}${stat("AI 分析成功率", o.ai_success_rate_24h == null ? "—" : o.ai_success_rate_24h + "%", "成功 / 已结束的分析")}${stat("实际 Token", fmt(o.token_total_24h), `${fmt(o.usage_available_runs_24h)} 次返回用量`)}</div>` +
+    (can("settings.manage") ? `<div class="readiness-strip"><div><strong>配置检查</strong><small>仅检查是否填写，连接请主动验证</small></div>${readiness.map(([key, label, target]) => `<button class="readiness-item ${o.readiness[key] ? "ready" : ""}" data-action="go-page" data-id="${target}"><span>${o.readiness[key] ? "✓" : "○"}</span>${label}<small>${o.readiness[key] ? "已配置" : "待配置"}</small></button>`).join("")}</div>` : "") +
+    `<div class="grid-two">${panel("MCP 连接状态", health("zabbix_mcp", "Zabbix MCP · 历史监控", o.mcp_configured) + health("ssh_mcp", "SSH MCP · 实时诊断", o.ssh_mcp_configured) + `<p class="muted small footnote">状态代表最近一次主动检测结果；主机通过 Zabbix Host ID 关联。</p>`)}${panel("诊断处理情况", `<div class="health-row"><span>已完成 / 部分完成</span><strong>${fmt(o.completed_24h)} / ${fmt(o.partial_24h)}</strong></div><div class="health-row"><span>执行中 / 等待执行</span><strong>${fmt(o.running)} / ${fmt(o.queued)}</strong></div><div class="health-row"><span>失败任务</span><strong>${fmt(o.failed_24h)}</strong></div><div class="health-row"><span>平均分析耗时</span><strong>${o.average_duration_ms_24h == null ? "—" : (o.average_duration_ms_24h / 1000).toFixed(1) + " 秒"}</strong></div>`)}</div>` +
+    `<div class="panel"><div class="section-heading"><div><h2>最近诊断</h2><p class="muted small">告警分析、问答与手动诊断的统一记录</p></div>${btn("go-history", "全部记录 →", "", "quiet")}</div>${table(["任务 / 时间", "诊断类型 / 来源", "状态", "工具", "耗时", "Token", "操作"], taskRows(t.items))}</div>`;
 }
 async function alerts() {
-  const rows = await api("/api/v1/alert-events?kind=problems&limit=100");
-  return (
-    alertTabs("events") +
-    intro(
-      "最近 100 条已接收的问题事件 · 恢复与通知状态保留在事件记录中",
-      btn("refresh", "刷新"),
-    ) +
-    panel(
-      "告警事件",
-      table(
-        ["事件 ID", "主机 / 事件", "级别", "接收时间", "通知 / AI", "操作"],
-        rows
-          .map(
-            (r) =>
-              `<tr><td class="mono">${E(r.event_id)}</td><td><span class="cell-title">${E(r.host_name)}</span><small>${E(r.event_name)}</small></td><td><span class="severity s${E(r.severity)}"></span>${["未分类", "信息", "警告", "一般严重", "严重", "灾难"][r.severity] || "—"}</td><td>${E(r.received_at)}</td><td>${badge(r.notify_status)} ${badge(r.ai_status)}</td><td>${can("diagnostics.run") ? btn("analyze-event", "AI 分析", r.event_id, "small") : ""}</td></tr>`,
-          )
-          .join(""),
-      ),
-    )
-  );
+  const data = await paged(P + "/alerts", "alertPage", 25, {
+    status: state.alertStatus, q: state.alertQuery,
+    ...(state.alertSeverity !== "" ? {severity: state.alertSeverity} : {}),
+  });
+  state.alertRows = data.items;
+  const severities = ["未分类", "信息", "警告", "一般严重", "严重", "灾难"];
+  return alertTabs("events") + intro("平台已接收的告警与恢复记录。恢复状态以收到的 Zabbix 通知为准。", btn("refresh", "刷新")) +
+    panel("告警事件",
+      `<form id="alert-filter" class="filter-bar"><input name="q" aria-label="搜索告警" maxlength="160" placeholder="搜索主机、告警名称或事件 ID" value="${E(state.alertQuery)}"><select name="status" aria-label="告警状态">${[["all", "全部状态"], ["active", "未收到恢复"], ["recovered", "已恢复"]].map(([key, label]) => `<option value="${key}" ${key === state.alertStatus ? "selected" : ""}>${label}</option>`).join("")}</select><select name="severity" aria-label="告警级别"><option value="">全部级别</option>${severities.map((label, i) => `<option value="${i}" ${String(i) === state.alertSeverity ? "selected" : ""}>${label}</option>`).join("")}</select><button class="button primary" type="submit">查询</button>${btn("reset-alert-filter", "重置", "", "quiet")}</form><p class="muted small">共 ${fmt(data.total)} 条符合条件的告警</p>` +
+      table(["主机 / 告警", "级别", "当前状态", "通知 / 分析", "操作"], data.items.map(r => `<tr><td><span class="cell-title">${E(r.host_name || "未提供主机名")}</span><small class="event-title">${E(r.event_name)}</small><small>事件 ${E(r.event_id)} · ${date(r.received_at)}</small></td><td><span class="severity s${E(r.severity)}"></span>${severities[r.severity] || "—"}</td><td>${badge(r.status)}${r.recovered_at ? `<small>${date(r.recovered_at)}</small>` : ""}</td><td>${badge(r.notify_status)} ${badge(r.ai_status)}</td><td><div class="row-actions">${r.task_id ? btn("report", "查看分析", r.task_id, "small") : ""}${can("diagnostics.run") ? btn("analyze-event", "AI 分析", r.event_id, "small") : ""}</div></td></tr>`).join("")) + pagination("alert", "alertPage"));
 }
 async function diagnostics() {
+  const options = await api(P + "/diagnostic-options");
   return (
     intro(
       "选择 Zabbix 监控主机或已接收的告警发起诊断。执行前查询监控，必要时补充 Linux 实时证据。",
     ) +
     panel(
       "新建诊断",
-      `<form id="diagnostic-form"><div class="form-grid"><div class="field wide"><span>查询监控主机</span><div class="toolbar"><input id="host-search" aria-label="搜索 Zabbix 主机" placeholder="输入主机名称或 Zabbix Host ID">${btn("search-hosts", "查询 Zabbix 主机")}</div><small id="host-search-result" role="status">直接从 Zabbix MCP 读取主机，无需在平台登记资产。</small></div>${field("zabbix_hostid", "诊断主机", "", "text", "选择监控主机后，平台通过相同 Host ID 关联独立 SSH MCP；填写告警事件 ID 时以事件主机为准。", [["", "未选择主机"], ...state.hostRows.map(h => [h.zabbix_hostid, h.name + " · Host ID " + h.zabbix_hostid + " · " + (labels[h.device_type] || h.device_type)])])}${field("event_id", "告警事件 ID", state.selectedEvent || "", "text", "可选，必须是平台已经接收的事件。")}${field("diagnostic_type", "诊断类型", "auto", "text", "", [["auto", "自动识别告警类型"], ...Object.entries(PLAY)])}${field(
+      `<form id="diagnostic-form">${state.selectedEvent ? `<div class="notice context-banner"><div><strong>正在分析告警 ${E(state.selectedEvent)}</strong><p>${E(state.selectedEventTitle || "以告警中记录的主机为诊断目标。")}</p></div>${btn("clear-event", "取消关联", "", "small")}</div>` : ""}<div class="form-grid"><div class="field wide"><span>查询监控主机</span><div class="toolbar"><input id="host-search" aria-label="搜索 Zabbix 主机" placeholder="输入主机名称或 Zabbix Host ID">${btn("search-hosts", "查询 Zabbix 主机")}</div><small id="host-search-result" role="status">直接从 Zabbix MCP 读取主机，无需在平台登记资产。</small></div>${field("zabbix_hostid", "诊断主机", "", "text", "选择监控主机后，平台通过相同 Host ID 关联独立 SSH MCP；填写告警事件 ID 时以事件主机为准。", [["", "未选择主机"], ...state.hostRows.map(h => [h.zabbix_hostid, h.name + " · Host ID " + h.zabbix_hostid + " · " + (labels[h.device_type] || h.device_type)])])}${field("event_id", "告警事件 ID", state.selectedEvent || "", "text", "可选，必须是平台已经接收的事件。")}${field("diagnostic_type", "诊断类型", "auto", "text", "", [["auto", "自动识别告警类型"], ...Object.entries(PLAY)])}${field(
         "profile",
         "分析模式",
-        "standard",
+        options.default_profile,
         "text",
-        "快速仅监控；标准按需 SSH；深度允许更多补查。",
+        "快速只查监控；标准和深度对已核验的 Linux 主机自动补充一轮 SSH 证据，受权限与预算限制。",
         [
           ["quick", "快速分析"],
           ["standard", "标准分析"],
@@ -339,7 +342,7 @@ async function connections() {
 }
 async function analysisHistory() {
   const [data, usage] = await Promise.all([
-    paged(P + "/tasks", "taskPage", 25, { status: state.taskStatus }),
+    paged(P + "/tasks", "taskPage", 25, { status: state.taskStatus, q: state.taskQuery }),
     api("/api/v1/ai-token-usage?days=30&limit=20"),
   ]);
   return (
@@ -347,7 +350,7 @@ async function analysisHistory() {
       "任务、工具调用与证据可按 trace_id 追溯。Token 仅使用模型实际返回数据。",
       btn("refresh", "刷新"),
     ) +
-    `<div class="token-grid"><div class="stat"><div class="label">最近 30 天 · 输入 Token</div><div class="value">${fmt(usage.total_input)}</div></div><div class="stat"><div class="label">最近 30 天 · 输出 Token</div><div class="value">${fmt(usage.total_output)}</div></div><div class="stat"><div class="label">最近 30 天 · 总 Token</div><div class="value">${fmt(usage.total_tokens)}</div><div class="hint">未返回用量的请求不计入汇总</div></div></div><div class="panel"><div class="toolbar"><select id="task-status" aria-label="任务状态"><option value="all">全部任务状态</option>${["queued", "running", "success", "partial", "failed", "cancelled"].map((s) => `<option value="${s}" ${s === state.taskStatus ? "selected" : ""}>${labels[s]}</option>`).join("")}</select><span class="muted small">共 ${data.total} 条</span></div>${table(["任务 / 时间", "诊断类型 / 来源", "状态", "工具", "耗时", "Token", "操作"], taskRows(data.items))}${pagination("task", "taskPage")}</div>` +
+    `<div class="token-grid"><div class="stat"><div class="label">最近 30 天 · 输入 Token</div><div class="value">${fmt(usage.total_input)}</div></div><div class="stat"><div class="label">最近 30 天 · 输出 Token</div><div class="value">${fmt(usage.total_output)}</div></div><div class="stat"><div class="label">最近 30 天 · 总 Token</div><div class="value">${fmt(usage.total_tokens)}</div><div class="hint">未返回用量的请求不计入汇总</div></div></div><div class="panel"><form id="history-filter" class="toolbar"><input name="q" aria-label="搜索分析历史" placeholder="搜索任务、事件或 Trace ID" value="${E(state.taskQuery)}" maxlength="160"><button class="button" type="submit">搜索</button><select id="task-status" aria-label="任务状态"><option value="all">全部任务状态</option>${["queued", "running", "success", "partial", "failed", "cancelled"].map((s) => `<option value="${s}" ${s === state.taskStatus ? "selected" : ""}>${labels[s]}</option>`).join("")}</select><span class="muted small">共 ${data.total} 条</span></form>${table(["任务 / 时间", "诊断类型 / 来源", "状态", "工具", "耗时", "Token", "操作"], taskRows(data.items))}${pagination("task", "taskPage")}</div>` +
     panel(
       "逐轮用量",
       table(
@@ -391,7 +394,7 @@ async function report(id) {
       encodeURIComponent(id) +
       (state.includeLogs ? "?include_logs=true" : ""),
   );
-  state.currentTask = t;
+  if (location.hash === "#report/" + id) state.currentTask = t;
   return (
     intro(
       `任务 ${E(t.task_id)} · trace_id ${E(t.trace_id)}`,
@@ -403,16 +406,17 @@ async function report(id) {
               ? btn("retry-task", "重试", id)
               : ""
           : "") +
-        btn("refresh", "刷新"),
+        btn("copy-report", "复制结论") + btn("download-report", "下载报告") + btn("refresh", "刷新"),
     ) +
-    `<div class="stats"><div class="stat"><div class="label">诊断状态</div><div class="value">${badge(t.status)}</div><div class="hint">${E(t.stage)}</div></div><div class="stat"><div class="label">主机 / 事件 ID</div><div class="value">${E(t.alert?.host_id || t.asset?.zabbix_hostid || "—")}</div><div class="hint">事件 ${E(t.event_id || "未关联")}</div></div><div class="stat"><div class="label">实际 Token / 工具调用</div><div class="value">${fmt(t.token_total)}</div><div class="hint">${fmt(t.tools)} 次采集 · 输入 ${fmt(t.token_input)} / 输出 ${fmt(t.token_output)}</div></div><div class="stat"><div class="label">执行耗时</div><div class="value">${t.duration_ms == null ? "—" : (t.duration_ms / 1000).toFixed(1) + " s"}</div><div class="hint">${date(t.created_at)}</div></div></div>` +
+    reportProgress(t) +
+    `<div class="stats"><div class="stat"><div class="label">诊断状态</div><div class="value">${badge(t.status)}</div><div class="hint">${E(stageLabel(t.stage))}</div></div><div class="stat"><div class="label">主机 / 事件 ID</div><div class="value">${E(t.alert?.host_id || t.asset?.zabbix_hostid || "—")}</div><div class="hint">事件 ${E(t.event_id || "未关联")}</div></div><div class="stat"><div class="label">实际 Token / 工具调用</div><div class="value">${fmt(t.token_total)}</div><div class="hint">${fmt(t.tools)} 次采集 · 输入 ${fmt(t.token_input)} / 输出 ${fmt(t.token_output)}</div></div><div class="stat"><div class="label">执行耗时</div><div class="value">${t.duration_ms == null ? "—" : (t.duration_ms / 1000).toFixed(1) + " s"}</div><div class="hint">${date(t.created_at)}</div></div></div>` +
     panel(
-      "告警与资产信息",
+      "告警与主机信息",
       `<p>${E(t.alert?.event_name || "手动诊断 / 连接测试")}</p><p class="muted small">主机：${E(t.asset?.name || t.alert?.host_name || "未关联")} · Host ID：${E(t.asset?.zabbix_hostid || t.alert?.host_id || "—")} · 类型：${E(labels[t.report?.device_type || t.asset?.device_type] || "待确认")}</p>`,
     ) +
     panel(
       "AI 诊断结论 · 分析推断",
-      `<div class="notice">监控和 SSH 事实在下方按来源记录。AI 总结需结合时间窗口与原始证据核验。</div><div class="report-answer">${E(readableReportAnswer(t.report?.answer || t.report?.message || (["queued", "running"].includes(t.status) ? "任务正在进行，页面会自动更新。" : JSON.stringify(t.report || {}))))}</div>`,
+      `<div class="notice">监控和 SSH 事实在下方按来源记录。AI 总结需结合时间窗口与原始证据核验。</div><div class="report-answer">${OpsUI.answer(reportAnswer(t))}</div>`,
     ) +
     (t.report?.limitations?.length
       ? panel(
@@ -426,8 +430,21 @@ async function report(id) {
       "诊断时间线",
       `<div class="timeline"><div>任务创建<small>${date(t.created_at)}</small></div>${t.started_at ? `<div>开始执行<small>${date(t.started_at)}</small></div>` : ""}${t.evidence.map((e) => `<div>${E(e.provider)} · ${E(e.tool)} ${badge(e.status)}<small>${date(e.collected_at)} · ${e.duration_ms} ms</small></div>`).join("")}${t.completed_at ? `<div>任务结束<small>${date(t.completed_at)}</small></div>` : ""}</div>`,
     ) +
-    `<div class="panel"><div class="section-heading"><div><h2>证据与工具执行记录</h2><p class="muted small">Zabbix 为监控证据；SSH 为采集当时快照。日志内容需要独立权限。</p></div>${can("logs.read") ? btn("toggle-logs", state.includeLogs ? "隐藏原始日志" : "读取日志证据", id) : ""}</div>${t.evidence.length ? t.evidence.map((e) => `<details class="evidence"><summary>${E(e.provider)} / ${E(e.tool)} ${badge(e.status)} · ${date(e.collected_at)}</summary><pre>${E(JSON.stringify(e.payload, null, 2))}</pre></details>`).join("") : '<div class="empty">暂无采集证据</div>'}</div>`
+    `<div class="panel"><div class="section-heading"><div><h2>证据与工具执行记录</h2><p class="muted small">Zabbix 为监控证据；SSH 为采集当时快照。日志内容需要独立权限。</p></div>${can("logs.read") ? btn("toggle-logs", state.includeLogs ? "隐藏原始日志" : "读取日志证据", id) : ""}</div>${t.evidence.length ? t.evidence.map((e) => `<details class="evidence" data-evidence="${E(e.id)}"><summary>${E(e.provider)} / ${E(e.tool)} ${badge(e.status)} · ${date(e.collected_at)}</summary><pre>${E(JSON.stringify(e.payload, null, 2))}</pre></details>`).join("") : '<div class="empty">暂无采集证据</div>'}</div>`
   );
+}
+function reportAnswer(task) {
+  return readableReportAnswer(task.report?.answer || task.report?.message || (task.status === "failed" ? "任务未能完成。请结合下方状态说明排查后重试。" : ["queued", "running"].includes(task.status) ? "正在收集证据并分析，完成后将在这里显示结论。" : "未返回分析结论，请查看采集证据和诊断不足。"));
+}
+function reportProgress(task) {
+  const active = ["queued", "running"].includes(task.status);
+  const reasons = {QueueUnavailable: "诊断队列连接失败。请检查 Redis 和诊断 Worker，恢复后可重试此任务。", WorkerLost: "执行超过允许时间，Worker 可能已退出。请检查服务状态，已有证据仍可查看。", PermissionRevoked: "提交者的诊断权限已撤销，请联系管理员。", LocalSSHRemoved: "此任务使用已停用的旧版执行方式，请重新发起诊断。"};
+  const text = task.cancel_requested && active ? "已请求取消，正在停止后续采集。已开始的远端操作受其自身超时控制。" : active ? stageLabel(task.stage) : task.error_type ? reasons[task.error_type] || "分析未完成。请验证模型、两个 MCP 连接以及主机授权，再重试。" : task.status === "partial" ? "已保存可用证据；请查看诊断不足，补足信息后再判断。" : "分析已结束，可核验依据或下载报告。";
+  return `<div class="report-progress ${active ? "is-active" : ""}"><span class="progress-mark">${active ? "◌" : task.status === "success" ? "✓" : "i"}</span><div><strong>${E(text)}</strong><p id="report-refresh-state">${active ? "每 5 秒检查进度，保留展开的证据与阅读位置。" : "历史监控与实时采集分别记录，AI 结论需要结合证据核验。"}</p></div>${task.error_type ? `<span class="mono">${E(task.error_type)}</span>` : ""}</div>`;
+}
+function reportText() {
+  const task = state.currentTask;
+  return `# AI 运维诊断报告\n\n任务：${task.task_id}\nTrace ID：${task.trace_id}\n主机：${task.alert?.host_name || "未关联"}\n事件：${task.event_id || "未关联"}\n状态：${labels[task.status] || task.status}\n生成时间：${date(task.completed_at || task.created_at)}\n\n${reportAnswer(task)}\n\n## 诊断不足\n${(task.report?.limitations || []).map(item => "- " + item).join("\n") || "未记录"}\n\n实际 Token：${task.token_total ?? "未返回"} · 工具采集：${task.tools} 次\n\nAI 内容属于分析推断，请结合平台中保存的证据核验。\n`;
 }
 const configHelp = {
   web_protocol: "用于生成飞书登录回调和报告链接；HTTPS 证书由外部入口配置。",
@@ -518,6 +535,7 @@ function formValues(form) {
     data.zabbix_hostid = data.zabbix_hostid || null;
     data.event_id = data.event_id || null; data.service = data.service || null;
     data.time_window = Number(data.time_window);
+    if (!data.zabbix_hostid && !data.event_id) throw Error("请选择监控主机或填写告警事件 ID；不指定主机的问题请使用下方监控问答。");
   }
   if (form.classList.contains("settings-form")) {
     if (form.dataset.group === "ai") {
@@ -539,11 +557,16 @@ function formValues(form) {
 async function verifyAction(action, id, button) {
   const form = button.closest("form");
   const result = form?.querySelector("[data-verify-result]");
-  const show = message => { if (result) result.textContent = message; else toast(message); };
+  const show = (message, kind = "pending") => { if (result) { result.textContent = message; result.dataset.result = kind; } else toast(message); };
   const request = async (path, body) => {
+    const checked = form ? OpsUI.fingerprint(form) : "";
     show("正在验证…");
-    try { const r = await api(path, "POST", body); show(r.message || r.reply || (r.ok ? `连接成功，${r.authorized_tools?.length || 0} 个授权工具` : "验证失败：" + r.detail)); }
-    catch (err) {show("验证未通过：" + err.message);}
+    try {
+      const r = await api(path, "POST", body);
+      if (form && checked !== OpsUI.fingerprint(form)) show("验证期间内容已修改，请重新验证当前配置。");
+      else show(r.message || r.reply || (r.ok ? `连接成功，${r.authorized_tools?.length || 0} 个授权工具` : "验证失败：" + r.detail), r.ok === false ? "error" : "success");
+    }
+    catch (err) {show("验证未通过：" + err.message, "error");}
   };
   if (["validate-settings", "validate-connection"].includes(action)) await request("/api/v1/settings/validate", {values: formValues(form)});
   else if (action === "verify-mcp") await request(P + "/tools/discover?provider=" + id, {values: formValues(form)});
@@ -554,6 +577,7 @@ async function verifyAction(action, id, button) {
     await request(P + "/members/validate", formValues(form));
   } else if (action === "reset-prompts") {
     for (const [key, value] of Object.entries(state.options.prompts)) form.elements[key].value = value;
+    OpsUI.mark(form);
     show("已恢复项目默认提示词，保存后生效。");
   } else if (action === "validate-mute") {
     const values = formValues(form); values.hours = Number(values.hours);
@@ -592,18 +616,33 @@ async function systemSettings() {
     feishuExtra = `<div class="panel"><div class="section-heading"><div><h2>授权成员</h2><p class="muted small">超级管理员通过上方名单管理；其他角色由后端授权。</p></div>${btn("new-member", "添加成员")}</div>${table(["Open ID", "角色", "状态", "操作"], members.map((m) => `<tr><td class="mono">${E(m.open_id)}</td><td>${E(labels[m.role])}</td><td>${badge(m.enabled ? "已启用" : "已停用")}</td><td>${btn("edit-member", "编辑", m.open_id, "small")}</td></tr>`).join(""))}</div>`;
   }
   return (
-    intro("基础设置、飞书与 AI 配置集中管理。每个区域独立验证和保存；区域跳转会保留当前填写内容。") +
-    `<div class="toolbar" aria-label="系统配置分区">${btn("scroll-section", "基础设置", "settings-general")}${btn("scroll-section", "飞书配置", "settings-feishu")}${btn("scroll-section", "AI 配置", "settings-ai")}${btn("scroll-section", "备份与升级", "settings-maintenance")}</div>` +
-    configSection("settings", values, options) +
-    configSection("feishu", values, options) + feishuExtra +
-    configSection("ai", values, options) +
+    intro("在同一处管理平台、飞书与 AI。各分区独立保存；切换分区保留填写内容。") +
+    `<div class="section-tabs" role="tablist" aria-label="系统配置分区">${[["general", "基础设置"], ["feishu", "飞书配置"], ["ai", "AI 配置"], ["maintenance", "服务与维护"]].map(([key, label]) => `<button type="button" role="tab" id="tab-${key}" aria-controls="region-${key}" aria-selected="${state.configTab === key}" data-action="settings-tab" data-id="${key}" class="section-tab ${state.configTab === key ? "active" : ""}">${label}</button>`).join("")}</div>` +
+    configRegion("general", configSection("settings", values, options)) +
+    configRegion("feishu", configSection("feishu", values, options) + feishuExtra) +
+    configRegion("ai", configSection("ai", values, options)) +
+    configRegion("maintenance",
     panel(
-      "备份与升级",
-      `<p class="muted small">凭据保存在加密数据库中。升级前停止本项目 Worker，备份 SQLite 和持久化主密钥。数据库与配对主密钥需一起备份；升级步骤见仓库 docs/UPGRADING.md。</p>${btn("runtime-status", "查看服务与队列状态")}<pre id="runtime-result"></pre>`,
+      "服务状态与备份",
+      `<p class="muted small">检查队列连接、排队任务与 Worker 注册状态。升级前备份数据库与配对主密钥，操作步骤见仓库 docs/UPGRADING.md。</p>${btn("runtime-status", "查看服务与队列状态")}<div id="runtime-result" role="status"></div>`,
       "",
       "settings-maintenance",
-    )
+    ))
   );
+}
+function configRegion(key, html) {
+  return `<div id="region-${key}" role="tabpanel" aria-labelledby="tab-${key}" data-config-section="${key}" ${state.configTab === key ? "" : "hidden"}>${html}</div>`;
+}
+function selectConfigTab(key) {
+  state.configTab = key;
+  document.querySelectorAll("[data-config-section]").forEach(region => region.hidden = region.dataset.configSection !== key);
+  document.querySelectorAll('[data-action="settings-tab"]').forEach(button => {
+    const selected = button.dataset.id === key;
+    button.setAttribute("aria-selected", selected); button.classList.toggle("active", selected);
+  });
+  window.history.replaceState(null, "", "#settings/" + key);
+  state.lastHash = location.hash;
+  window.scrollTo(0, 0);
 }
 async function auditPage() {
   const data = await paged(P + "/audit", "auditPage", 50);
@@ -628,8 +667,15 @@ async function auditPage() {
 }
 let generation = 0,
   poll;
-async function navigate() {
+async function navigate(options = {}) {
   clearTimeout(poll);
+  if (!options.quiet && !options.preserveDrafts && OpsUI.dirty() && !window.confirm("有配置尚未保存。离开此页将丢弃修改，是否继续？")) {
+    window.history.replaceState(null, "", state.lastHash || "#overview");
+    return;
+  }
+  const drafts = options.preserveDrafts ? OpsUI.drafts() : [];
+  const openEvidence = options.quiet ? [...document.querySelectorAll("details.evidence[open]")].map(el => el.dataset.evidence) : [];
+  const scrollY = window.scrollY;
   const current = ++generation;
   const parts = (location.hash.slice(1) || "overview").split("/");
   // Keep existing bookmarks useful after consolidating the navigation.
@@ -643,6 +689,9 @@ async function navigate() {
     window.history.replaceState(null, "", "#" + parts.join("/"));
   }
   const page = parts[0];
+  if (page === "settings" && ["general", "feishu", "ai", "maintenance"].includes(parts[1])) state.configTab = parts[1];
+  if (page !== "report" || state.currentTask?.task_id !== parts[1]) state.includeLogs = false;
+  state.lastHash = location.hash || "#overview";
   const item = nav.find((x) => x[0] === page);
   $("#page-title").textContent =
     page === "report" ? "诊断详情" : item?.[1] || "总览";
@@ -655,7 +704,7 @@ async function navigate() {
           (page === "report" && b.dataset.page === "history"),
       ),
     );
-  $("#content").innerHTML = '<div class="empty" role="status">正在加载…</div>';
+  if (!options.quiet) $("#content").innerHTML = '<div class="loading-state" role="status"><span class="loading-dot"></span>正在加载…</div>';
   try {
     let html;
     if (page === "overview") html = await overview();
@@ -673,17 +722,44 @@ async function navigate() {
     else html = await overview();
     if (current !== generation) return;
     $("#content").innerHTML = html;
-    const section = page === "settings" ? "settings-" + parts[1] : page === "connections" && parts[1] === "tools" ? "connection-tools" : "";
+    OpsUI.track(); OpsUI.restore(drafts);
+    const section = page === "connections" && parts[1] === "tools" ? "connection-tools" : "";
     if (section) document.getElementById(section)?.scrollIntoView({ block: "start" });
+    else if (options.quiet) {
+      document.querySelectorAll("details.evidence").forEach(el => { el.open = openEvidence.includes(el.dataset.evidence); });
+      window.scrollTo(0, scrollY);
+    } else window.scrollTo(0, 0);
     if (
       (page === "report" && ["running", "queued"].includes(state.currentTask?.status))
     )
-      poll = setTimeout(navigate, 3000);
+      scheduleReportPoll(parts[1], current);
   } catch (err) {
-    if (current === generation)
+    if (current === generation && !options.quiet)
       $("#content").innerHTML =
         `<div class="notice error" role="alert">${E(err.message)}</div>`;
+    else if (current === generation) {
+      toast("报告刷新失败，已保留当前内容。");
+      scheduleReportPoll(parts[1], current);
+    }
   }
+}
+function scheduleReportPoll(id, current) {
+  poll = setTimeout(async () => {
+    if (current !== generation || !location.hash.startsWith("#report/")) return;
+    if (document.hidden) { scheduleReportPoll(id, current); return; }
+    try {
+      const latest = await api(P + "/tasks/" + encodeURIComponent(id) + "/status");
+      if (current !== generation) return;
+      if (["status", "stage", "tools", "cancel_requested", "error_type", "completed_at"].some(key => latest[key] !== state.currentTask[key])) await navigate({quiet: true});
+      else scheduleReportPoll(id, current);
+    } catch {
+      if (current === generation && !$("#app").hidden) {
+        const hint = $("#report-refresh-state");
+        if (hint) hint.textContent = "暂时无法刷新，稍后重试。当前内容已保留。";
+        scheduleReportPoll(id, current);
+      }
+    }
+  }, 5000);
 }
 function go(page) {
   if (location.hash === "#" + page) navigate();
@@ -722,6 +798,24 @@ document.addEventListener("click", async (event) => {
   try {
     if (await verifyAction(action, id, b)) return;
     if (action === "refresh") await navigate();
+    else if (action === "settings-tab") selectConfigTab(id);
+    else if (action === "go-page") go(id);
+    else if (action === "toggle-secret") {
+      const input = b.closest(".secret-control").querySelector("input");
+      input.type = input.type === "password" ? "text" : "password";
+      b.textContent = input.type === "password" ? "显示" : "隐藏";
+    }
+    else if (action === "copy-report") { await OpsUI.copy(reportText()); toast("报告已复制"); }
+    else if (action === "download-report") {
+      const url = URL.createObjectURL(new Blob([reportText()], {type: "text/markdown;charset=utf-8"}));
+      const link = document.createElement("a"); link.href = url;
+      link.download = "诊断报告-" + state.currentTask.task_id.slice(0, 12) + ".md";
+      link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+    else if (action === "reset-alert-filter") {
+      state.alertQuery = ""; state.alertSeverity = ""; state.alertStatus = "all"; state.alertPage = 1; await navigate();
+    }
+    else if (action === "clear-event") { state.selectedEvent = ""; state.selectedEventTitle = ""; await navigate(); }
     else if (action === "scroll-section") document.getElementById(id)?.scrollIntoView({ block: "start" });
     else if (action === "go-history") go("history");
     else if (action === "go-alerts") go("alerts");
@@ -746,16 +840,21 @@ document.addEventListener("click", async (event) => {
       } catch (err) { if (output.isConnected) output.textContent = "查询失败：" + err.message; }
     } else if (action === "analyze-event") {
       state.selectedEvent = id;
+      const row = state.alertRows?.find(row => row.event_id === id);
+      state.selectedEventTitle = row ? row.host_name + " · " + row.event_name : "";
       go("diagnostics");
     } else if (action === "discover") {
       const results = await Promise.all(["zabbix_mcp", "ssh_mcp"].map(provider => api(P + "/tools/discover?provider=" + provider, "POST")));
       toast(results.map(r => `${r.provider}：${r.ok ? "连接成功，" + r.authorized_tools.length + " 个工具" : "失败，" + r.detail}`).join("；"));
-    } else if (action === "runtime-status")
-      $("#runtime-result").textContent = JSON.stringify(
-        await api("/api/v1/status"),
-        null,
-        2,
-      );
+    } else if (action === "runtime-status") {
+      const output = $("#runtime-result"); output.textContent = "正在检查服务…";
+      const result = await api("/api/v1/status");
+      if (output.isConnected) output.innerHTML = OpsUI.runtime(result);
+    }
+    else if (action === "alert-prev" || action === "alert-next") {
+      state.alertPage = Math.max(1, Math.min(state.alertPageCount, state.alertPage + (action === "alert-next" ? 1 : -1)));
+      await navigate();
+    }
     else if (action === "task-prev" || action === "task-next") {
       state.taskPage = Math.max(1, Math.min(
         state.taskPageCount,
@@ -780,20 +879,46 @@ document.addEventListener("click", async (event) => {
       go("report/" + t.task_id);
     }
   } catch (err) {
+    if (err.status === 503 && err.detail?.task_id) go("report/" + err.detail.task_id);
     toast(err.message);
   } finally {
     b.disabled = false;
   }
 });
 document.addEventListener("change", (e) => {
+  OpsUI.mark(e.target.closest("form"));
   if (e.target.id === "task-status") {
     state.taskStatus = e.target.value;
     state.taskPage = 1;
     navigate();
   }
 });
+document.addEventListener("input", event => {
+  const form = event.target.closest("form");
+  OpsUI.mark(form);
+  const verification = form?.querySelector("[data-verify-result]");
+  if (verification?.textContent && !form.querySelector('[data-action]:disabled')) {
+    verification.textContent = "填写内容已修改，请重新验证。"; verification.dataset.result = "pending";
+  }
+});
+window.addEventListener("beforeunload", event => { if (OpsUI.dirty()) { event.preventDefault(); event.returnValue = ""; } });
+document.addEventListener("keydown", event => {
+  if (!event.target.matches('[role="tab"]') || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const tabs = [...document.querySelectorAll('[role="tab"]')];
+  const index = tabs.indexOf(event.target);
+  const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+  selectConfigTab(tabs[next].dataset.id); tabs[next].focus();
+});
 document.addEventListener("submit", async (event) => {
   const form = event.target;
+  if (["alert-filter", "history-filter"].includes(form.id)) {
+    event.preventDefault(); const data = Object.fromEntries(new FormData(form));
+    if (form.id === "alert-filter") {
+      state.alertQuery = data.q.trim(); state.alertStatus = data.status; state.alertSeverity = data.severity; state.alertPage = 1;
+    } else { state.taskQuery = data.q.trim(); state.taskPage = 1; }
+    await navigate(); return;
+  }
   if (
     ![
       "editor-form",
@@ -820,14 +945,24 @@ document.addEventListener("submit", async (event) => {
       toast("已设置本平台飞书告警屏蔽");
       await navigate();
     } else if (form.classList.contains("settings-form") || form.classList.contains("connection-form")) {
-      await api("/api/v1/settings", "PUT", { values: data });
+      const unlock = OpsUI.lock(form);
+      try {
+        await api("/api/v1/settings", "PUT", { values: data });
+        form.querySelectorAll('.secret-control input').forEach(input => { if (input.value) input.value = "********"; input.type = "password"; });
+        form.querySelectorAll('[data-action="toggle-secret"]').forEach(button => button.textContent = "显示");
+        if (form.dataset.group === "ai") for (const [key, value] of Object.entries(state.options.prompts)) if (!form.elements[key].value) form.elements[key].value = value;
+      } finally { unlock(); }
+      OpsUI.saved(form);
+      const result = form.querySelector("[data-verify-result]");
+      result.dataset.result = "success";
+      result.textContent = "配置已保存。连接参数有修改时，请重新验证连接。";
       toast("配置已保存");
     } else if (form.id === "ask-form") {
       if (!data.question.trim()) throw Error("请输入问题");
       const output = $("#ask-result");
       output.textContent = "正在查询监控并分析…";
       const r = await api("/api/v1/ask", "POST", data);
-      if (output.isConnected) output.textContent = r.answer;
+      if (output.isConnected) output.innerHTML = OpsUI.answer(readableReportAnswer(r.answer));
     } else if (form.id === "diagnostic-form") {
       const t = await api(P + "/tasks", "POST", data);
       go("report/" + t.task_id);
@@ -844,10 +979,11 @@ document.addEventListener("submit", async (event) => {
       await api(P + path, method, payload);
       $("#editor").close();
       toast("已保存");
-      await navigate();
+      await navigate({preserveDrafts: true});
     }
   } catch (err) {
-    toast(err.message);
+    if (err.status === 503 && err.detail?.task_id) go("report/" + err.detail.task_id);
+    toast(err.message || "操作失败，请检查网络后重试");
   } finally {
     b.disabled = false;
   }
@@ -861,6 +997,7 @@ $("#theme-toggle").addEventListener("click", () => {
 });
 $("#logout").addEventListener("click", async () => {
   try {
+    if (OpsUI.dirty() && !window.confirm("有配置尚未保存，仍然退出登录？")) return;
     await api("/api/v1/auth/logout", "POST");
     location.reload();
   } catch (e) {

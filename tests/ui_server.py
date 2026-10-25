@@ -1,6 +1,7 @@
 """Isolated desktop QA server. Never included in the application Docker image."""
 
 import os
+import json
 import secrets
 import tempfile
 import time
@@ -21,6 +22,30 @@ from fastapi.responses import RedirectResponse
 with connection() as db:
     db.execute("INSERT INTO settings VALUES ('feishu_admin_open_ids','ou_ui_test',0)")
     db.execute("INSERT INTO settings VALUES ('web_public_host','127.0.0.1:8765',0)")
+    for index in range(32):
+        event = {
+            "event_id": str(8000 + index),
+            "event_value": "1",
+            "host_id": "10001",
+            "host_name": "测试主机-" + str(index),
+            "event_name": "CPU high",
+        }
+        db.execute(
+            "INSERT INTO alert_events(event_id,event_value,host_name,event_name,severity,notify_status,event_json) VALUES (?,'1',?,?,?,?,?)",
+            (
+                event["event_id"],
+                event["host_name"],
+                event["event_name"],
+                index % 6,
+                "sent",
+                json.dumps(event),
+            ),
+        )
+        if index < 8:
+            db.execute(
+                "INSERT INTO alert_events(event_id,event_value) VALUES (?,'0')",
+                (event["event_id"],),
+            )
 # Enough real rows to exercise page boundaries and status filtering.
 for index in range(28):
     previous, _ = tasks.create({"question": "分页验证"}, source="ui_test")
@@ -66,6 +91,11 @@ async def qa_monitoring_hosts(read, query="", host_id=None):
 
 
 zabbix.monitoring_hosts = qa_monitoring_hosts
+running, _ = tasks.create({"question": "进度刷新测试"}, source="ui_test")
+tasks.start(running["task_id"])
+tasks.evidence(
+    running["task_id"], "zabbix_mcp", "host_get", {"summary": "进度刷新测试证据"}
+)
 task, _ = tasks.create(
     {
         "event": {
@@ -91,13 +121,27 @@ tasks.evidence(
 tasks.finish(
     task["task_id"],
     {
-        "answer": "隔离界面测试记录。\n\n此处展示报告结构、任务追踪和证据分区，不代表真实环境诊断。",
+        "answer": "## 结论\n隔离界面测试记录，**已有监控证据**。\n\n## 建议\n- 核验主机与时间窗口。\n- 结合实时证据检查原因。\n\n## 依据\n此处展示报告结构，不代表生产观测。",
         "device_type": "linux",
         "limitations": ["尚未连接生产 Zabbix、飞书或 SSH 主机"],
     },
     status="partial",
     duration_ms=1500,
 )
+
+
+@app.get("/__ui_running")
+def running_fixture():
+    return {"task_id": running["task_id"]}
+
+
+@app.post("/__ui_progress")
+def progress_fixture():
+    tasks.evidence(
+        running["task_id"], "zabbix_mcp", "history_get", {"summary": "新增证据"}
+    )
+    tasks.stage(running["task_id"], "ai_reasoning")
+    return {"ok": True}
 
 
 @app.get("/__ui_login")

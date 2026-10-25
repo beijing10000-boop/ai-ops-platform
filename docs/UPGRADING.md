@@ -1,5 +1,22 @@
 # 升级说明
 
+## v0.7.2 → v0.8.0
+
+告警筛选、配置页签、草稿保护、诊断报告与服务状态整体优化。保留现有双 MCP、飞书、AI、成员、屏蔽、历史与密钥；数据库仍为 v4，无新增迁移。按下方备份流程保存当前数据后，在原项目目录执行：
+
+```bash
+cd /data/ai-ops-platform
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans
+docker compose ps
+curl -f http://127.0.0.1:8088/healthz
+```
+
+未启用飞书接收器的环境去掉 `--profile feishu`。浏览器按 Ctrl+F5 强制刷新，确认侧栏版本为 v0.8.0。系统配置切换页签保留当前草稿，各区仍需分别保存；暂时屏蔽位于“告警中心”。在“系统配置 → 服务与维护”检查队列和 Worker，在“连接管理”分别验证两个 MCP。
+
+已有自定义提示词不会被覆盖；需要采用新版项目提示词时，在“系统配置 → AI 配置”点击“恢复默认提示词”，验证并保存。标准/深度模式对可信绑定的 Linux 主机自动采集首轮 SSH 证据，快速模式只查监控；SSH 关联、权限与预算限制继续生效。
+
 ## v0.7.1 → v0.7.2
 
 系统设置、飞书管理与 AI 配置合为“系统配置”，诊断工具并入“连接管理”。已有设置、密钥、提示词和权限继续生效，无数据库迁移。更新代码后运行 `docker compose --profile feishu up -d --build --remove-orphans`，强制刷新浏览器即可；旧页面书签自动转到对应分区。
@@ -21,9 +38,9 @@ v0.7.0 启动时执行数据库 v4 迁移：保留告警、问答、成员、监
 ```bash
 cd /data/ai-ops-platform
 docker compose --profile feishu stop
-mkdir -p backup-v070
-docker compose run --rm --no-deps -v "$PWD/backup-v070:/backup" --user 0 web sh -c 'cp -a /app/data/. /backup/'
-git rev-parse HEAD > backup-v070/source-revision.txt
+mkdir -p backup-before-upgrade
+docker compose run --rm --no-deps -v "$PWD/backup-before-upgrade:/backup" --user 0 web sh -c 'cp -a /app/data/. /backup/'
+git rev-parse HEAD > backup-before-upgrade/source-revision.txt
 git fetch origin
 git switch main
 git pull --ff-only origin main

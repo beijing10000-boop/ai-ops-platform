@@ -14,6 +14,30 @@ class AlreadyRunning(RuntimeError):
     pass
 
 
+class QueueUnavailable(RuntimeError):
+    pass
+
+
+def recover_stalled(db):
+    # All execution budgets are shorter than 10 minutes. Release stranded locks
+    # even when the user stays on a task report instead of opening history.
+    db.execute(
+        "UPDATE diagnostic_tasks SET status='failed',stage='failed',error_type='WorkerLost',completed_at=CURRENT_TIMESTAMP WHERE status='running' AND started_at<datetime('now','-10 minutes')"
+    )
+
+
+def progress(task_id):
+    from ..main import connection
+
+    with connection() as db:
+        recover_stalled(db)
+        cur = db.execute(
+            "SELECT task_id,status,stage,tools,cancel_requested,error_type,completed_at FROM diagnostic_tasks WHERE task_id=?",
+            (task_id,),
+        )
+        return row_dict(cur.fetchone(), cur)
+
+
 def encode(value):
     from ..main import cipher
 
@@ -80,6 +104,7 @@ def get(task_id, private=False):
     from ..main import connection
 
     with connection() as db:
+        recover_stalled(db)
         cur = db.execute("SELECT * FROM diagnostic_tasks WHERE task_id=?", (task_id,))
         result = row_dict(cur.fetchone(), cur)
     if result:
@@ -192,16 +217,20 @@ def finish(
         )
 
 
-def page(page=1, page_size=25, status="all"):
+def page(page=1, page_size=25, status="all", query=""):
     from ..main import connection
+    from ..operations import literal_search
 
-    where = "" if status == "all" else " WHERE status=?"
-    args = () if status == "all" else (status,)
-    with connection() as db:
-        # Worker death cannot leave an active event lock permanently stranded.
-        db.execute(
-            "UPDATE diagnostic_tasks SET status='failed',stage='failed',error_type='WorkerLost',completed_at=CURRENT_TIMESTAMP WHERE status='running' AND started_at<datetime('now','-10 minutes')"
+    clauses = [] if status == "all" else ["status=?"]
+    args = [] if status == "all" else [status]
+    if query.strip():
+        clauses.append(
+            "(task_id LIKE ? ESCAPE '\\' OR event_id LIKE ? ESCAPE '\\' OR trace_id LIKE ? ESCAPE '\\')"
         )
+        args.extend([literal_search(query.strip())] * 3)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    with connection() as db:
+        recover_stalled(db)
         total = db.execute(
             "SELECT COUNT(*) FROM diagnostic_tasks" + where, args
         ).fetchone()[0]
@@ -240,4 +269,4 @@ def enqueue(task_id):
             status="failed",
             error_type="QueueUnavailable",
         )
-        raise RuntimeError("诊断队列暂不可用") from None
+        raise QueueUnavailable("诊断队列暂不可用") from None
