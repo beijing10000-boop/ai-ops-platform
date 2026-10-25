@@ -81,8 +81,11 @@ def test_initmax_mcp_schema_translates_output_and_inventory_tags_without_writes(
     }
     checked = zabbix.validate_args(
         "host_get",
-        {"hostids": ["11848"], "selectInventory": ["os", "type"],
-         "selectTags": ["tag", "value"]},
+        {
+            "hostids": ["11848"],
+            "selectInventory": ["os", "type"],
+            "selectTags": ["tag", "value"],
+        },
         host_id="11848",
     )
     wire = zabbix.adapt_read_args("host_get", checked, schema)
@@ -106,13 +109,9 @@ def test_extra_params_cannot_bypass_local_write_or_host_scope_policy():
         "additionalProperties": False,
     }
     with pytest.raises(ValueError, match="parameter not authorized"):
-        zabbix.validate_args(
-            "host_get", {"extra_params": {"method": "script.execute"}}
-        )
+        zabbix.validate_args("host_get", {"extra_params": {"method": "script.execute"}})
     with pytest.raises(ValueError, match="host outside task scope"):
-        zabbix.validate_args(
-            "host_get", {"hostids": ["11849"]}, host_id="11848"
-        )
+        zabbix.validate_args("host_get", {"hostids": ["11849"]}, host_id="11848")
     checked = zabbix.validate_args("host_get", {}, host_id="11848")
     wire = zabbix.adapt_read_args("host_get", checked, schema)
     assert wire["extra_params"]["hostids"] == ["11848"]
@@ -122,7 +121,8 @@ def test_strict_mcp_schema_unsupported_scoping_fails_closed():
     checked = zabbix.validate_args("host_get", {}, host_id="11848")
     with pytest.raises(zabbix.ToolSchemaMismatch, match="hostids"):
         zabbix.adapt_read_args(
-            "host_get", checked,
+            "host_get",
+            checked,
             {
                 "type": "object",
                 "properties": {
