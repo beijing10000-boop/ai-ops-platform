@@ -66,3 +66,82 @@ def test_redaction_removes_credentials_before_model_submission():
     result = redact(text)
     for secret in ("xyzsecret", "hunter2", "secret123", "u:p@", "\nsecret\n"):
         assert secret not in result
+
+
+def test_initmax_mcp_schema_translates_output_and_inventory_tags_without_writes():
+    schema = {
+        "type": "object",
+        "properties": {
+            "hostids": {"type": "array", "items": {"type": "string"}},
+            "output": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            "limit": {"type": "integer"},
+            "extra_params": {"anyOf": [{"type": "object"}, {"type": "null"}]},
+        },
+        "additionalProperties": False,
+    }
+    checked = zabbix.validate_args(
+        "host_get",
+        {"hostids": ["11848"], "selectInventory": ["os", "type"],
+         "selectTags": ["tag", "value"]},
+        host_id="11848",
+    )
+    wire = zabbix.adapt_read_args("host_get", checked, schema)
+    zabbix.validate_remote_schema("host_get", wire, schema)
+    assert wire["output"] == "hostid,host,name,status"
+    assert wire["hostids"] == ["11848"]
+    assert wire["extra_params"] == {
+        "selectInventory": ["os", "type"],
+        "selectTags": ["tag", "value"],
+    }
+    assert "server" not in wire and "raw_json" not in wire
+
+
+def test_extra_params_cannot_bypass_local_write_or_host_scope_policy():
+    schema = {
+        "type": "object",
+        "properties": {
+            "output": {"type": "string"},
+            "extra_params": {"type": "object"},
+        },
+        "additionalProperties": False,
+    }
+    with pytest.raises(ValueError, match="parameter not authorized"):
+        zabbix.validate_args(
+            "host_get", {"extra_params": {"method": "script.execute"}}
+        )
+    with pytest.raises(ValueError, match="host outside task scope"):
+        zabbix.validate_args(
+            "host_get", {"hostids": ["11849"]}, host_id="11848"
+        )
+    checked = zabbix.validate_args("host_get", {}, host_id="11848")
+    wire = zabbix.adapt_read_args("host_get", checked, schema)
+    assert wire["extra_params"]["hostids"] == ["11848"]
+
+
+def test_strict_mcp_schema_unsupported_scoping_fails_closed():
+    checked = zabbix.validate_args("host_get", {}, host_id="11848")
+    with pytest.raises(zabbix.ToolSchemaMismatch, match="hostids"):
+        zabbix.adapt_read_args(
+            "host_get", checked,
+            {"type": "object", "properties": {"output": {"type": "string"}},
+             "additionalProperties": False},
+        )
+
+
+def test_readable_ai_json_report_keeps_worker_original_payload():
+    import json
+    from app.mcp_runtime import readable_report_answer
+
+    info = {
+        "cause": "原因尚未确定",
+        "action": "先检查 Zabbix agent",
+        "analysis": "MCP 校验失败，尚未取得监控证据",
+        "human_required": True,
+    }
+    raw = json.dumps(info, ensure_ascii=False)
+    human = readable_report_answer(raw)
+    assert "故障原因（AI 推断）\\n原因尚未确定" in human
+    assert "处理建议\\n先检查 Zabbix agent" in human
+    assert "分析与依据" in human
+    assert "需人工核验：是" in human
+    assert readable_report_answer("纯文本结论") == "纯文本结论"
