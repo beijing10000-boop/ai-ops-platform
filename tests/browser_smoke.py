@@ -20,6 +20,8 @@ for name in (
     "diagnostics-1440.png",
     "diagnosis-1440.png",
     "diagnosis-dark-1440.png",
+    "settings-1440.png",
+    "connections-1440.png",
 ):
     (OUT / name).unlink(missing_ok=True)
 with socket.socket() as sock:
@@ -78,11 +80,8 @@ try:
                 "overview",
                 "alerts",
                 "diagnostics",
-                "tools",
                 "connections",
                 "history",
-                "feishu",
-                "ai",
                 "settings",
                 "audit",
             ):
@@ -101,6 +100,9 @@ try:
                 checks.append({"width": width, "page": name, "ok": True})
         page.set_viewport_size({"width": 1440, "height": 1080})
         assert page.locator('nav [data-page="assets"]').count() == 0
+        for retired in ("tools", "feishu", "ai"):
+            assert page.locator(f'nav [data-page="{retired}"]').count() == 0
+        assert "系统配置" in page.locator('nav [data-page="settings"]').inner_text()
         page.locator('[data-page="diagnostics"]').click()
         assert page.locator('input[name="asset_id"]').count() == 0
         page.locator("#host-search").fill("Linux")
@@ -174,19 +176,98 @@ try:
                 "ok": True,
             }
         )
-        page.locator('[data-page="ai"]').click()
+        assert page.get_by_role("heading", name="诊断工具", exact=True).count() == 1
+        assert page.get_by_role("heading", name="标准诊断流程", exact=True).count() == 1
+        discovered = []
+
+        def discover(route):
+            discovered.append(route.request.url.split("provider=")[1])
+            route.fulfill(
+                json={
+                    "provider": discovered[-1],
+                    "ok": True,
+                    "authorized_tools": ["fixture"],
+                }
+            )
+
+        page.route("**/api/v1/platform/tools/discover?provider=*", discover)
+        page.locator('[data-action="discover"]').click()
+        page.locator("#toast").get_by_text("ssh_mcp：连接成功", exact=False).wait_for()
+        assert sorted(discovered) == ["ssh_mcp", "zabbix_mcp"]
+        page.unroute("**/api/v1/platform/tools/discover?provider=*")
+        checks.append(
+            {
+                "workflow": "diagnostic tools and saved MCP detection in connections",
+                "ok": True,
+            }
+        )
+        page.locator('[data-page="settings"]').click()
         page.locator('textarea[name="ai_alert_prompt"]').wait_for()
+        general = page.locator("#settings-settings-form")
+        feishu = page.locator("#feishu-settings-form")
+        ai = page.locator("#ai-settings-form")
+        assert page.locator("form.settings-form").count() == 3
+        assert len(
+            page.locator("[id]").evaluate_all("nodes => nodes.map(n => n.id)")
+        ) == len(
+            set(page.locator("[id]").evaluate_all("nodes => nodes.map(n => n.id)"))
+        )
+        general.locator('input[name="web_public_host"]').fill("draft-host:8088")
+        feishu.locator('input[name="allowed_chat_ids"]').fill("oc_browser_draft")
+        page.locator('[data-action="scroll-section"][data-id="settings-ai"]').click()
+        assert (
+            general.locator('input[name="web_public_host"]').input_value()
+            == "draft-host:8088"
+        )
+        assert (
+            feishu.locator('input[name="allowed_chat_ids"]').input_value()
+            == "oc_browser_draft"
+        )
         assert (
             "Zabbix" in page.locator('textarea[name="ai_alert_prompt"]').input_value()
         )
         assert page.locator('textarea[name="ai_profile_budgets"]').count() == 0
         budget = page.get_by_role("spinbutton", name="标准分析 采集次数", exact=True)
         budget.fill("9")
-        page.locator('[data-action="validate-settings"]').click()
-        page.locator("[data-verify-result]").get_by_text(
+        ai.locator('[data-action="validate-settings"]').click()
+        ai.locator("[data-verify-result]").get_by_text(
             "填写内容校验通过", exact=False
         ).wait_for()
-        page.locator('#settings-form button[type="submit"]').click()
+        assert general.locator("[data-verify-result]").inner_text() == ""
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "PUT"
+                and response.url.endswith("/api/v1/settings")
+            )
+        ) as saved:
+            ai.locator('button[type="submit"]').click()
+        assert saved.value.ok
+        values = page.request.get(base + "/api/v1/settings").json()
+        assert json.loads(values["ai_profile_budgets"])["standard"]["calls"] == 9
+        assert values["web_public_host"] == "127.0.0.1:8765"
+        assert values["allowed_chat_ids"] == ""
+        draft_checks = []
+
+        def verify_draft(route):
+            draft_checks.append(
+                (route.request.url, route.request.post_data_json["values"])
+            )
+            route.fulfill(json={"ok": True, "message": "草稿连接验证通过"})
+
+        page.route("**/api/v1/test/**", verify_draft)
+        ai.locator('input[name="openai_model"]').fill("draft-model")
+        ai.locator('[data-action="test-model"]').click()
+        ai.locator("[data-verify-result]").get_by_text("草稿连接验证通过").wait_for()
+        assert draft_checks[-1][1]["openai_model"] == "draft-model"
+        assert "lark_app_id" not in draft_checks[-1][1]
+        for action in ("verify-feishu", "verify-feishu-groups"):
+            with page.expect_response(
+                lambda response: "/api/v1/test/feishu" in response.url
+            ):
+                feishu.locator(f'[data-action="{action}"]').click()
+            assert draft_checks[-1][1]["allowed_chat_ids"] == "oc_browser_draft"
+            assert "openai_model" not in draft_checks[-1][1]
+        page.unroute("**/api/v1/test/**")
         page.locator('textarea[name="ai_alert_prompt"]').fill(
             "临时测试提示词内容，需要恢复成项目提供的默认提示词"
         )
@@ -194,20 +275,18 @@ try:
         assert (
             "运维经理" in page.locator('textarea[name="ai_alert_prompt"]').input_value()
         )
-        page.locator('[data-page="settings"]').click()
-        page.locator('input[name="enabled_tool"]').first.uncheck()
+        general.locator('input[name="enabled_tool"]').first.uncheck()
         assert page.locator('textarea[name="disabled_tools"]').count() == 0
-        page.locator('[data-action="validate-settings"]').click()
-        page.locator("[data-verify-result]").get_by_text(
+        general.locator('[data-action="validate-settings"]').click()
+        general.locator("[data-verify-result]").get_by_text(
             "填写内容校验通过", exact=False
         ).wait_for()
         checks.append(
             {
-                "workflow": "budget number inputs + tool checkboxes + default prompt restore",
+                "workflow": "unified configuration + section jumps retain drafts + independent save/validation + budget/tool inputs + prompt restore",
                 "ok": True,
             }
         )
-        page.locator('[data-page="feishu"]').click()
         page.locator('[data-action="new-member"]').click()
         page.locator('dialog input[name="open_id"]').fill("ou_browser_member")
         page.locator('dialog button[type="submit"]').click()
@@ -277,6 +356,28 @@ try:
         page.locator('[data-page="diagnostics"]').click()
         page.locator('[data-action="search-hosts"]').wait_for()
         page.screenshot(path=str(OUT / "diagnostics-1440.png"), full_page=True)
+        page.locator('[data-page="settings"]').click()
+        page.locator("#ai-settings-form").wait_for()
+        page.screenshot(path=str(OUT / "settings-1440.png"), full_page=True)
+        page.locator('[data-page="connections"]').click()
+        page.locator("#connection-tools").wait_for()
+        page.screenshot(path=str(OUT / "connections-1440.png"), full_page=True)
+        for old, new in (
+            ("ai", "settings/ai"),
+            ("feishu", "settings/feishu"),
+            ("tools", "connections/tools"),
+        ):
+            page.goto(base + "/#" + old)
+            page.wait_for_url(base + "/#" + new)
+            page.locator(
+                "#ai-settings-form" if old != "tools" else "#connection-tools"
+            ).wait_for()
+        checks.append(
+            {
+                "workflow": "legacy configuration/tools bookmarks redirect to merged sections",
+                "ok": True,
+            }
+        )
         page.locator('[data-page="history"]').click()
         page.locator('[data-action="report"]').first.click()
         page.get_by_text("证据与工具执行记录", exact=True).wait_for()
@@ -285,6 +386,31 @@ try:
         assert page.locator("html").get_attribute("data-theme") == "dark"
         page.screenshot(path=str(OUT / "diagnosis-dark-1440.png"), full_page=True)
         checks.append({"workflow": "report, evidence, theme toggle", "ok": True})
+        for role in ("operator", "auditor", "ops_admin"):
+            page.goto(base + "/__ui_login?role=" + role)
+            page.locator('nav [data-page="connections"]').click()
+            page.locator("#connection-tools").wait_for()
+            assert (
+                page.get_by_role("heading", name="工具注册表", exact=True).count() == 1
+            )
+            if role == "ops_admin":
+                page.locator("#ssh_mcp-form").wait_for()
+                page.locator('nav [data-page="settings"]').click()
+                page.locator("#ai-settings-form").wait_for()
+                assert page.locator('input[name="feishu_admin_open_ids"]').count() == 0
+                assert page.locator('input[name="enabled_tool"]').count() == 0
+                assert page.locator('[data-action="new-member"]').count() == 0
+            else:
+                assert page.locator("form.connection-form").count() == 0
+                assert page.locator('[data-action="discover"]').count() == 0
+                assert page.locator('nav [data-page="settings"]').count() == 0
+                assert page.request.get(base + "/api/v1/settings").status == 403
+            checks.append(
+                {
+                    "workflow": role + " retains scoped access after consolidation",
+                    "ok": True,
+                }
+            )
         assert errors == [], errors
         assert failed == [], failed
         browser.close()

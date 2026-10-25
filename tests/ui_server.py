@@ -4,6 +4,7 @@ import os
 import secrets
 import tempfile
 import time
+from typing import Literal
 from cryptography.fernet import Fernet
 
 if os.getenv("AIOPS_UI_TEST") != "1":
@@ -100,15 +101,20 @@ tasks.finish(
 
 
 @app.get("/__ui_login")
-def test_login():
+def test_login(
+    role: Literal["super_admin", "ops_admin", "operator", "auditor"] = "super_admin",
+):
     raw = secrets.token_urlsafe(32)
+    open_id = "ou_ui_test" if role == "super_admin" else "ou_ui_" + role
     with connection() as db:
         feishu_auth._tables(db)
+        if role != "super_admin":
+            db.execute("INSERT OR REPLACE INTO members VALUES (?,?,1)", (open_id, role))
         db.execute(
             "INSERT INTO admin_sessions VALUES (?,?,?,?,?)",
             (
                 feishu_auth._hash(raw),
-                "ou_ui_test",
+                open_id,
                 "桌面界面测试",
                 secrets.token_urlsafe(32),
                 int(time.time()) + 3600,

@@ -1,4 +1,4 @@
-# 安装部署 v0.7.1
+# 安装部署 v0.7.2
 
 默认端口 8088，默认向宿主机网卡发布，供受信任内网访问；Redis 不发布端口。公网入口应由 HTTPS 反向代理和访问控制保护。HTTP 内网不需要配置证书。镜像内应用以 UID 10001 运行，配置与主密钥存放在本项目独立数据卷。
 
@@ -35,9 +35,10 @@ docker compose exec -T web cat /app/data/bootstrap.token
 | --- | --- | --- |
 | 连接管理 → Zabbix MCP | 现有服务的 Streamable HTTP 地址和令牌 | 验证填写内容 → 验证连接 → 保存连接 |
 | 连接管理 → SSH MCP | 开启、`http://SSH服务IP:9099/mcp`、专用客户端令牌、超时（默认90秒） | 验证填写内容 → 验证连接 → 保存连接 |
-| AI 配置 | Base URL、部署名、API Key；默认提示词、分析模式和数字预算 | 验证填写内容、验证模型连接，再保存 |
-| 飞书管理 | 群 ID、发送开关、自动分析级别与授权成员 | 验证填写内容、验证飞书应用和群访问，再保存 |
-| 系统设置 | 外部访问地址、Webhook 密钥、Zabbix 前端、只读工具勾选 | 验证填写内容，再保存 |
+| 连接管理 → 诊断工具 | 查看工具注册表与标准诊断流程 | 检测 MCP 工具（使用已保存连接） |
+| 系统配置 → 基础设置 | 外部访问地址、Webhook 密钥、Zabbix 前端、只读工具勾选 | 验证填写内容，再保存基础配置 |
+| 系统配置 → 飞书配置 | 群 ID、发送开关、自动分析级别与授权成员 | 验证填写内容、验证飞书应用和群访问，再保存飞书配置 |
+| 系统配置 → AI 配置 | Base URL、部署名、API Key；默认提示词、分析模式和数字预算 | 验证填写内容、验证模型连接，再保存 AI 配置 |
 
 地址应从应用容器可达。同一宿主机的 MCP 不要填 `127.0.0.1`，应填服务器内网 IP 或可解析服务地址；两个 MCP 的令牌相互独立。SSH MCP 至少为 v0.2.0 并包含 `ssh_resolve_host`；主机、公钥、私钥和跳板在其 Web 完成。
 
@@ -49,7 +50,7 @@ docker compose exec -T web cat /app/data/bootstrap.token
 
 AI 诊断页点击“验证诊断参数与关联”核验监控主机及 SSH MCP 映射，不执行 SSH 或模型；再执行诊断并查看证据来源 `zabbix_mcp` / `ssh_mcp`。
 
-在 Zabbix 对接 `http://平台IP:8088/zabbix` 和系统设置中的 Webhook Bearer 密钥，参考 [Zabbix 说明](ZABBIX.md)。停止同一 App ID 的旧接收器后启动新的飞书长连接：
+在 Zabbix 对接 `http://平台IP:8088/zabbix` 和系统配置 → 基础设置中的 Webhook Bearer 密钥，参考 [Zabbix 说明](ZABBIX.md)。停止同一 App ID 的旧接收器后启动新的飞书长连接：
 
 ```bash
 docker compose --profile feishu up -d feishu-receiver

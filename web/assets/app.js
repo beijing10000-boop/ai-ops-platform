@@ -78,12 +78,9 @@ const nav = [
   ["overview", "总览", "▦", "overview.read"],
   ["alerts", "告警中心", "◴", "reports.read"],
   ["diagnostics", "AI 诊断", "✧", "diagnostics.run"],
-  ["tools", "诊断工具", "⌘", "tools.read"],
-  ["connections", "连接管理", "⇄", "settings.manage"],
+  ["connections", "连接管理", "⇄", "tools.read"],
   ["history", "分析历史", "◷", "reports.read"],
-  ["feishu", "飞书管理", "◇", "settings.manage"],
-  ["ai", "AI 配置", "◎", "settings.manage"],
-  ["settings", "系统设置", "⚙", "settings.manage"],
+  ["settings", "系统配置", "⚙", "settings.manage"],
   ["audit", "审计日志", "≡", "audit.read"],
 ];
 const can = (p) =>
@@ -120,8 +117,8 @@ function pagination(prefix, key) {
 }
 const intro = (text, actions = "") =>
   `<div class="page-intro"><p class="muted small">${text}</p><div class="actions">${actions}</div></div>`;
-const panel = (title, body, note = "") =>
-  `<section class="panel"><div class="section-heading"><div><h2>${title}</h2>${note ? `<p class="muted small">${note}</p>` : ""}</div></div>${body}</section>`;
+const panel = (title, body, note = "", id = "") =>
+  `<section class="panel" ${id ? `id="${E(id)}"` : ""}><div class="section-heading"><div><h2>${title}</h2>${note ? `<p class="muted small">${note}</p>` : ""}</div></div>${body}</section>`;
 const table = (heads, rows) =>
   `<div class="table-wrap"><table><thead><tr>${heads.map((x) => `<th>${x}</th>`).join("")}</tr></thead><tbody>${rows || `<tr><td colspan="${heads.length}" class="empty">暂无记录</td></tr>`}</tbody></table></div>`;
 function toast(message) {
@@ -271,16 +268,15 @@ async function diagnostics() {
     )
   );
 }
-async function tools() {
+async function diagnosticTools() {
   const data = await api(P + "/tools");
-  state.toolData = data;
-  return (
+  return panel(
+    "诊断工具",
     intro(
-      "平台固定白名单独立生效；远端自称只读或动态发现都不能扩大授权。",
+      "检测使用已保存的 MCP 连接。平台固定白名单独立生效；远端自称只读或动态发现都不能扩大授权。",
       can("settings.manage") ? btn("discover", "检测 MCP 工具") : "",
     ) +
-    panel(
-      "工具注册表",
+      "<h3>工具注册表</h3>" +
       table(
         ["工具 / 提供方", "适用设备", "风险 / 超时", "状态", "说明"],
         data.tools
@@ -289,10 +285,8 @@ async function tools() {
               `<tr><td><span class="mono">${E(t.name)}</span><small>${E(t.provider)} · ${E(t.required_scope)}</small></td><td>${E(t.device_types.map((x) => labels[x] || x).join(" / "))}</td><td>${E(t.risk)} · ${t.timeout}s<small>输出 ≤ ${fmt(t.max_output_chars)} 字符</small></td><td>${badge(t.enabled ? "已启用" : "已禁用")}</td><td>${E(t.description)}</td></tr>`,
           )
           .join(""),
-      ),
-    ) +
-    panel(
-      "标准诊断流程",
+      ) +
+      "<h3 class=\"subsection-heading\">标准诊断流程</h3>" +
       table(
         ["问题类型", "监控数据", "固定动作", "诊断边界"],
         Object.entries(data.playbooks)
@@ -302,19 +296,23 @@ async function tools() {
           )
           .join(""),
       ),
-    )
+    "查看两个 MCP 的授权工具与各类问题的诊断边界。",
+    "connection-tools",
   );
 }
 async function connections() {
+  const tools = can("tools.read") ? await diagnosticTools() : "";
+  if (!can("settings.manage"))
+    return intro("当前角色可查看诊断工具和标准流程；连接参数由管理员配置。") + tools;
   const values = await api("/api/v1/settings");
   const groups = [
     ["zabbix_mcp", "Zabbix MCP", "监控指标、历史趋势和告警事实。", [["mcp_url", "Zabbix MCP 地址", "text"], ["mcp_token", "Zabbix MCP 令牌", "password"]]],
     ["ssh_mcp", "SSH MCP", "Linux 实时诊断；主机及 SSH 密钥在独立服务维护。", [["ssh_mcp_enabled", "启用 SSH MCP", "select", [["false", "关闭"], ["true", "开启"]]], ["ssh_mcp_url", "SSH MCP 地址", "text"], ["ssh_mcp_token", "SSH MCP 专用令牌", "password"], ["ssh_mcp_timeout_seconds", "单工具超时（秒）", "number"]]],
   ];
-  return intro("分别配置两个 Streamable HTTP MCP。令牌加密保存且不回显原文；HTTP 地址仅用于受信任内网。验证连接检查当前表单，无需先保存。") + groups.map(([provider, title, note, fields]) => panel(title,
-    `<form id="${provider}-form" class="connection-form" data-provider="${provider}"><div class="form-grid">${fields.map(([key, label, type, options]) => field(key, label, values[key] || "", type === "select" ? "text" : type, key.includes("url") ? "例如 http://服务所在服务器:端口/mcp；请填写容器可访问的地址。" : "", options || null)).join("")}</div><div class="form-actions">${btn("validate-connection", "验证填写内容", provider)}${btn("verify-mcp", "验证连接", provider)}<button class="button primary" type="submit">保存连接</button></div><p class="muted small" role="status" data-verify-result></p></form>`, note)).join("");
+  return intro("分别配置两个 Streamable HTTP MCP。令牌加密保存且不回显原文；HTTP 地址仅用于受信任内网。验证连接检查当前表单，无需先保存。", btn("scroll-section", "查看诊断工具 ↓", "connection-tools")) + groups.map(([provider, title, note, fields]) => panel(title,
+    `<form id="${provider}-form" class="connection-form" data-provider="${provider}"><div class="form-grid">${fields.map(([key, label, type, options]) => field(key, label, values[key] || "", type === "select" ? "text" : type, key.includes("url") ? "例如 http://服务所在服务器:端口/mcp；请填写容器可访问的地址。" : "", options || null)).join("")}</div><div class="form-actions">${btn("validate-connection", "验证填写内容", provider)}${btn("verify-mcp", "验证连接", provider)}<button class="button primary" type="submit">保存连接</button></div><p class="muted small" role="status" data-verify-result></p></form>`, note)).join("") + tools;
 }
-async function history() {
+async function analysisHistory() {
   const [data, usage] = await Promise.all([
     paged(P + "/tasks", "taskPage", 25, { status: state.taskStatus }),
     api("/api/v1/ai-token-usage?days=30&limit=20"),
@@ -474,7 +472,7 @@ function formValues(form) {
     data.event_id = data.event_id || null; data.service = data.service || null;
     data.time_window = Number(data.time_window);
   }
-  if (form.id === "settings-form") {
+  if (form.classList.contains("settings-form")) {
     if (form.dataset.group === "ai") {
       const budgets = {};
       for (const [key, value] of Object.entries(data)) if (key.startsWith("budget_")) {
@@ -492,7 +490,7 @@ function formValues(form) {
   return data;
 }
 async function verifyAction(action, id, button) {
-  const form = button.closest("form") || $("#settings-form");
+  const form = button.closest("form");
   const result = form?.querySelector("[data-verify-result]");
   const show = message => { if (result) result.textContent = message; else toast(message); };
   const request = async (path, body) => {
@@ -517,43 +515,48 @@ async function verifyAction(action, id, button) {
   return true;
 }
 
-async function configPage(page) {
+function configSection(group, values, options) {
+  const titles = { settings: "基础设置", feishu: "飞书应用与告警策略", ai: "AI 模型与分析策略" };
+  const hints = {
+    settings: "配置访问地址、告警认证和 Zabbix 只读工具权限。敏感字段保留掩码表示不修改。",
+    feishu: "告警与问答沿用同一飞书应用。更换应用或访问地址后，请同时核对飞书回调地址和机器人权限。更换应用凭据后需重启飞书接收器。",
+    ai: "配置模型、默认提示词与分析预算。单次请求的实际 Token 用量在上游响应后才可确认。验证模型连接会产生少量实际用量。",
+  };
+  const actions = group === "ai"
+    ? btn("test-model", "验证模型连接") + btn("reset-prompts", "恢复默认提示词")
+    : group === "feishu"
+      ? btn("verify-feishu", "验证飞书应用") + btn("verify-feishu-groups", "验证群访问权限")
+      : "";
+  const fields = configGroups[group].filter(x => can("*") || x[0] !== "feishu_admin_open_ids");
+  return panel(
+    titles[group],
+    `<form id="${group}-settings-form" class="settings-form" data-group="${group}"><div class="form-grid">${fields.map(([key, label, type, choices]) => field(key, label, values[key] || "", type === "select" ? "text" : type || "text", key.includes("prompt") ? "已提供项目默认提示词；可编辑。留空后使用默认值。平台只读与证据规则始终生效。" : (configHelp[key] || ""), choices || null, type === "textarea")).join("")}</div>${group === "ai" ? budgetFields(values, options) : ""}${group === "settings" && can("*") ? toolFields(values, options) : ""}<div class="form-actions">${btn("validate-settings", "验证填写内容")}${actions}<button class="button primary" type="submit">保存${group === "settings" ? "基础" : group === "feishu" ? "飞书" : "AI"}配置</button></div><p class="muted small" role="status" data-verify-result></p></form>`,
+    hints[group],
+    "settings-" + (group === "settings" ? "general" : group),
+  );
+}
+async function systemSettings() {
   const [values, options] = await Promise.all([api("/api/v1/settings"), api("/api/v1/settings/options")]);
   state.options = options;
-  let fields = configGroups[page].filter(
-    (x) =>
-      can("*") || !["feishu_admin_open_ids", "disabled_tools"].includes(x[0]),
-  );
-  const hints = {
-    ai: "预算可配置轮次、实际采集调用数、每轮调用数、输出字符、总时间和 Token 阈值。单次请求的实际 Token 用量在上游响应后才可确认。",
-    feishu:
-      "告警与问答沿用同一飞书应用。更换应用或访问地址后，请同时核对飞书回调地址和机器人权限。",
-    settings:
-      "敏感字段保留掩码表示不修改；凭据保存在同一加密数据库。主密钥和数据库必须一起备份。",
-  };
-  let extra = "";
-  if (page === "feishu" && can("*")) {
+  let feishuExtra = "";
+  if (can("*")) {
     const members = await api(P + "/members");
     state.members = members;
-    extra = `<div class="panel"><div class="section-heading"><div><h2>授权成员</h2><p class="muted small">超级管理员通过上方名单管理；其他角色由后端授权。</p></div>${btn("new-member", "添加成员")}</div>${table(["Open ID", "角色", "状态", "操作"], members.map((m) => `<tr><td class="mono">${E(m.open_id)}</td><td>${E(labels[m.role])}</td><td>${badge(m.enabled ? "已启用" : "已停用")}</td><td>${btn("edit-member", "编辑", m.open_id, "small")}</td></tr>`).join(""))}</div>`;
+    feishuExtra = `<div class="panel"><div class="section-heading"><div><h2>授权成员</h2><p class="muted small">超级管理员通过上方名单管理；其他角色由后端授权。</p></div>${btn("new-member", "添加成员")}</div>${table(["Open ID", "角色", "状态", "操作"], members.map((m) => `<tr><td class="mono">${E(m.open_id)}</td><td>${E(labels[m.role])}</td><td>${badge(m.enabled ? "已启用" : "已停用")}</td><td>${btn("edit-member", "编辑", m.open_id, "small")}</td></tr>`).join(""))}</div>`;
   }
-  if (page === "feishu" && can("alerts.manage")) extra += await mutesPanel();
-  if (page === "settings")
-    extra += panel(
-      "备份与升级",
-      `<p class="muted small">升级前停止本项目 Worker，使用离线迁移工具备份 SQLite 和持久化主密钥。数据库与配对主密钥需一起备份；升级步骤见仓库 docs/UPGRADING.md。</p>${btn("runtime-status", "查看服务与队列状态")}<pre id="runtime-result"></pre>`,
-    );
+  if (can("alerts.manage")) feishuExtra += await mutesPanel();
   return (
-    intro(hints[page], page === "ai" ? btn("test-model", "验证模型连接") + btn("reset-prompts", "恢复默认提示词") : page === "feishu" ? btn("verify-feishu", "验证飞书应用") + btn("verify-feishu-groups", "验证群访问权限") : "") +
+    intro("基础设置、飞书与 AI 配置集中管理。每个区域独立验证和保存；区域跳转会保留当前填写内容。") +
+    `<div class="toolbar" aria-label="系统配置分区">${btn("scroll-section", "基础设置", "settings-general")}${btn("scroll-section", "飞书配置", "settings-feishu")}${btn("scroll-section", "AI 配置", "settings-ai")}${btn("scroll-section", "备份与升级", "settings-maintenance")}</div>` +
+    configSection("settings", values, options) +
+    configSection("feishu", values, options) + feishuExtra +
+    configSection("ai", values, options) +
     panel(
-      page === "ai"
-        ? "AI 模型与分析策略"
-        : page === "feishu"
-          ? "飞书应用与告警策略"
-          : "系统设置",
-      `<form id="settings-form" data-group="${page}"><div class="form-grid">${fields.map(([key, label, type, options]) => field(key, label, values[key] || "", type === "select" ? "text" : type || "text", key.includes("prompt") ? "已提供项目默认提示词；可编辑。留空后使用默认值。平台只读与证据规则始终生效。" : (configHelp[key] || ""), options || null, type === "textarea")).join("")}</div>${page === "ai" ? budgetFields(values, options) : ""}${page === "settings" && can("*") ? toolFields(values, options) : ""}<div class="form-actions">${btn("validate-settings", "验证填写内容")}<button class="button primary" type="submit">保存配置</button></div><p class="muted small" role="status" data-verify-result></p></form>`,
-    ) +
-    extra
+      "备份与升级",
+      `<p class="muted small">凭据保存在加密数据库中。升级前停止本项目 Worker，备份 SQLite 和持久化主密钥。数据库与配对主密钥需一起备份；升级步骤见仓库 docs/UPGRADING.md。</p>${btn("runtime-status", "查看服务与队列状态")}<pre id="runtime-result"></pre>`,
+      "",
+      "settings-maintenance",
+    )
   );
 }
 async function auditPage() {
@@ -583,6 +586,12 @@ async function navigate() {
   clearTimeout(poll);
   const current = ++generation;
   const parts = (location.hash.slice(1) || "overview").split("/");
+  // Keep existing bookmarks useful after consolidating the navigation.
+  if (["ai", "feishu", "tools"].includes(parts[0])) {
+    const oldPage = parts[0];
+    parts.splice(0, parts.length, oldPage === "tools" ? "connections" : "settings", oldPage);
+    window.history.replaceState(null, "", "#" + parts.join("/"));
+  }
   const page = parts[0];
   const item = nav.find((x) => x[0] === page);
   $("#page-title").textContent =
@@ -602,15 +611,16 @@ async function navigate() {
     if (page === "overview") html = await overview();
     else if (page === "alerts") html = await alerts();
     else if (page === "diagnostics") html = await diagnostics();
-    else if (page === "tools") html = await tools();
     else if (page === "connections") html = await connections();
-    else if (page === "history") html = await history();
+    else if (page === "history") html = await analysisHistory();
     else if (page === "report") html = await report(parts[1] || "");
-    else if (configGroups[page]) html = await configPage(page);
+    else if (page === "settings") html = await systemSettings();
     else if (page === "audit") html = await auditPage();
     else html = await overview();
     if (current !== generation) return;
     $("#content").innerHTML = html;
+    const section = page === "settings" ? "settings-" + parts[1] : page === "connections" && parts[1] === "tools" ? "connection-tools" : "";
+    if (section) document.getElementById(section)?.scrollIntoView({ block: "start" });
     if (
       (page === "report" && ["running", "queued"].includes(state.currentTask?.status))
     )
@@ -658,6 +668,7 @@ document.addEventListener("click", async (event) => {
   try {
     if (await verifyAction(action, id, b)) return;
     if (action === "refresh") await navigate();
+    else if (action === "scroll-section") document.getElementById(id)?.scrollIntoView({ block: "start" });
     else if (action === "go-history") go("history");
     else if (action === "report") go("report/" + id);
     else if (action === "unmute") {
@@ -730,13 +741,12 @@ document.addEventListener("submit", async (event) => {
   if (
     ![
       "editor-form",
-      "settings-form",
       "diagnostic-form",
       "ask-form",
       "mute-form",
       "zabbix_mcp-form",
       "ssh_mcp-form",
-    ].includes(form.id)
+    ].includes(form.id) && !form.classList.contains("settings-form")
   )
     return;
   event.preventDefault();
@@ -753,7 +763,7 @@ document.addEventListener("submit", async (event) => {
       await api("/api/v1/alert-mutes", "POST", data);
       toast("已设置本平台飞书告警屏蔽");
       await navigate();
-    } else if (form.id === "settings-form" || form.classList.contains("connection-form")) {
+    } else if (form.classList.contains("settings-form") || form.classList.contains("connection-form")) {
       await api("/api/v1/settings", "PUT", { values: data });
       toast("配置已保存");
     } else if (form.id === "ask-form") {

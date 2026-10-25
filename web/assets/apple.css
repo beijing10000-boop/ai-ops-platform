@@ -563,7 +563,14 @@ input[type="checkbox"] {
   justify-content: flex-end;
   align-items: center;
   gap: 15px;
+  flex-wrap: wrap;
   margin-top: 22px;
+}
+.panel[id] {
+  scroll-margin-top: 120px;
+}
+.subsection-heading {
+  margin-top: 28px;
 }
 .notice {
   padding: 13px 16px;

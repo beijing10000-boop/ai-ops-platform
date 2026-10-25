@@ -19,27 +19,12 @@
     },
     {
       "width": 1280,
-      "page": "tools",
-      "ok": true
-    },
-    {
-      "width": 1280,
       "page": "connections",
       "ok": true
     },
     {
       "width": 1280,
       "page": "history",
-      "ok": true
-    },
-    {
-      "width": 1280,
-      "page": "feishu",
-      "ok": true
-    },
-    {
-      "width": 1280,
-      "page": "ai",
       "ok": true
     },
     {
@@ -69,27 +54,12 @@
     },
     {
       "width": 1440,
-      "page": "tools",
-      "ok": true
-    },
-    {
-      "width": 1440,
       "page": "connections",
       "ok": true
     },
     {
       "width": 1440,
       "page": "history",
-      "ok": true
-    },
-    {
-      "width": 1440,
-      "page": "feishu",
-      "ok": true
-    },
-    {
-      "width": 1440,
-      "page": "ai",
       "ok": true
     },
     {
@@ -119,27 +89,12 @@
     },
     {
       "width": 1920,
-      "page": "tools",
-      "ok": true
-    },
-    {
-      "width": 1920,
       "page": "connections",
       "ok": true
     },
     {
       "width": 1920,
       "page": "history",
-      "ok": true
-    },
-    {
-      "width": 1920,
-      "page": "feishu",
-      "ok": true
-    },
-    {
-      "width": 1920,
-      "page": "ai",
       "ok": true
     },
     {
@@ -161,7 +116,11 @@
       "ok": true
     },
     {
-      "workflow": "budget number inputs + tool checkboxes + default prompt restore",
+      "workflow": "diagnostic tools and saved MCP detection in connections",
+      "ok": true
+    },
+    {
+      "workflow": "unified configuration + section jumps retain drafts + independent save/validation + budget/tool inputs + prompt restore",
       "ok": true
     },
     {
@@ -181,7 +140,23 @@
       "ok": true
     },
     {
+      "workflow": "legacy configuration/tools bookmarks redirect to merged sections",
+      "ok": true
+    },
+    {
       "workflow": "report, evidence, theme toggle",
+      "ok": true
+    },
+    {
+      "workflow": "operator retains scoped access after consolidation",
+      "ok": true
+    },
+    {
+      "workflow": "auditor retains scoped access after consolidation",
+      "ok": true
+    },
+    {
+      "workflow": "ops_admin retains scoped access after consolidation",
       "ok": true
     }
   ],
