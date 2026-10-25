@@ -140,8 +140,8 @@ def test_readable_ai_json_report_keeps_worker_original_payload():
     }
     raw = json.dumps(info, ensure_ascii=False)
     human = readable_report_answer(raw)
-    assert "故障原因（AI 推断）\\n原因尚未确定" in human
-    assert "处理建议\\n先检查 Zabbix agent" in human
+    assert "故障原因（AI 推断）\n原因尚未确定" in human
+    assert "处理建议\n先检查 Zabbix agent" in human
     assert "分析与依据" in human
     assert "需人工核验：是" in human
     assert readable_report_answer("纯文本结论") == "纯文本结论"
