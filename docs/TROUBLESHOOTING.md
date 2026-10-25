@@ -13,7 +13,7 @@
 | 飞书登录失败 | 外部主机/协议与开放平台OAuth回调一致；管理员Open ID属于该应用并获授权 |
 | 配置变更后验证状态消失 | 重新验证已保存连接，旧配置检测结果不能代表新地址/令牌 |
 | 修改飞书应用后长连接未切换 | `docker compose --profile feishu restart feishu-receiver` |
-| 任务一直排队 | 系统设置查看服务与队列状态，确认diagnostic-worker/Redis健康 |
+| 任务一直排队 | 系统配置 → 备份与升级中查看服务与队列状态，确认diagnostic-worker/Redis健康 |
 | 配置无法解密 | 保留旧APP_ENCRYPTION_KEY或原master.key，与对应数据库成对恢复 |
 
 查看日志：`docker compose logs --tail=100 web alert-worker qa-worker diagnostic-worker`。日志/工具采集失败代表证据不足，不能推断主机正常或故障根因。
