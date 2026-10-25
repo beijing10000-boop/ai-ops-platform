@@ -312,6 +312,14 @@ try:
         checks.append(
             {"workflow": "member create/edit/disable persistence", "ok": True}
         )
+        # Mute management belongs to the alert center, not settings or sidebar.
+        assert page.locator('nav [data-page="mutes"]').count() == 0
+        assert page.locator("#mute-form").count() == 0
+        page.locator('nav [data-page="alerts"]').click()
+        page.get_by_role("button", name="暂时屏蔽").click()
+        page.wait_for_url(base + "/#alerts/mutes")
+        page.locator("#mute-form").wait_for()
+        assert page.get_by_role("heading", name="当前生效的飞书告警屏蔽", exact=False).count() == 1
         page.locator('#mute-form input[name="host_id"]').fill("991")
         page.locator('#mute-form input[name="trigger_id"]').fill("992")
         page.locator('#mute-form button[type="submit"]').click()
@@ -320,7 +328,15 @@ try:
         page.locator('[data-action="unmute"][data-id="991:992"]').wait_for(
             state="detached"
         )
-        checks.append({"workflow": "Web mute create + early unmute", "ok": True})
+        page.get_by_role("button", name="告警记录").click()
+        page.wait_for_url(base + "/#alerts")
+        page.get_by_role("heading", name="告警事件").wait_for()
+        page.goto(base + "/#mutes")
+        page.wait_for_url(base + "/#alerts/mutes")
+        page.locator("#mute-form").wait_for()
+        checks.append(
+            {"workflow": "alert center tabs + Web mute create/unmute + legacy link", "ok": True}
+        )
         page.locator('[data-page="history"]').click()
         page.locator('[data-action="task-next"]').click()
         page.locator(".pagination").get_by_text("第 2 页 / 2 页").wait_for()
