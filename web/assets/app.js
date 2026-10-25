@@ -337,6 +337,28 @@ async function analysisHistory() {
     )
   );
 }
+function readableReportAnswer(raw) {
+  const text = String(raw ?? "").trim();
+  const fence = String.fromCharCode(96, 96, 96);
+  let candidate = text;
+  if (text.startsWith(fence)) {
+    candidate = text.slice(3).replace(/^json\s*/i, "").trim();
+    if (candidate.endsWith(fence)) candidate = candidate.slice(0, -3).trim();
+  }
+  let value;
+  try { value = JSON.parse(candidate); } catch { return text; }
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      !["cause", "action", "analysis"].some(k => typeof value[k] === "string")) return text;
+  const fields = [
+    ["故障原因（AI 推断）", "cause"],
+    ["处理建议", "action"],
+    ["分析与依据", "analysis"],
+  ];
+  const lines = fields.filter(([, k]) => typeof value[k] === "string" && value[k].trim())
+    .map(([label, k]) => label + "\n" + value[k].trim());
+  if (value.human_required === true) lines.push("需人工核验：是");
+  return lines.join("\n\n");
+}
 async function report(id) {
   const t = await api(
     P +
@@ -365,7 +387,7 @@ async function report(id) {
     ) +
     panel(
       "AI 诊断结论 · 分析推断",
-      `<div class="notice">监控和 SSH 事实在下方按来源记录。AI 总结需结合时间窗口与原始证据核验。</div><div class="report-answer">${E(t.report?.answer || t.report?.message || (["queued", "running"].includes(t.status) ? "任务正在进行，页面会自动更新。" : JSON.stringify(t.report || {})))}</div>`,
+      `<div class="notice">监控和 SSH 事实在下方按来源记录。AI 总结需结合时间窗口与原始证据核验。</div><div class="report-answer">${E(readableReportAnswer(t.report?.answer || t.report?.message || (["queued", "running"].includes(t.status) ? "任务正在进行，页面会自动更新。" : JSON.stringify(t.report || {}))))}</div>`,
     ) +
     (t.report?.limitations?.length
       ? panel(
