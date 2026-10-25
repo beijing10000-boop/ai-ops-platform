@@ -123,8 +123,14 @@ def test_strict_mcp_schema_unsupported_scoping_fails_closed():
     with pytest.raises(zabbix.ToolSchemaMismatch, match="hostids"):
         zabbix.adapt_read_args(
             "host_get", checked,
-            {"type": "object", "properties": {"output": {"type": "string"}},
-             "additionalProperties": False},
+            {
+                "type": "object",
+                "properties": {
+                    "output": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "additionalProperties": False,
+            },
         )
 
 
