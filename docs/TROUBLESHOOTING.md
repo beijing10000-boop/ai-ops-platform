@@ -13,7 +13,11 @@
 | 飞书登录失败 | 外部主机/协议与开放平台OAuth回调一致；管理员Open ID属于该应用并获授权 |
 | 配置变更后验证状态消失 | 重新验证已保存连接，旧配置检测结果不能代表新地址/令牌 |
 | 修改飞书应用后长连接未切换 | `docker compose --profile feishu restart feishu-receiver` |
-| 任务一直排队 | 系统配置 → 备份与升级中查看服务与队列状态，确认diagnostic-worker/Redis健康 |
+| 任务一直排队 | 系统配置 → 服务与维护中查看队列长度与 Worker 注册数量，确认对应 worker 和 Redis 健康；注册记录不等同于业务执行成功 |
+| 提交提示队列不可用 | 失败任务已记录，页面可查看原因；修复 Redis/worker 后在报告页重试，不要反复提交相同告警 |
+| 报告显示执行进程中断 | 超过 10 分钟未结束的执行任务会标记 WorkerLost；查看对应 worker 日志，恢复服务后重试 |
+| 更改模式后诊断仍只查监控 | 核对任务使用的模式、Zabbix 主机类型与 SSH 关联；标准/深度需要可信 Linux 目标，快速模式始终只查监控 |
+| 报告为部分完成 | 查看“诊断不足与待核验”和逐项证据；采集失败、超时或预算耗尽不表示主机正常，也不等同于根因已证实 |
 | 配置无法解密 | 保留旧APP_ENCRYPTION_KEY或原master.key，与对应数据库成对恢复 |
 
 查看日志：`docker compose logs --tail=100 web alert-worker qa-worker diagnostic-worker`。日志/工具采集失败代表证据不足，不能推断主机正常或故障根因。

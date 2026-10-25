@@ -1,6 +1,6 @@
 # AI Ops Platform · AI 智能运维平台
 
-**v0.7.2** · 默认 Web 端口 **8088**。平台负责 Zabbix 告警、飞书协作、AI 分析与报告，通过两个独立的 Streamable HTTP MCP 服务获取证据。
+**v0.8.0** · 默认 Web 端口 **8088**。平台负责 Zabbix 告警、飞书协作、AI 分析与报告，通过两个独立的 Streamable HTTP MCP 服务获取证据。
 
 | 服务 | 职责 |
 | --- | --- |
@@ -15,14 +15,16 @@
 ## Web 管理
 
 - 连接管理集中配置两个 MCP、分别验证连接，并查看诊断工具与标准流程；令牌加密保存。
-- 系统配置合并基础设置、飞书与 AI，每个区域独立验证和保存，支持页内快速跳转。
+- 系统配置按基础设置、飞书配置、AI 配置、服务与维护分页签展示，各自验证和保存；切换分区与更新成员保留草稿，离开前提示未保存修改。
 - AI 模型、飞书、群、成员、Webhook、提示词均使用输入框或选项；分析预算使用数字输入表，工具权限使用勾选框。
 - 提供符合 Zabbix + 飞书 + 独立 SSH MCP 场景的中文告警与问答默认提示词，支持编辑、校验和恢复默认。
 - 初始化、配置、Host ID 关联、诊断参数、成员与屏蔽规则具有验证入口；验证不等同于生产联调。
 - 不维护本地主机资产：AI 诊断页直接查询、选择 Zabbix 主机，再按 Host ID 关联独立 SSH MCP。
+- 告警中心支持分页、关键词、级别和恢复状态筛选，关联最近分析；暂时屏蔽集中在告警中心，显示生效与到期记录。
+- 报告支持中文进度、自动刷新、可读结论、复制和下载；分析历史可搜索任务、事件与 Trace ID。服务检查显示各队列及 Worker 注册数量。
 - 保留分级告警、恢复关联、卡片 AI 分析、追问上下文、任务取消/重试、角色与审计、加密证据和桌面深浅色主题。
 
-先查 Zabbix 历史，证据不足时才由固定剧本调用独立 SSH MCP。目标通过可信任务的 **Zabbix Host ID** 精确解析，固定远端主机 ID 和版本；映射失败或配置变化时停止补查，不按 IP/名称猜测，不切换到本地 SSH。快速模式只查监控，非 Linux 不使用 Linux 诊断。
+标准与深度模式对已核验并精确关联的 Linux 主机，按固定剧本自动采集一轮 SSH 实时证据，再结合 Zabbix 历史进行分析；后续补查受授权和预算限制。目标通过可信任务的 **Zabbix Host ID** 精确解析，固定远端主机 ID 和版本；映射失败或配置变化时停止补查，不按 IP/名称猜测，不切换到本地 SSH。快速模式只查监控，非 Linux 不使用 Linux 诊断。
 
 ## 安装
 
@@ -59,6 +61,7 @@ docker compose --profile feishu up -d feishu-receiver
 | [Zabbix](docs/ZABBIX.md) / [飞书](docs/FEISHU.md) | 告警、恢复、群与卡片 |
 | [安全](SECURITY.md) / [排障](docs/TROUBLESHOOTING.md) | 权限、密钥和常见问题 |
 | [验证范围](docs/TEST-REPORT.md) / [真实验收](docs/ACCEPTANCE.md) | 自动回归与生产联调边界 |
+| [v0.8 产品优化](docs/PRODUCT-REVIEW.md) | 运维流程、界面交互与可靠性改进 |
 
 开发验证：`python -m pip install -r requirements-dev.txt`，`python -m pytest -q`，`python -m ruff check --select F401,F811,F821,F841 app tests`，`python -m ruff format --check app tests`，`node --check web/assets/app.js`。浏览器回归使用 `python tests/browser_smoke.py`；临时 Redis 由测试自行启动，未安装 Redis 的相关测试会跳过。
 

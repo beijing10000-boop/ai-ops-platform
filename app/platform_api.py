@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 from .platform_db import row_dict, archived_asset
@@ -52,6 +53,9 @@ def overview(who=Depends(require("overview.read"))):
         )
     ai_finished = sum(ai_counts.get(k, 0) for k in ("success", "partial", "failed"))
     finished = sum(counts.get(k, 0) for k in ("success", "partial", "failed"))
+    from .main import settings_snapshot
+
+    configured = settings_snapshot()
     return {
         "scope": "平台已接收的告警；任务与用量为最近 24 小时",
         "unrecovered_received_events": active,
@@ -71,14 +75,48 @@ def overview(who=Depends(require("overview.read"))):
         "token_total_24h": tokens[0],
         "usage_available_runs_24h": tokens[1],
         "average_duration_ms_24h": tokens[2],
-        "mcp_configured": bool(read_setting("mcp_url")),
+        "mcp_configured": bool(configured.get("mcp_url")),
         "ssh_mcp_configured": bool(
-            read_setting("ssh_mcp_url")
-            and read_setting("ssh_mcp_token")
-            and read_setting("ssh_mcp_enabled") == "true"
+            configured.get("ssh_mcp_url")
+            and configured.get("ssh_mcp_token")
+            and configured.get("ssh_mcp_enabled") == "true"
         ),
         "health": health,
+        "running": counts.get("running", 0),
+        "queued": counts.get("queued", 0),
+        "readiness": {
+            "model": all(
+                configured.get(k)
+                for k in ("openai_base_url", "openai_model", "openai_api_key")
+            ),
+            "zabbix_mcp": bool(configured.get("mcp_url")),
+            "ssh_mcp": configured.get("ssh_mcp_enabled") == "true"
+            and all(configured.get(k) for k in ("ssh_mcp_url", "ssh_mcp_token")),
+            "feishu": all(
+                configured.get(k) for k in ("lark_app_id", "lark_app_secret")
+            ),
+            "webhook": bool(configured.get("zabbix_webhook_secret")),
+        },
     }
+
+
+@router.get("/alerts")
+def alerts_page(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
+    status: Literal["all", "active", "recovered"] = "all",
+    severity: int | None = Query(None, ge=0, le=5),
+    q: str = Query("", max_length=160),
+    who=Depends(require("reports.read")),
+):
+    from .operations import alert_page
+
+    return alert_page(page, page_size, status, severity, q)
+
+
+@router.get("/diagnostic-options")
+def diagnostic_options(who=Depends(require("diagnostics.run"))):
+    return {"default_profile": read_setting("ai_analysis_profile") or "standard"}
 
 
 class TaskInput(BaseModel):
@@ -86,7 +124,7 @@ class TaskInput(BaseModel):
     zabbix_hostid: str | None = Field(default=None, pattern=r"^[0-9]{1,32}$")
     event_id: str | None = Field(default=None, pattern=r"^[0-9]{1,32}$")
     diagnostic_type: str = "auto"
-    profile: str = "standard"
+    profile: str | None = None
     question: str = Field(default="请根据实际证据诊断故障并给出建议", max_length=3000)
     service: str | None = Field(default=None, max_length=64)
     time_window: int = Field(default=30, ge=1, le=120)
@@ -117,6 +155,7 @@ async def hosts(
 
 
 async def validate_task(body):
+    body.profile = body.profile or read_setting("ai_analysis_profile") or "standard"
     if body.diagnostic_type not in set(PLAYBOOKS) | {"auto"} or body.profile not in {
         "quick",
         "standard",
@@ -125,6 +164,8 @@ async def validate_task(body):
         raise HTTPException(422, "诊断类型或模式无效")
     if body.service and not SERVICE.fullmatch(body.service):
         raise HTTPException(422, "服务名称无效")
+    if not body.question.strip():
+        raise HTTPException(422, "请输入诊断问题")
     event = {}
     if body.event_id:
         with connection() as db:
@@ -201,7 +242,7 @@ async def submit(body: TaskInput, who=Depends(require("diagnostics.run"))):
         profile=body.profile,
     )
     if created:
-        write(lambda: tasks.enqueue(task["task_id"]))
+        enqueue_task(task["task_id"])
     audit(who["open_id"], "analysis_submitted", task["task_id"], task["trace_id"])
     return {
         "task_id": task["task_id"],
@@ -214,10 +255,34 @@ async def submit(body: TaskInput, who=Depends(require("diagnostics.run"))):
 def task_page(
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
-    status: str = "all",
+    status: Literal[
+        "all", "queued", "running", "success", "partial", "failed", "cancelled"
+    ] = "all",
+    q: str = Query("", max_length=160),
     who=Depends(require("reports.read")),
 ):
-    return tasks.page(page, page_size, status)
+    return tasks.page(page, page_size, status, q)
+
+
+@router.get("/tasks/{task_id}/status")
+def task_status(task_id: str, who=Depends(require("reports.read"))):
+    result = tasks.progress(task_id)
+    if not result:
+        raise HTTPException(404, "任务不存在")
+    return result
+
+
+def enqueue_task(task_id):
+    try:
+        tasks.enqueue(task_id)
+    except tasks.QueueUnavailable:
+        raise HTTPException(
+            503,
+            {
+                "message": "诊断队列不可用，任务已记录为失败。请在系统配置检查服务状态后重试。",
+                "task_id": task_id,
+            },
+        ) from None
 
 
 @router.get("/tasks/{task_id}")
@@ -284,7 +349,7 @@ def retry_task(task_id: str, who=Depends(require("diagnostics.run"))):
         profile=old["profile"],
     )
     if created:
-        write(lambda: tasks.enqueue(task["task_id"]))
+        enqueue_task(task["task_id"])
     audit(who["open_id"], "task_retried", task_id)
     return {"task_id": task["task_id"], "duplicate": not created}
 
@@ -402,7 +467,7 @@ async def discover(
         )
         detail = detail[:250]
     keys = (
-        ("mcp_url", "mcp_token")
+        ("mcp_url", "mcp_token", "disabled_tools")
         if provider == "zabbix_mcp"
         else (
             "ssh_mcp_url",
