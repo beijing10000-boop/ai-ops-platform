@@ -838,3 +838,36 @@ code {
 
 .budget-input { min-width: 78px; width: 100%; }
 [data-verify-result]:not(:empty) { padding: 12px; background: var(--fill); border-radius: 10px; overflow-wrap: anywhere; }
+
+/* 告警中心内切换：告警记录 / 暂时屏蔽 */
+.alert-tabs {
+  display: flex;
+  gap: 4px;
+  width: fit-content;
+  margin: 0 0 22px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--fill);
+}
+.alert-tab {
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  padding: 8px 19px;
+  color: var(--muted);
+  font-weight: 600;
+  transition: background 160ms ease, color 160ms ease;
+}
+.alert-tab:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+.alert-tab.active {
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 2px 7px #0000000d;
+}
+.alert-tab:focus-visible {
+  outline: 3px solid #007aff66;
+}
