@@ -1,10 +1,20 @@
 "use strict";
+function alertTabs(selected) {
+  const events = selected === "events", mutes = selected === "mutes";
+  return '<div class="alert-tabs" role="group" aria-label="告警中心视图">' +
+    '<button type="button" class="alert-tab' + (events ? ' active' : '') +
+    '" data-action="go-alerts" aria-pressed="' + events + '">告警记录</button>' +
+    (can("alerts.manage") ? '<button type="button" class="alert-tab' +
+    (mutes ? ' active' : '') + '" data-action="go-mutes" aria-pressed="' +
+    mutes + '">暂时屏蔽</button>' : '') +
+    '</div>';
+}
 async function mutesPanel() {
   const [rows, expired] = await Promise.all([
     api("/api/v1/alert-mutes?status=active"),
     api("/api/v1/alert-mutes?status=expired"),
   ]);
-  return intro("管理当前平台的飞书告警屏蔽，规则只存储在当前 94 平台，不会自动从旧 93 平台迁入。", btn("refresh", "刷新列表")) +
+  return alertTabs("mutes") + intro("管理当前平台的飞书告警屏蔽，规则只存储在当前 94 平台，不会自动从旧 93 平台迁入。", btn("refresh", "刷新列表")) +
     panel(
     "当前生效的飞书告警屏蔽（" + rows.length + " 条）",
     `<form id="mute-form"><div class="form-grid">${field("host_id", "Zabbix Host ID")}${field("trigger_id", "触发器 ID")}${field(
@@ -91,7 +101,6 @@ const labels = {
 const nav = [
   ["overview", "总览", "▦", "overview.read"],
   ["alerts", "告警中心", "◴", "reports.read"],
-  ["mutes", "屏蔽管理", "◌", "alerts.manage"],
   ["diagnostics", "AI 诊断", "✧", "diagnostics.run"],
   ["connections", "连接管理", "⇄", "tools.read"],
   ["history", "分析历史", "◷", "reports.read"],
@@ -239,9 +248,10 @@ async function overview() {
 async function alerts() {
   const rows = await api("/api/v1/alert-events?kind=problems&limit=100");
   return (
+    alertTabs("events") +
     intro(
       "最近 100 条已接收的问题事件 · 恢复与通知状态保留在事件记录中",
-      btn("refresh", "刷新") + (can("alerts.manage") ? btn("go-mutes", "查看屏蔽列表") : ""),
+      btn("refresh", "刷新"),
     ) +
     panel(
       "告警事件",
@@ -623,6 +633,10 @@ async function navigate() {
   const current = ++generation;
   const parts = (location.hash.slice(1) || "overview").split("/");
   // Keep existing bookmarks useful after consolidating the navigation.
+  if (parts[0] === "mutes") {
+    parts.splice(0, parts.length, "alerts", "mutes");
+    window.history.replaceState(null, "", "#alerts/mutes");
+  }
   if (["ai", "feishu", "tools"].includes(parts[0])) {
     const oldPage = parts[0];
     parts.splice(0, parts.length, oldPage === "tools" ? "connections" : "settings", oldPage);
@@ -645,8 +659,11 @@ async function navigate() {
   try {
     let html;
     if (page === "overview") html = await overview();
-    else if (page === "alerts") html = await alerts();
-    else if (page === "mutes" && can("alerts.manage")) html = await mutesPanel();
+    else if (page === "alerts") {
+      html = parts[1] === "mutes" && can("alerts.manage")
+        ? await mutesPanel()
+        : await alerts();
+    }
     else if (page === "diagnostics") html = await diagnostics();
     else if (page === "connections") html = await connections();
     else if (page === "history") html = await analysisHistory();
@@ -707,7 +724,8 @@ document.addEventListener("click", async (event) => {
     if (action === "refresh") await navigate();
     else if (action === "scroll-section") document.getElementById(id)?.scrollIntoView({ block: "start" });
     else if (action === "go-history") go("history");
-    else if (action === "go-mutes") go("mutes");
+    else if (action === "go-alerts") go("alerts");
+    else if (action === "go-mutes" && can("alerts.manage")) go("alerts/mutes");
     else if (action === "report") go("report/" + id);
     else if (action === "unmute") {
       const [host, trigger] = id.split(":");
