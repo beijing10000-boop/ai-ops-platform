@@ -797,13 +797,26 @@ def create_mute(body: MuteRequest, request: Request):
 
 
 @app.get("/api/v1/alert-mutes", dependencies=[Depends(require_admin)])
-def list_mutes():
+def list_mutes(status: str = "active"):
+    """List local mute rules; default remains active for existing clients."""
     import time
 
+    if status not in {"active", "expired"}:
+        raise HTTPException(422, "屏蔽状态仅支持 active 或 expired")
+    now = int(time.time())
+    # Use parameterized, fixed SQL; only the last 100 expired entries are needed.
+    if status == "active":
+        clause, order, parameters = "expires_at>?", "expires_at ASC", (now,)
+    else:
+        clause, order, parameters = "expires_at<=?", "expires_at DESC", (now,)
     with connection() as db:
         rows = db.execute(
-            "SELECT host_id,trigger_id,created_at,expires_at FROM alert_mutes WHERE expires_at>? ORDER BY expires_at",
-            (int(time.time()),),
+            "SELECT host_id,trigger_id,created_at,expires_at FROM alert_mutes "
+            f"WHERE {clause} ORDER BY {order} LIMIT 1000"
+            if status == "active"
+            else "SELECT host_id,trigger_id,created_at,expires_at FROM alert_mutes "
+            f"WHERE {clause} ORDER BY {order} LIMIT 100",
+            parameters,
         ).fetchall()
     return [
         {
