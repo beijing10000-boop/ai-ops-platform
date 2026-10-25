@@ -401,7 +401,6 @@ async def connect(read_setting):
             yield session
 
 
-
 class ToolSchemaMismatch(ValueError):
     """The locally allowed read query cannot satisfy the remote MCP schema."""
 
@@ -427,6 +426,8 @@ def adapt_read_args(name, checked, schema):
     """
     if name not in READ_TOOLS:
         raise ValueError("tool not authorized")
+    if re.search(r'"\\$ref"\\s*:\\s*"(?!#)', json.dumps(schema)):
+        raise ValueError("external schema refs forbidden")
     if not isinstance(schema, dict) or not isinstance(schema.get("properties"), dict):
         raise ToolSchemaMismatch("远端未提供可验证的参数结构")
     props = schema["properties"]
@@ -436,9 +437,14 @@ def adapt_read_args(name, checked, schema):
             value = ",".join(value) if isinstance(value, list) else value
         if key in props:
             args[key] = value
-        elif "extra_params" in props and _schema_accepts(props["extra_params"], "object"):
+        elif "extra_params" in props and _schema_accepts(
+            props["extra_params"], "object"
+        ):
             # Local policy already validated each key, value and host scope.
             extra[key] = value
+        elif schema.get("additionalProperties") is not False:
+            # An open/unspecified JSON Schema permits locally authorized keys.
+            args[key] = value
         else:
             # Do not silently drop host/ID scope or any parameter.
             raise ToolSchemaMismatch(f"远端 {name} 不支持必需的只读参数 {key}")
@@ -452,6 +458,7 @@ def validate_remote_schema(name, args, schema):
     if re.search(r'"\$ref"\s*:\s*"(?!#)', json.dumps(schema)):
         raise ToolSchemaMismatch("远端 MCP 包含不允许的外部 Schema 引用")
     from jsonschema.exceptions import ValidationError
+
     try:
         Draft202012Validator(schema).validate(args)
     except ValidationError as exc:
@@ -470,6 +477,7 @@ async def call(session, name, args, *, schema=None, host_id=None):
         checked = adapt_read_args(name, checked, schema)
         validate_remote_schema(name, checked, schema)
     return await asyncio.wait_for(session.call_tool(name, checked), timeout=18)
+
 
 DEVICE_TYPES = {"linux", "windows", "vmware", "network", "other", "unknown"}
 
