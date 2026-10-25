@@ -699,6 +699,21 @@ async def run(
                     gaps.append(
                         "SSH MCP 未启用、未配置或缺少可信 Linux 主机关联；实时证据未采集"
                     )
+                # A Zabbix-verified Linux host in standard/deep mode gets a
+                # deterministic read-only SSH snapshot before AI reasoning.
+                # Do not depend on the model choosing to call diagnose_linux_host.
+                # linux() resolves the exact Zabbix Host ID via SSH MCP and
+                # reuses the same scoped fixed-action playbook as interactive calls.
+                precollected_ssh = None
+                if can_ssh and executed < limits["calls"] and time.monotonic() < deadline - 15:
+                    precollected_ssh = await linux(
+                        {
+                            "diagnostic_type": kind,
+                            "reason": "Zabbix 已核验 Linux 主机，主动检查关联主机的 SSH 实时只读证据",
+                        }
+                    )
+                elif can_ssh:
+                    gaps.append("SSH MCP 诊断预算或剩余时间不足，未执行自动实时采集")
                 if client is None:
                     client = await stack.enter_async_context(
                         AsyncOpenAI(
@@ -725,6 +740,19 @@ async def run(
                         ),
                     }
                 ]
+                if precollected_ssh is not None:
+                    conversation.append(
+                        {
+                            "role": "user",
+                            "content": "已自动执行的 SSH MCP 实时只读诊断证据："
+                            + compact_result(
+                                safe_text(
+                                    json.dumps(precollected_ssh, ensure_ascii=False)
+                                ),
+                                limits["result_chars"],
+                            ),
+                        }
+                    )
                 for round_number in range(limits["rounds"]):
                     check()
                     if (
