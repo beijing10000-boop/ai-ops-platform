@@ -1,8 +1,12 @@
 "use strict";
 async function mutesPanel() {
-  const rows = await api("/api/v1/alert-mutes");
-  return panel(
-    "飞书告警屏蔽",
+  const [rows, expired] = await Promise.all([
+    api("/api/v1/alert-mutes?status=active"),
+    api("/api/v1/alert-mutes?status=expired"),
+  ]);
+  return intro("管理当前平台的飞书告警屏蔽，规则只存储在当前 94 平台，不会自动从旧 93 平台迁入。", btn("refresh", "刷新列表")) +
+    panel(
+    "当前生效的飞书告警屏蔽（" + rows.length + " 条）",
     `<form id="mute-form"><div class="form-grid">${field("host_id", "Zabbix Host ID")}${field("trigger_id", "触发器 ID")}${field(
       "hours",
       "屏蔽时长",
@@ -18,15 +22,25 @@ async function mutesPanel() {
       ],
     )}</div><div class="form-actions">${btn("validate-mute", "验证屏蔽规则")}<button class="button" type="submit">设置屏蔽</button></div><p role="status" data-verify-result></p></form>` +
       table(
-        ["主机 ID", "触发器 ID", "到期时间", "操作"],
+        ["主机 ID", "触发器 ID", "设置时间", "到期时间（北京时间）", "操作"],
         rows
           .map(
             (r) =>
-              `<tr><td>${E(r.host_id)}</td><td>${E(r.trigger_id)}</td><td>${date(new Date(r.expires_at * 1000).toISOString())}</td><td>${btn("unmute", "提前解除", r.host_id + ":" + r.trigger_id, "small")}</td></tr>`,
+              `<tr><td>${E(r.host_id)}</td><td>${E(r.trigger_id)}</td><td>${date(r.created_at)}</td><td>${date(new Date(r.expires_at * 1000).toISOString())}</td><td>${btn("unmute", "提前解除", r.host_id + ":" + r.trigger_id, "small")}</td></tr>`,
           )
           .join(""),
       ),
-    "仅影响本平台的问题通知；不修改 Zabbix，也不屏蔽已经发送的告警对应的恢复。",
+    "仅影响本平台的问题通知；不修改 Zabbix，也不会屏蔽恢复通知。若列表为空，请确认规则是否到期，或是否存在于 93 的旧数据库。",
+    "mutes-active",
+  ) + panel(
+    "最近已过期的屏蔽记录",
+    table(
+      ["主机 ID", "触发器 ID", "设置时间", "到期时间（北京时间）", "状态"],
+      expired.map(r =>
+        `<tr><td>${E(r.host_id)}</td><td>${E(r.trigger_id)}</td><td>${date(r.created_at)}</td><td>${date(new Date(r.expires_at * 1000).toISOString())}</td><td>已过期</td></tr>`
+      ).join(""),
+    ),
+    "只展示最近 100 条已到期的规则；不会继续屏蔽任何告警。",
   );
 }
 const $ = (s) => document.querySelector(s),
@@ -77,6 +91,7 @@ const labels = {
 const nav = [
   ["overview", "总览", "▦", "overview.read"],
   ["alerts", "告警中心", "◴", "reports.read"],
+  ["mutes", "屏蔽管理", "◌", "alerts.manage"],
   ["diagnostics", "AI 诊断", "✧", "diagnostics.run"],
   ["connections", "连接管理", "⇄", "tools.read"],
   ["history", "分析历史", "◷", "reports.read"],
@@ -226,7 +241,7 @@ async function alerts() {
   return (
     intro(
       "最近 100 条已接收的问题事件 · 恢复与通知状态保留在事件记录中",
-      btn("refresh", "刷新"),
+      btn("refresh", "刷新") + (can("alerts.manage") ? btn("go-mutes", "查看屏蔽列表") : ""),
     ) +
     panel(
       "告警事件",
@@ -566,7 +581,6 @@ async function systemSettings() {
     state.members = members;
     feishuExtra = `<div class="panel"><div class="section-heading"><div><h2>授权成员</h2><p class="muted small">超级管理员通过上方名单管理；其他角色由后端授权。</p></div>${btn("new-member", "添加成员")}</div>${table(["Open ID", "角色", "状态", "操作"], members.map((m) => `<tr><td class="mono">${E(m.open_id)}</td><td>${E(labels[m.role])}</td><td>${badge(m.enabled ? "已启用" : "已停用")}</td><td>${btn("edit-member", "编辑", m.open_id, "small")}</td></tr>`).join(""))}</div>`;
   }
-  if (can("alerts.manage")) feishuExtra += await mutesPanel();
   return (
     intro("基础设置、飞书与 AI 配置集中管理。每个区域独立验证和保存；区域跳转会保留当前填写内容。") +
     `<div class="toolbar" aria-label="系统配置分区">${btn("scroll-section", "基础设置", "settings-general")}${btn("scroll-section", "飞书配置", "settings-feishu")}${btn("scroll-section", "AI 配置", "settings-ai")}${btn("scroll-section", "备份与升级", "settings-maintenance")}</div>` +
@@ -632,6 +646,7 @@ async function navigate() {
     let html;
     if (page === "overview") html = await overview();
     else if (page === "alerts") html = await alerts();
+    else if (page === "mutes" && can("alerts.manage")) html = await mutesPanel();
     else if (page === "diagnostics") html = await diagnostics();
     else if (page === "connections") html = await connections();
     else if (page === "history") html = await analysisHistory();
@@ -692,6 +707,7 @@ document.addEventListener("click", async (event) => {
     if (action === "refresh") await navigate();
     else if (action === "scroll-section") document.getElementById(id)?.scrollIntoView({ block: "start" });
     else if (action === "go-history") go("history");
+    else if (action === "go-mutes") go("mutes");
     else if (action === "report") go("report/" + id);
     else if (action === "unmute") {
       const [host, trigger] = id.split(":");
