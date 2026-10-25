@@ -319,7 +319,12 @@ try:
         page.get_by_role("button", name="暂时屏蔽").click()
         page.wait_for_url(base + "/#alerts/mutes")
         page.locator("#mute-form").wait_for()
-        assert page.get_by_role("heading", name="当前生效的飞书告警屏蔽", exact=False).count() == 1
+        assert (
+            page.get_by_role(
+                "heading", name="当前生效的飞书告警屏蔽", exact=False
+            ).count()
+            == 1
+        )
         page.locator('#mute-form input[name="host_id"]').fill("991")
         page.locator('#mute-form input[name="trigger_id"]').fill("992")
         page.locator('#mute-form button[type="submit"]').click()
@@ -335,7 +340,10 @@ try:
         page.wait_for_url(base + "/#alerts/mutes")
         page.locator("#mute-form").wait_for()
         checks.append(
-            {"workflow": "alert center tabs + Web mute create/unmute + legacy link", "ok": True}
+            {
+                "workflow": "alert center tabs + Web mute create/unmute + legacy link",
+                "ok": True,
+            }
         )
         page.locator('[data-page="history"]').click()
         page.locator('[data-action="task-next"]').click()
