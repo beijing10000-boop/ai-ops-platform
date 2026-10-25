@@ -292,12 +292,16 @@ def test_monitoring_host_query_requests_authoritative_groups(monkeypatch):
             content=[
                 SimpleNamespace(
                     text=json.dumps(
-                        [{
-                            "hostid": "11848",
-                            "name": "172-20-200-93",
-                            "inventory": {},
-                            "hostgroups": [{"groupid": "2", "name": "Linux servers"}],
-                        }]
+                        [
+                            {
+                                "hostid": "11848",
+                                "name": "172-20-200-93",
+                                "inventory": {},
+                                "hostgroups": [
+                                    {"groupid": "2", "name": "Linux servers"}
+                                ],
+                            }
+                        ]
                     )
                 )
             ],
