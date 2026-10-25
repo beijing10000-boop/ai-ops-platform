@@ -594,6 +594,7 @@ async def run(
                             "hostids": [host_id],
                             "selectInventory": ["os", "type"],
                             "selectTags": ["tag", "value"],
+                            "selectHostGroups": ["groupid", "name"],
                         },
                     )
                     for row in host.get("_rows", []):
