@@ -449,7 +449,7 @@ def adapt_read_args(name, checked, schema):
 
 def validate_remote_schema(name, args, schema):
     # Do not resolve remote schema URLs.
-    if re.search(r'"\\$ref"\\s*:\\s*"(?!#)', json.dumps(schema)):
+    if re.search(r'"\$ref"\s*:\s*"(?!#)', json.dumps(schema)):
         raise ToolSchemaMismatch("远端 MCP 包含不允许的外部 Schema 引用")
     from jsonschema.exceptions import ValidationError
     try:
