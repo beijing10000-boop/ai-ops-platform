@@ -144,7 +144,10 @@ def test_mute_management_lists_active_and_recent_expired_with_role_checks():
     assert all(r["expires_at"] <= now for r in expired.json())
     assert client.get("/api/v1/alert-mutes?status=invalid").status_code == 422
     assert client_for("operator").get("/api/v1/alert-mutes").status_code == 403
-    assert client_for("auditor").get("/api/v1/alert-mutes?status=expired").status_code == 403
+    assert (
+        client_for("auditor").get("/api/v1/alert-mutes?status=expired").status_code
+        == 403
+    )
 
 
 def test_new_verification_endpoints_enforce_auth_csrf_and_roles():
