@@ -112,7 +112,7 @@ SELECTS = {
 
 def search_fields(name):
     fields = {"name", "host", "key_", "status", "value_type", "value"}
-    return fields | {"ip"} if name == "host_get" else fields
+    return fields | {"ip"} if name == "hostinterface_get" else fields
 
 
 def input_schema(name):

@@ -99,6 +99,7 @@ def test_real_diagnostic_queue_retires_old_local_ssh_jobs(real_redis):
     tasks.enqueue(task["task_id"])
     queue = Queue("ai-diagnostics", connection=real_redis)
     assert queue.fetch_job(task["task_id"]).func_name == "app.diagnostic_worker.process"
+    assert queue.fetch_job(task["task_id"]).timeout == -1
     SimpleWorker([queue], connection=real_redis).work(
         burst=True, with_scheduler=False, logging_level="WARNING"
     )

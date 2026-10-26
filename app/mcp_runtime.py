@@ -682,6 +682,8 @@ async def run(
                     except ValueError as exc:
                         gaps.append(str(exc))
                 if target and session:
+                    interface_scope = None
+                    ambiguous = False
                     args = {
                         "selectInterfaces": ["ip", "dns", "type", "main", "useip"],
                         "selectInventory": ["os", "type"],
@@ -692,14 +694,46 @@ async def run(
                     if target[0] == "hostid":
                         args["hostids"] = [target[1]]
                     else:
-                        args["filter"] = {"ip": target[1]}
-                    host = await query(session, "host_get", args)
+                        # initMAX validates host_get filters against host properties;
+                        # IP belongs to host interfaces, not the host object.
+                        interfaces = await query(
+                            session,
+                            "hostinterface_get",
+                            {
+                                "filter": {"ip": target[1]},
+                                "output": ["hostid", "ip"],
+                                "limit": 100,
+                            },
+                        )
+                        monitoring.append(
+                            {k: v for k, v in interfaces.items() if k != "_rows"}
+                        )
+                        interface_scope = {
+                            str(row["hostid"])
+                            for row in interfaces.get("_rows", [])
+                            if str(row.get("hostid", "")).isdigit()
+                            and row.get("ip") == target[1]
+                        }
+                        ambiguous = len(interface_scope) > 1
+                        if len(interface_scope) == 1:
+                            args["hostids"] = sorted(interface_scope)
+                        else:
+                            # A literal visible name is another exact identifier,
+                            # useful for active-agent hosts without an IP interface.
+                            args["filter"] = {"name": target[1]}
+                    host = (
+                        await query(session, "host_get", args) if not ambiguous else {}
+                    )
                     monitoring.append({k: v for k, v in host.items() if k != "_rows"})
                     matches = {
                         str(row["hostid"]): row
                         for row in host.get("_rows", [])
                         if str(row.get("hostid", "")).isdigit()
-                        and matches_target(row, target)
+                        and (
+                            str(row["hostid"]) in interface_scope
+                            if interface_scope
+                            else matches_target(row, target)
+                        )
                     }
                     if len(matches) == 1:
                         host_id, row = next(iter(matches.items()))
@@ -819,7 +853,7 @@ async def run(
                         monitoring.append(
                             {k: v for k, v in hist.items() if k != "_rows"}
                         )
-                if effective_type != "linux" and (event or target):
+                if effective_type != "linux" and host_verified:
                     gaps.append(
                         "当前设备类型 " + effective_type + " 未启用实时深度诊断适配器"
                     )

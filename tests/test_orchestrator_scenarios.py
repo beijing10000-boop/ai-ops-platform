@@ -60,6 +60,8 @@ def rig(monkeypatch, tmp_path):
     async def call(name, args):
         log.append(("mcp", name))
         kind.setdefault("mcp_arguments", []).append((name, args))
+        if name == "host_get" and "ip" in args.get("filter", {}):
+            raise AssertionError("initMAX host_get rejects filter.ip")
         if name == "host_get":
             data = [
                 {
@@ -75,6 +77,14 @@ def rig(monkeypatch, tmp_path):
                 }
             ]
             data = kind.get("host_rows", data)
+        elif name == "hostinterface_get":
+            data = kind.get(
+                "interface_rows",
+                [
+                    {"hostid": str(row["hostid"]), "ip": "172.20.2.101"}
+                    for row in kind.get("host_rows", [{"hostid": "10"}])
+                ],
+            )
         elif name == "item_get":
             data = [
                 {
@@ -529,7 +539,10 @@ def test_plain_feishu_question_resolves_ip_collects_metrics_and_five_directory_l
     evidence = tasks.evidence_page(task["task_id"], True)
     assert task["report"]["target"]["host_id"] == "10"
     assert task["report"]["device_type"] == "linux"
-    assert rig[4]["mcp_arguments"][0][1]["filter"] == {"ip": "172.20.2.101"}
+    assert rig[4]["mcp_arguments"][0] == (
+        "hostinterface_get",
+        {"filter": {"ip": "172.20.2.101"}, "output": ["hostid", "ip"], "limit": 100},
+    )
     assert ("mcp", "item_get") in rig[1] and ("mcp", "history_get") in rig[1]
     assert ("resolve", "10") in rig[1] and ("ssh", "disk") in rig[1]
     scanned = [e["payload"] for e in evidence if e["tool"] == "directory"]
@@ -552,6 +565,8 @@ def test_plain_feishu_question_resolves_ip_collects_metrics_and_five_directory_l
 )
 def test_question_does_not_bind_fuzzy_or_duplicate_zabbix_matches(rig, hosts):
     rig[4]["host_rows"] = hosts
+    if len(hosts) == 1:
+        rig[4]["interface_rows"] = []
     _, usage = asyncio.run(
         mcp_runtime.run(
             "问答", "查看172.20.2.101的磁盘", client=rig[3], return_usage=True

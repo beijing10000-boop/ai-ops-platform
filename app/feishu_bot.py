@@ -73,7 +73,7 @@ def on_message(data: P2ImMessageReceiveV1):
             sender_id,
             parent_id or root_id,
             root_id,
-            job_timeout=360,
+            job_timeout=-1,
         )
         log.warning("FEISHU_QUEUED message_id=%s", msg_id)
     except Exception:

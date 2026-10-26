@@ -155,7 +155,7 @@ def handle_analyze_action(value, operator_open_id, message_id=None, chat_id=None
             event,
             message_id,
             chat_id,
-            job_timeout=360,
+            job_timeout=-1,
         )
     except Exception:
         redis.delete(key)

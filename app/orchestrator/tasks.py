@@ -19,11 +19,17 @@ class QueueUnavailable(RuntimeError):
 
 
 def recover_stalled(db):
-    # All execution budgets are shorter than 10 minutes. Release stranded locks
-    # even when the user stays on a task report instead of opening history.
-    db.execute(
-        "UPDATE diagnostic_tasks SET status='failed',stage='failed',error_type='WorkerLost',completed_at=CURRENT_TIMESTAMP WHERE status='running' AND started_at<datetime('now','-10 minutes')"
-    )
+    # Long configured budgets must not be mistaken for lost workers after ten minutes.
+    rows = db.execute(
+        "SELECT task_id,request,strftime('%s','now')-strftime('%s',started_at) FROM diagnostic_tasks WHERE status='running' AND started_at<datetime('now','-10 minutes')"
+    ).fetchall()
+    for task_id, raw, elapsed in rows:
+        seconds = (decode(raw) or {}).get("limits", {}).get("seconds", 240)
+        if elapsed > max(600, seconds + 120):
+            db.execute(
+                "UPDATE diagnostic_tasks SET status='failed',stage='failed',error_type='WorkerLost',completed_at=CURRENT_TIMESTAMP WHERE task_id=? AND status='running'",
+                (task_id,),
+            )
 
 
 def progress(task_id):
@@ -273,7 +279,8 @@ def enqueue(task_id):
             "app.diagnostic_worker.process",
             task_id,
             job_id=task_id,
-            job_timeout=300,
+            # The runtime enforces the Web-configured deadline; no second fixed cap.
+            job_timeout=-1,
             result_ttl=86400,
         )
     except Exception:

@@ -192,7 +192,7 @@ def test_budget_validation_is_server_side():
     client = client_for()
     for raw in [
         '{"standard":{"calls":true}}',
-        '{"standard":{"calls":1000}}',
+        '{"standard":{"calls":0}}',
         '{"unknown":{}}',
     ]:
         assert (
@@ -212,6 +212,63 @@ def test_budget_validation_is_server_side():
         ).status_code
         == 200
     )
+
+
+def test_budget_settings_accept_values_above_previous_caps_and_reject_invalid_types():
+    client = client_for()
+    limits = {
+        "rounds": 16,
+        "calls": 1000,
+        "per_round": 16,
+        "result_chars": 16000,
+        "seconds": 1200,
+        "tokens": 160000,
+    }
+    assert (
+        client.put(
+            "/api/v1/settings",
+            json={"values": {"ai_profile_budgets": json.dumps({"deep": limits})}},
+        ).status_code
+        == 200
+    )
+    assert (
+        json.loads(client.get("/api/v1/settings").json()["ai_profile_budgets"])["deep"]
+        == limits
+    )
+    for invalid in (True, 0, -1, 1.5, "16", None):
+        assert (
+            client.put(
+                "/api/v1/settings",
+                json={
+                    "values": {
+                        "ai_profile_budgets": json.dumps({"deep": {"rounds": invalid}})
+                    }
+                },
+            ).status_code
+            == 422
+        )
+
+
+def test_long_running_task_uses_its_saved_deadline_for_worker_recovery():
+    with main.connection() as db:
+        db.execute(
+            "INSERT INTO settings VALUES ('ai_profile_budgets',?,0)",
+            ('{"deep":{"seconds":1200}}',),
+        )
+    task, _ = tasks.create({"question": "长时间诊断"}, profile="deep")
+    tasks.start(task["task_id"])
+    with main.connection() as db:
+        db.execute(
+            "UPDATE diagnostic_tasks SET started_at=datetime('now','-11 minutes') WHERE task_id=?",
+            (task["task_id"],),
+        )
+    assert tasks.progress(task["task_id"])["status"] == "running"
+    with main.connection() as db:
+        db.execute(
+            "UPDATE diagnostic_tasks SET started_at=datetime('now','-23 minutes') WHERE task_id=?",
+            (task["task_id"],),
+        )
+    assert tasks.progress(task["task_id"])["error_type"] == "WorkerLost"
 
 
 def test_missing_master_key_cannot_replace_existing_ciphertext(monkeypatch):
@@ -239,6 +296,23 @@ def test_trusted_feishu_event_lookup_requires_exact_message_and_chat():
     assert event_for_message("om_source", "oc_one") == event
     assert event_for_message("om_source", "oc_two") is None
     assert event_for_message("om_other", "oc_one") is None
+
+
+def test_all_report_segments_keep_trusted_event_provenance():
+    from app.integrations.feishu_links import remember, event_for_message
+    from app.feishu_cards import MessageID
+
+    event = {"event_id": "772", "event_value": "1", "host_id": "42"}
+    with main.connection() as db:
+        db.execute(
+            "INSERT INTO alert_events(event_id,event_value,event_json) VALUES ('772','1',?)",
+            (json.dumps(event),),
+        )
+    remember(
+        event, "oc_one", MessageID("om_first", ["om_first", "om_second"]), "analysis"
+    )
+    assert event_for_message("om_second", "oc_one") == event
+    assert event_for_message("om_second", "oc_other") is None
 
 
 def test_queued_question_rechecks_revoked_permissions(monkeypatch):
