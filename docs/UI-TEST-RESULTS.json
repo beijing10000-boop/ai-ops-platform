@@ -24,6 +24,11 @@
     },
     {
       "width": 1280,
+      "page": "skills",
+      "ok": true
+    },
+    {
+      "width": 1280,
       "page": "history",
       "ok": true
     },
@@ -59,6 +64,11 @@
     },
     {
       "width": 1440,
+      "page": "skills",
+      "ok": true
+    },
+    {
+      "width": 1440,
       "page": "history",
       "ok": true
     },
@@ -90,6 +100,11 @@
     {
       "width": 1920,
       "page": "connections",
+      "ok": true
+    },
+    {
+      "width": 1920,
+      "page": "skills",
       "ok": true
     },
     {
@@ -157,6 +172,10 @@
     },
     {
       "workflow": "safe report formatting/export + lightweight polling preserves open evidence",
+      "ok": true
+    },
+    {
+      "workflow": "Skill ZIP upload/preview + enable + versioned edit + disable",
       "ok": true
     },
     {

@@ -904,3 +904,9 @@ code {
 .loading-state { display: flex; justify-content: center; gap: 10px; align-items: center; padding: 70px; color: var(--muted); }
 .loading-dot { width: 9px; height: 9px; background: var(--blue); border-radius: 50%; }
 .clipboard-helper { position: fixed; left: -10000px; top: 0; }
+.skill-choices { display: flex; flex-wrap: wrap; gap: 16px; border: 1px solid var(--line); border-radius: 12px; margin: 18px 0; padding: 14px; }
+.skill-choices legend { color: var(--muted); padding: 0 6px; font-size: 13px; }
+.skill-choices label, .skill-check { display: inline-flex; align-items: center; gap: 8px; }
+.skill-choices input, .skill-check input { width: auto; }
+.skill-preview { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 440px; overflow-y: auto; padding: 16px; font-size: 13px; line-height: 1.7; }
+#skill-edit textarea[name="instructions"] { min-height: 380px; font-family: inherit; }

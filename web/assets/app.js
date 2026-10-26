@@ -107,6 +107,7 @@ const nav = [
   ["alerts", "告警中心", "◴", "reports.read"],
   ["diagnostics", "AI 诊断", "✧", "diagnostics.run"],
   ["connections", "连接管理", "⇄", "tools.read"],
+  ["skills", "Skill 管理", "◇", "tools.read"],
   ["history", "分析历史", "◷", "reports.read"],
   ["settings", "系统配置", "⚙", "settings.manage"],
   ["audit", "审计日志", "≡", "audit.read"],
@@ -127,7 +128,7 @@ const badge = (s) =>
 const sourceLabel = value => ({web: "Web 诊断", alert: "告警分析", qa: "监控问答", feishu: "飞书", ui_test: "界面测试"}[value] || value);
 function stageLabel(value) {
   if (String(value).startsWith("ssh_mcp:")) return "SSH 采集中 · " + ({resolve: "核验主机", cpu: "CPU", memory: "内存", processes: "进程", memory_processes: "内存进程", disk: "磁盘", directory: "目录占用", io: "磁盘 IO", network: "网络", sockets: "连接", system: "系统", service: "服务", logs: "日志", kernel: "内核"}[value.split(":")[1]] || "补充证据");
-  return labels[value] || ({collecting: "收集证据", zabbix_history: "查询监控历史", ai_reasoning: "AI 分析中", retired: "旧任务已停用"}[value]) || value || "等待执行";
+  return labels[value] || ({collecting: "收集证据", zabbix_history: "查询监控历史", ai_reasoning: "AI 分析中", skill_analysis: "按 Skill 分析查询步骤", skill_ssh_mcp: "正在查询后台 MCP 服务并进行分析", skill_zabbix_mcp: "正在查询后台 MCP 服务并进行分析", retired: "旧任务已停用"}[value]) || value || "等待执行";
 }
 const btn = (action, text, id = "", kind = "", disabled = false) =>
   `<button type="button" class="button ${kind}" data-action="${action}" data-id="${E(id)}" ${disabled ? "disabled" : ""}>${text}</button>`;
@@ -395,6 +396,7 @@ async function report(id) {
       (state.includeLogs ? "?include_logs=true" : ""),
   );
   if (location.hash === "#report/" + id) state.currentTask = t;
+  const target = t.report?.target || {};
   return (
     intro(
       `任务 ${E(t.task_id)} · trace_id ${E(t.trace_id)}`,
@@ -411,9 +413,10 @@ async function report(id) {
     reportProgress(t) +
     `<div class="stats"><div class="stat"><div class="label">诊断状态</div><div class="value">${badge(t.status)}</div><div class="hint">${E(stageLabel(t.stage))}</div></div><div class="stat"><div class="label">主机 / 事件 ID</div><div class="value">${E(t.alert?.host_id || t.asset?.zabbix_hostid || "—")}</div><div class="hint">事件 ${E(t.event_id || "未关联")}</div></div><div class="stat"><div class="label">实际 Token / 工具调用</div><div class="value">${fmt(t.token_total)}</div><div class="hint">${fmt(t.tools)} 次采集 · 输入 ${fmt(t.token_input)} / 输出 ${fmt(t.token_output)}</div></div><div class="stat"><div class="label">执行耗时</div><div class="value">${t.duration_ms == null ? "—" : (t.duration_ms / 1000).toFixed(1) + " s"}</div><div class="hint">${date(t.created_at)}</div></div></div>` +
     reportBudget(t) +
+    (t.skills?.length ? panel("本次加载的 Skill", t.skills.map(row => `<p><strong>${E(row.name)}</strong> · v${row.revision} · ${row.providers.map(E).join(" / ")}</p><p class="muted small mono">SHA256 ${E(row.digest)}</p>`).join(""), "查询步骤由任务创建时保存的 Skill 决定。") : "") +
     panel(
       "告警与主机信息",
-      `<p>${E(t.alert?.event_name || "手动诊断 / 连接测试")}</p><p class="muted small">主机：${E(t.asset?.name || t.alert?.host_name || "未关联")} · Host ID：${E(t.asset?.zabbix_hostid || t.alert?.host_id || "—")} · 类型：${E(labels[t.report?.device_type || t.asset?.device_type] || "待确认")}</p>`,
+      `<p>${E(t.alert?.event_name || "手动诊断 / 连接测试")}</p><p class="muted small">主机：${E(t.asset?.name || t.alert?.host_name || "未关联")} · Zabbix Host ID：${E(t.asset?.zabbix_hostid || t.alert?.host_id || "—")}${target.ssh_host_id ? ` · SSH 资产 ID：${E(target.ssh_host_id)} · IP：${E(target.address || "—")}` : ""} · 类型：${E(labels[t.report?.device_type || t.asset?.device_type] || "待确认")}</p>`,
     ) +
     panel(
       "AI 诊断结论 · 分析推断",
@@ -728,6 +731,7 @@ async function navigate(options = {}) {
     }
     else if (page === "diagnostics") html = await diagnostics();
     else if (page === "connections") html = await connections();
+    else if (page === "skills") html = await skillsPage(parts[1]);
     else if (page === "history") html = await analysisHistory();
     else if (page === "report") html = await report(parts[1] || "");
     else if (page === "settings") html = await systemSettings();

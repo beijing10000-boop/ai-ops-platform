@@ -1,5 +1,35 @@
 # 升级说明
 
+## v0.8.2 → v0.9.0
+
+新增 Skill 驱动的双 MCP 查询。数据库自动升级至 v5，只增加 Skill 表；保留原有设置、告警、主密钥、历史与报告。升级前按下方备份流程保存完整数据卷与配对密钥。
+
+先在独立 SSH MCP 的原项目目录升级，保留原部署参数：
+
+```bash
+cd /data/ssh-mcp-server
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose up -d --build --wait --wait-timeout 180
+curl -fsS http://127.0.0.1:9099/healthz
+```
+
+再升级 AI 平台：
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://127.0.0.1:8088/healthz
+```
+
+浏览器 Ctrl+F5 刷新，应显示平台 v0.9.0、SSH 服务 v0.4.1。initMAX 服务不需要为此功能修改。未启用飞书接收器时去掉 --profile feishu；部署目录不同则使用原目录。
+
+在“Skill 管理”下载模板 ZIP，验证并导入，选择场景与 MCP 服务后启用，再点击“验证工具”。实时问题将按模板直接查询已登记 SSH 资产；历史告警查询 Zabbix。不启用 Skill 的场景保留旧流程。已有自定义提示词保留，Skill 执行模式优先采用 Skill 的查询指引，并保持入口的输出格式。复杂查询可在 AI 配置提高对应模式预算。详见 [Skill 使用说明](SKILLS.md)。
+
 ## v0.8.1 → v0.8.2
 
 修复 initMAX 不接受 `host_get filter.ip` 导致 IP 问答定位失败，改为先查接口再按 Host ID 查询主机。取消六项预算的固定最大值，联动修复长任务的 RQ 超时和失联清理。飞书完整展示报告，超出约 30 KB 的消息容量自动分段，不裁剪正文；分段均可继续追问。无数据库迁移。
