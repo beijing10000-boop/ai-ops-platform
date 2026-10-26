@@ -22,6 +22,22 @@ def test_alert_prompt_keeps_required_json_contract():
     assert "重点分析网络性能" in value
 
 
+def test_card_keeps_full_evidence_when_it_fits_and_labels_long_excerpts():
+    info = {
+        "cause": "根因待确认",
+        "action": "核查目录",
+        "analysis": "证据。" * 70 + "末尾关键证据",
+        "human_required": True,
+    }
+    summary = worker.analysis_summary(info)
+    assert "末尾关键证据" in summary and "摘要已省略" not in summary
+    assert "需人工核验：是" in summary
+    info["analysis"] *= 5
+    summary = worker.analysis_summary(info)
+    assert len(summary) <= 500
+    assert "摘要已省略部分内容" in summary and "…" in summary
+
+
 def test_all_alerts_notified_before_ai_and_severity_gate(monkeypatch):
     sent = []
 

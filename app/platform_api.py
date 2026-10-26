@@ -293,9 +293,15 @@ def task_detail(
     if not task:
         raise HTTPException(404, "任务不存在")
     request = task.pop("request")
+    task["budget"] = (task.get("report") or {}).get("budget") or {
+        "limits": request.get("limits", {}),
+        "used": {"calls": task["tools"]},
+        "reasons": [],
+    }
     event = request.get("event") or {}
+    target = (task.get("report") or {}).get("target") or {}
     task["alert"] = {
-        k: event.get(k)
+        k: event.get(k) or target.get(k)
         for k in (
             "event_id",
             "event_name",

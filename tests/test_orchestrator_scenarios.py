@@ -59,10 +59,13 @@ def rig(monkeypatch, tmp_path):
 
     async def call(name, args):
         log.append(("mcp", name))
+        kind.setdefault("mcp_arguments", []).append((name, args))
         if name == "host_get":
             data = [
                 {
                     "hostid": "10",
+                    "name": "172.20.2.101",
+                    "interfaces": [{"ip": "172.20.2.101"}],
                     "inventory": {"os": kind["type"]},
                     "tags": [{"tag": "aiops.device_type", "value": kind["type"]}],
                     "hostgroups": [
@@ -71,6 +74,7 @@ def rig(monkeypatch, tmp_path):
                     ],
                 }
             ]
+            data = kind.get("host_rows", data)
         elif name == "item_get":
             data = [
                 {
@@ -81,6 +85,7 @@ def rig(monkeypatch, tmp_path):
                     "lastvalue": "95",
                 }
             ]
+            data = kind.get("items", data)
         elif name == "history_get":
             data = [
                 {"itemid": "20", "clock": "100", "value": "94"},
@@ -152,6 +157,13 @@ def rig(monkeypatch, tmp_path):
                 "output": "fixture " + action,
                 "duration_ms": 1,
             }
+            if action == "directory_usage":
+                payload["action"] = "directory"
+                root = args["root"]
+                payload["data"] = {
+                    "root": root,
+                    "top_directories": [{"directory": root + "/child", "bytes": 1024}],
+                }
         return SimpleNamespace(isError=False, structuredContent=payload)
 
     adapter = ssh_mcp.SSHMCPAdapter(SimpleNamespace(call_tool=remote_call))
@@ -500,3 +512,86 @@ def test_ssh_token_from_remote_evidence_never_enters_model_or_report(rig, monkey
     _, task = run(rig)
     assert secret not in json.dumps(tasks.evidence_page(task["task_id"], True))
     assert secret not in json.dumps(rig[2], default=str)
+
+
+def test_plain_feishu_question_resolves_ip_collects_metrics_and_five_directory_levels(
+    rig,
+):
+    result, usage = asyncio.run(
+        mcp_runtime.run(
+            "中文问答",
+            "看下172.20.2.101这台机器/data目录下的空间占用率，列出5层",
+            client=rig[3],
+            return_usage=True,
+        )
+    )
+    task = tasks.get(usage["task_id"])
+    evidence = tasks.evidence_page(task["task_id"], True)
+    assert task["report"]["target"]["host_id"] == "10"
+    assert task["report"]["device_type"] == "linux"
+    assert rig[4]["mcp_arguments"][0][1]["filter"] == {"ip": "172.20.2.101"}
+    assert ("mcp", "item_get") in rig[1] and ("mcp", "history_get") in rig[1]
+    assert ("resolve", "10") in rig[1] and ("ssh", "disk") in rig[1]
+    scanned = [e["payload"] for e in evidence if e["tool"] == "directory"]
+    assert [e["level"] for e in scanned] == [1, 2, 3, 4, 5]
+    assert scanned[-1]["requested_root"] == "/data/child/child/child/child"
+    assert task["tools"] == len(evidence) == task["report"]["budget"]["used"]["calls"]
+    assert task["status"] == "success"
+    assert "directory_coverage" in str(rig[2][0]["input"])
+
+
+@pytest.mark.parametrize(
+    "hosts",
+    [
+        [{"hostid": "10", "name": "172.20.2.101-extra", "inventory": {"os": "linux"}}],
+        [
+            {"hostid": str(n), "name": "172.20.2.101", "inventory": {"os": "linux"}}
+            for n in (10, 11)
+        ],
+    ],
+)
+def test_question_does_not_bind_fuzzy_or_duplicate_zabbix_matches(rig, hosts):
+    rig[4]["host_rows"] = hosts
+    _, usage = asyncio.run(
+        mcp_runtime.run(
+            "问答", "查看172.20.2.101的磁盘", client=rig[3], return_usage=True
+        )
+    )
+    task = tasks.get(usage["task_id"])
+    assert task["status"] == "partial" and not task["report"]["target"]
+    assert not any(kind in {"resolve", "ssh"} for kind, _ in rig[1])
+
+
+def test_memory_snapshot_preserves_ssh_budget_and_does_not_fake_a_failed_kernel_call(
+    rig,
+):
+    with main.connection() as db:
+        db.execute(
+            "INSERT INTO settings VALUES ('ai_profile_budgets',?,0)",
+            ('{"standard":{"calls":8}}',),
+        )
+    rig[4]["items"] = [
+        {"itemid": str(i), "hostid": "10", "value_type": "0", "key_": "vm.memory"}
+        for i in (20, 21)
+    ]
+    _, task = run(rig, "Linux: High swap space usage")
+    evidence = tasks.evidence_page(task["task_id"], True)
+    assert ("ssh", "kernel") in rig[1]
+    assert len(evidence) == task["tools"] == 8
+    assert all(e["status"] == "success" for e in evidence)
+    assert any("部分 Zabbix 历史未查询" in gap for gap in task["report"]["limitations"])
+
+
+def test_small_budget_skips_tools_without_recording_false_remote_failures(rig):
+    with main.connection() as db:
+        db.execute(
+            "INSERT INTO settings VALUES ('ai_profile_budgets',?,0)",
+            ('{"standard":{"calls":4}}',),
+        )
+    _, task = run(rig, "Linux: High swap space usage")
+    evidence = tasks.evidence_page(task["task_id"], True)
+    assert len(evidence) == task["tools"] == 4
+    assert not any(kind == "ssh" for kind, _ in rig[1])
+    assert all(e["status"] == "success" for e in evidence)
+    assert task["status"] == "partial" and task["report"]["budget_exhausted"]
+    assert "4/4" in str(task["report"]["budget"]["reasons"])

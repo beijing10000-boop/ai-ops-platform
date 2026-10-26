@@ -126,7 +126,7 @@ const badge = (s) =>
   `<span class="tag ${E(s)}">${E(labels[s] || s || "—")}</span>`;
 const sourceLabel = value => ({web: "Web 诊断", alert: "告警分析", qa: "监控问答", feishu: "飞书", ui_test: "界面测试"}[value] || value);
 function stageLabel(value) {
-  if (String(value).startsWith("ssh_mcp:")) return "SSH 采集中 · " + ({resolve: "核验主机", cpu: "CPU", memory: "内存", processes: "进程", memory_processes: "内存进程", disk: "磁盘", io: "磁盘 IO", network: "网络", sockets: "连接", system: "系统", service: "服务", logs: "日志", kernel: "内核"}[value.split(":")[1]] || "补充证据");
+  if (String(value).startsWith("ssh_mcp:")) return "SSH 采集中 · " + ({resolve: "核验主机", cpu: "CPU", memory: "内存", processes: "进程", memory_processes: "内存进程", disk: "磁盘", directory: "目录占用", io: "磁盘 IO", network: "网络", sockets: "连接", system: "系统", service: "服务", logs: "日志", kernel: "内核"}[value.split(":")[1]] || "补充证据");
   return labels[value] || ({collecting: "收集证据", zabbix_history: "查询监控历史", ai_reasoning: "AI 分析中", retired: "旧任务已停用"}[value]) || value || "等待执行";
 }
 const btn = (action, text, id = "", kind = "", disabled = false) =>
@@ -410,6 +410,7 @@ async function report(id) {
     ) +
     reportProgress(t) +
     `<div class="stats"><div class="stat"><div class="label">诊断状态</div><div class="value">${badge(t.status)}</div><div class="hint">${E(stageLabel(t.stage))}</div></div><div class="stat"><div class="label">主机 / 事件 ID</div><div class="value">${E(t.alert?.host_id || t.asset?.zabbix_hostid || "—")}</div><div class="hint">事件 ${E(t.event_id || "未关联")}</div></div><div class="stat"><div class="label">实际 Token / 工具调用</div><div class="value">${fmt(t.token_total)}</div><div class="hint">${fmt(t.tools)} 次采集 · 输入 ${fmt(t.token_input)} / 输出 ${fmt(t.token_output)}</div></div><div class="stat"><div class="label">执行耗时</div><div class="value">${t.duration_ms == null ? "—" : (t.duration_ms / 1000).toFixed(1) + " s"}</div><div class="hint">${date(t.created_at)}</div></div></div>` +
+    reportBudget(t) +
     panel(
       "告警与主机信息",
       `<p>${E(t.alert?.event_name || "手动诊断 / 连接测试")}</p><p class="muted small">主机：${E(t.asset?.name || t.alert?.host_name || "未关联")} · Host ID：${E(t.asset?.zabbix_hostid || t.alert?.host_id || "—")} · 类型：${E(labels[t.report?.device_type || t.asset?.device_type] || "待确认")}</p>`,
@@ -432,6 +433,18 @@ async function report(id) {
     ) +
     `<div class="panel"><div class="section-heading"><div><h2>证据与工具执行记录</h2><p class="muted small">Zabbix 为监控证据；SSH 为采集当时快照。日志内容需要独立权限。</p></div>${can("logs.read") ? btn("toggle-logs", state.includeLogs ? "隐藏原始日志" : "读取日志证据", id) : ""}</div>${t.evidence.length ? t.evidence.map((e) => `<details class="evidence" data-evidence="${E(e.id)}"><summary>${E(e.provider)} / ${E(e.tool)} ${badge(e.status)} · ${date(e.collected_at)}</summary><pre>${E(JSON.stringify(e.payload, null, 2))}</pre></details>`).join("") : '<div class="empty">暂无采集证据</div>'}</div>`
   );
+}
+function reportBudget(task) {
+  const budget = task.budget || task.report?.budget;
+  if (!budget?.limits?.calls) return "";
+  const limits = budget.limits, used = budget.used || {};
+  const usage = [
+    ["采集次数", `${fmt(used.calls ?? task.tools)} / ${fmt(limits.calls)}`],
+    ["模型轮次", `${fmt(used.rounds)} / ${fmt(limits.rounds)}`],
+    ["实际 Token / 停止阈值", `${fmt(task.token_total)} / ${fmt(limits.tokens)}`],
+    ["耗时 / 时间上限", `${used.seconds ?? (task.duration_ms == null ? "—" : (task.duration_ms / 1000).toFixed(1))} / ${limits.seconds} 秒`],
+  ];
+  return panel("分析预算", `<p>${E(labels[task.profile] || task.profile)} · 使用任务创建时的配置</p>` + table(["预算项", "已使用 / 上限"], usage.map(([label, value]) => `<tr><td>${E(label)}</td><td>${E(value)}</td></tr>`).join("")) + (budget.reasons || []).map(reason => `<p class="notice">${E(reason)}</p>`).join("") + `<p class="muted small">包含 Zabbix 查询、SSH 主机解析及每个诊断动作。预算耗尽时跳过后续采集；Token 阈值用于停止后续请求。</p>` + (can("settings.manage") ? btn("go-page", "配置分析预算", "settings/ai") : ""));
 }
 function reportAnswer(task) {
   return readableReportAnswer(task.report?.answer || task.report?.message || (task.status === "failed" ? "任务未能完成。请结合下方状态说明排查后重试。" : ["queued", "running"].includes(task.status) ? "正在收集证据并分析，完成后将在这里显示结论。" : "未返回分析结论，请查看采集证据和诊断不足。"));
@@ -519,7 +532,7 @@ function budgetFields(values, options) {
   let custom = {};
   try { custom = JSON.parse(values.ai_profile_budgets || "{}"); } catch {}
   const names = {rounds: "最大轮次", calls: "采集次数", per_round: "每轮调用", result_chars: "每次结果字符", seconds: "总时间（秒）", tokens: "Token 阈值"};
-  return `<h3>分析预算</h3><p class="muted small">SSH MCP 的主机解析也计入采集次数；实际调用受任务剩余时间限制。</p>` + table(["分析模式", ...Object.values(names)], Object.entries(options.profiles).map(([profile, limits]) => `<tr><td>${labels[profile]}</td>${Object.keys(names).map(key => `<td><input class="budget-input" type="number" name="budget_${profile}_${key}" aria-label="${labels[profile]} ${names[key]}" min="${options.ranges[key][0]}" max="${options.ranges[key][1]}" required value="${E(custom[profile]?.[key] ?? limits[key])}"></td>`).join("")}</tr>`).join(""));
+  return `<h3>分析预算</h3><p class="muted small">SSH MCP 的主机解析也计入采集次数；实际调用受任务剩余时间限制。默认标准模式为 12 次；已有自定义上限继续生效，修改后用于新任务或重试任务。</p>` + table(["分析模式", ...Object.values(names)], Object.entries(options.profiles).map(([profile, limits]) => `<tr><td>${labels[profile]}</td>${Object.keys(names).map(key => `<td><input class="budget-input" type="number" name="budget_${profile}_${key}" aria-label="${labels[profile]} ${names[key]}" min="${options.ranges[key][0]}" max="${options.ranges[key][1]}" required value="${E(custom[profile]?.[key] ?? limits[key])}"></td>`).join("")}</tr>`).join(""));
 }
 function toolFields(values, options) {
   let disabled = [];
@@ -960,7 +973,7 @@ document.addEventListener("submit", async (event) => {
     } else if (form.id === "ask-form") {
       if (!data.question.trim()) throw Error("请输入问题");
       const output = $("#ask-result");
-      output.textContent = "正在查询监控并分析…";
+      output.textContent = "正在查询后台MCP服务并进行分析……";
       const r = await api("/api/v1/ask", "POST", data);
       if (output.isConnected) output.innerHTML = OpsUI.answer(readableReportAnswer(r.answer));
     } else if (form.id === "diagnostic-form") {

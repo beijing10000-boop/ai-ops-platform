@@ -15,6 +15,12 @@ from .main import read_setting
 from .integrations import zabbix, ssh_mcp
 from .integrations.zabbix import infer_device
 from .diagnostics.playbooks import PLAYBOOKS, classify
+from .diagnostics.targets import (
+    question_target,
+    matches_target,
+    directory_request,
+    directory_children,
+)
 from .orchestrator import tasks
 from .security.redact import redact
 
@@ -24,6 +30,8 @@ CORE = (
     "分别说明监控事实、SSH 当前事实、推断和待核验内容。比较告警时间与采集时间，当前进程不能直接解释历史告警。"
     "先分析 Zabbix 历史，证据不足且需要实时数据时才调用深度诊断。缺失和失败不是正常状态的证据。"
     "不得复述任何凭据。达到预算后根据已有证据结束，明确不足，不编造根因。"
+    "问答中的单一明确 IP 或 Host ID 先经 Zabbix 精确核验，再按 Host ID 关联 SSH MCP。"
+    "目录用量与文件系统使用率分别回答；目录扫描受层数、时间和采集次数限制，必须说明覆盖范围。"
 )
 DISCOVERY_TOOL = {
     "type": "function",
@@ -193,7 +201,13 @@ async def run(
     if not model or (client is None and not (key and base)):
         raise RuntimeError("AI 模型未配置")
     profile_name = profile_name or read_setting("ai_analysis_profile") or "standard"
-    kind = classify(event.get("event_name") or question)
+    directory = None
+    directory_error = None
+    try:
+        directory = directory_request(question)
+    except ValueError as exc:
+        directory_error = str(exc)
+    kind = "disk" if directory else classify(event.get("event_name") or question)
     if task_id:
         task = tasks.get(task_id, private=True)
         if not task:
@@ -234,6 +248,10 @@ async def run(
     host_id = str(event.get("host_id") or "")
     effective_type = "unknown"
     host_verified = False
+    target_metadata = {}
+    budget_reasons = []
+    if directory_error:
+        gaps.append(directory_error)
     ssh_configuration = tuple(
         read_setting(key) for key in ("ssh_mcp_enabled", "ssh_mcp_url", "ssh_mcp_token")
     )
@@ -264,6 +282,35 @@ async def run(
             raise tasks.Cancelled("任务已取消")
         if time.monotonic() > deadline:
             raise TimeoutError("task time budget exhausted")
+
+    def available_call(reserve_seconds=5):
+        nonlocal budget_end
+        check()
+        reason = None
+        if executed >= limits["calls"]:
+            reason = f"采集次数已达上限（{executed}/{limits['calls']}），后续工具未调用"
+        elif time.monotonic() >= deadline - reserve_seconds:
+            reason = "任务剩余时间不足，停止采集并预留总结时间"
+        if reason:
+            budget_end = True
+            if reason not in budget_reasons:
+                budget_reasons.append(reason)
+                gaps.append(reason)
+            return False
+        return True
+
+    def budget_snapshot():
+        return {
+            "limits": limits,
+            "used": {
+                "calls": executed,
+                "rounds": sum(d["kind"] == "round" for d in telemetry),
+                "tokens": totals["total"] if usage_complete else None,
+                "seconds": round(time.monotonic() - began, 1),
+            },
+            "exhausted": budget_end,
+            "reasons": budget_reasons,
+        }
 
     def track(response):
         nonlocal usage_complete
@@ -325,7 +372,7 @@ async def run(
         signature = json.dumps([name, args], sort_keys=True)
         if signature in cache:
             return {**cache[signature], "cached": True}
-        if executed >= limits["calls"] or time.monotonic() > deadline - 5:
+        if not available_call():
             return {"error": "MCP call budget exhausted"}
         if name in {"history_get", "trend_get"} and any(
             str(x) not in item_scope for x in args.get("itemids", [])
@@ -441,8 +488,6 @@ async def run(
 
         def remaining():
             check()
-            if executed >= limits["calls"] or time.monotonic() >= deadline - 10:
-                raise ssh_mcp.IntegrationError("SSH MCP 诊断预算不足，停止补查")
             return min(
                 int(read_setting("ssh_mcp_timeout_seconds") or 90),
                 max(1, deadline - time.monotonic() - 8),
@@ -452,6 +497,8 @@ async def run(
             gaps.append("SSH MCP 配置在任务执行期间已变更，停止补查")
             return {"error": gaps[-1]}
         if binding is None:
+            if not available_call(10):
+                return {"status": "partial", "error": budget_reasons[-1]}
             started = time.monotonic()
             try:
                 timeout = remaining()
@@ -459,6 +506,8 @@ async def run(
                 ssh = await stack.enter_async_context(
                     ssh_mcp.configured(read_setting, timeout=timeout)
                 )
+                if not available_call(10):
+                    return {"status": "partial", "error": budget_reasons[-1]}
                 ssh.timeout = remaining()
                 executed += 1
                 tasks.stage(task_id, "ssh_mcp:resolve")
@@ -488,7 +537,11 @@ async def run(
             )
             if ssh_failed:
                 return payload
-        for action in PLAYBOOKS[kind]["actions"]:
+        actions = [(action, None, 0) for action in PLAYBOOKS[kind]["actions"]]
+        if directory:
+            actions.append(("directory", directory["root"], 1))
+        scanned = []
+        for action, root, level in actions:
             check()
             if not connection_current():
                 gaps.append("SSH MCP 配置在任务执行期间已变更，停止后续补查")
@@ -498,59 +551,96 @@ async def run(
             ):
                 gaps.append("缺少经验证的服务名称，跳过 " + action)
                 continue
-            signature = "ssh:" + action + ":" + str(service) + ":" + str(window)
+            signature = json.dumps(["ssh", action, service, window, root])
             if signature in cache:
-                outputs.append(cache[signature])
-                continue
-            started = time.monotonic()
-            try:
-                ssh.timeout = remaining()
-                tasks.stage(task_id, "ssh_mcp:" + action)
-                executed += 1
-                payload = await ssh.diagnose(
-                    binding,
+                payload = cache[signature]
+            else:
+                if not available_call(10):
+                    break
+                started = time.monotonic()
+                try:
+                    ssh.timeout = remaining()
+                    tasks.stage(task_id, "ssh_mcp:" + action)
+                    executed += 1
+                    extra = {"directory_root": root} if action == "directory" else {}
+                    payload = await ssh.diagnose(
+                        binding,
+                        action,
+                        service=service if action in {"logs", "service"} else None,
+                        minutes=window,
+                        **extra,
+                    )
+                    # Keep JSON valid while recursively removing secrets from evidence and model input.
+                    from .security.redact import redact_data
+
+                    def clean(value):
+                        if isinstance(value, dict):
+                            return {k: clean(v) for k, v in value.items()}
+                        if isinstance(value, list):
+                            return [clean(v) for v in value[:1000]]
+                        return (
+                            safe_text(value, 32768) if isinstance(value, str) else value
+                        )
+
+                    payload = clean(redact_data(payload))
+                except Exception as exc:
+                    ssh_failed = True
+                    payload = {
+                        "status": "failed",
+                        "error": safe_text(str(exc), 250)
+                        if isinstance(exc, ssh_mcp.IntegrationError)
+                        else type(exc).__name__,
+                    }
+                if action == "directory":
+                    payload = {**payload, "requested_root": root, "level": level}
+                tasks.evidence(
+                    task_id,
+                    "ssh_mcp",
                     action,
-                    service=service if action in {"logs", "service"} else None,
-                    minutes=window,
+                    payload,
+                    int((time.monotonic() - started) * 1000),
                 )
-                # Keep JSON valid while recursively removing secrets from both evidence and model input.
-                from .security.redact import redact_data
-
-                def clean(value):
-                    if isinstance(value, dict):
-                        return {k: clean(v) for k, v in value.items()}
-                    if isinstance(value, list):
-                        return [clean(v) for v in value[:1000]]
-                    return safe_text(value, 32768) if isinstance(value, str) else value
-
-                payload = clean(redact_data(payload))
-            except Exception as exc:
-                ssh_failed = True
-                payload = {
-                    "status": "failed",
-                    "error": safe_text(str(exc), 250)
-                    if isinstance(exc, ssh_mcp.IntegrationError)
-                    else type(exc).__name__,
-                }
-            tasks.evidence(
-                task_id,
-                "ssh_mcp",
-                action,
-                payload,
-                int((time.monotonic() - started) * 1000),
-            )
-            cache[signature] = payload
+                cache[signature] = payload
             outputs.append(payload)
+            if action == "directory":
+                scanned.append(root)
+                if payload.get("status") == "success" and level < directory["depth"]:
+                    actions.extend(
+                        ("directory", child, level + 1)
+                        for child in directory_children(payload, root)
+                    )
+                elif payload.get("status") != "success":
+                    gaps.append("目录扫描未完整完成，不能据此给出完整目录树")
             if payload.get("status") != "success":
                 gaps.append("SSH MCP " + action + " 数据不完整")
             if ssh_failed or payload.get("status") in {"failed", "cancelled"}:
                 ssh_failed = True
                 break
+        coverage = None
+        if directory:
+            pending = [
+                root
+                for action, root, _ in actions
+                if action == "directory" and root not in scanned
+            ]
+            coverage = {
+                **directory,
+                "scope": "每个根路径最多返回 30 个直接子目录的占用排行；不代表完整目录树。每次扫描最多 8 秒，不跨文件系统。",
+                "scanned_roots": scanned,
+                "pending_roots": pending[:100],
+                "complete": not pending
+                and not any(p.get("status") != "success" for p in outputs),
+            }
+            if not coverage["complete"]:
+                gaps.append(
+                    "目录扫描覆盖不完整；仅展示已采集目录，不能声称已列出全部请求层级"
+                )
         return {
             "diagnostic_type": kind,
             "current_snapshot": True,
             "results": outputs,
             "limitation": PLAYBOOKS[kind]["limitation"],
+            "directory_coverage": coverage,
         }
 
     try:
@@ -584,7 +674,47 @@ async def run(
                 tool_map = {d["name"]: d for d in definitions}
                 loaded = set()
                 dynamic = read_setting("ai_tool_loading") != "full"
-                # Deterministic seed queries precede all SSH; no IP extraction from alert prose.
+                # Resolve explicit Q&A selectors through Zabbix; an IP is never sent to SSH.
+                target = None
+                if not event:
+                    try:
+                        target = question_target(question)
+                    except ValueError as exc:
+                        gaps.append(str(exc))
+                if target and session:
+                    args = {
+                        "selectInterfaces": ["ip", "dns", "type", "main", "useip"],
+                        "selectInventory": ["os", "type"],
+                        "selectTags": ["tag", "value"],
+                        "selectHostGroups": ["groupid", "name"],
+                        "limit": 100,
+                    }
+                    if target[0] == "hostid":
+                        args["hostids"] = [target[1]]
+                    else:
+                        args["filter"] = {"ip": target[1]}
+                    host = await query(session, "host_get", args)
+                    monitoring.append({k: v for k, v in host.items() if k != "_rows"})
+                    matches = {
+                        str(row["hostid"]): row
+                        for row in host.get("_rows", [])
+                        if str(row.get("hostid", "")).isdigit()
+                        and matches_target(row, target)
+                    }
+                    if len(matches) == 1:
+                        host_id, row = next(iter(matches.items()))
+                        host_verified = True
+                        effective_type = infer_device(row)
+                        target_metadata = {
+                            "host_id": host_id,
+                            "host_name": row.get("name") or row.get("host"),
+                            "device_type": effective_type,
+                        }
+                    else:
+                        gaps.append(
+                            "Zabbix 未返回唯一精确匹配的主机；未建立 SSH 关联，请在诊断页选择主机"
+                        )
+                # Deterministic seed queries precede SSH for both alerts and verified Q&A.
                 if event and session and host_id.isdigit():
                     tasks.stage(task_id, "zabbix_history")
                     host = await query(
@@ -602,7 +732,15 @@ async def run(
                         if str(row.get("hostid")) == host_id:
                             host_verified = True
                             effective_type = detected
+                            target_metadata = {
+                                "host_id": host_id,
+                                "host_name": row.get("name")
+                                or row.get("host")
+                                or event.get("host_name"),
+                                "device_type": effective_type,
+                            }
                     monitoring.append({k: v for k, v in host.items() if k != "_rows"})
+                if host_verified and session:
                     if (
                         str(event.get("event_id", "")).isdigit()
                         and executed < limits["calls"]
@@ -626,8 +764,31 @@ async def run(
                         "searchByAny": True,
                         "limit": 12,
                     }
+                    if directory and kind == "disk":
+                        item_args["search"] = {
+                            "key_": [
+                                f"vfs.fs.size[{directory['root']},",
+                                f"vfs.fs.inode[{directory['root']},",
+                            ]
+                        }
                     found = await query(session, "item_get", item_args)
                     monitoring.append({k: v for k, v in found.items() if k != "_rows"})
+                    if not found.get("_rows"):
+                        gaps.append("Zabbix 未返回关联监控项，当前值和历史证据不足")
+                    reserved_ssh = 0
+                    if (
+                        effective_type == "linux"
+                        and profile_name != "quick"
+                        and ssh_configuration[0] == "true"
+                        and all(ssh_configuration[1:])
+                    ):
+                        service = task["request"].get("service")
+                        reserved_ssh = 1 + sum(
+                            action not in {"service", "logs"} or bool(service)
+                            for action in PLAYBOOKS[kind]["actions"]
+                        )
+                        if directory:
+                            reserved_ssh += directory["depth"]
                     for item in found.get("_rows", [])[
                         : 2 if profile_name != "quick" else 1
                     ]:
@@ -636,6 +797,11 @@ async def run(
                             or executed >= limits["calls"]
                         ):
                             continue
+                        if executed >= limits["calls"] - reserved_ssh:
+                            gaps.append(
+                                "采集预算已优先预留 SSH 实时诊断，部分 Zabbix 历史未查询；可在系统配置提高采集上限"
+                            )
+                            break
                         clock = event_clock(event)
                         hist = await query(
                             session,
@@ -653,14 +819,14 @@ async def run(
                         monitoring.append(
                             {k: v for k, v in hist.items() if k != "_rows"}
                         )
-                if effective_type != "linux" and event:
+                if effective_type != "linux" and (event or target):
                     gaps.append(
                         "当前设备类型 " + effective_type + " 未启用实时深度诊断适配器"
                     )
                 ssh_definition = {
                     "type": "function",
                     "name": "diagnose_linux_host",
-                    "description": "Read current Linux evidence only when historical monitoring cannot explain the fault. Bound to the verified Zabbix Host ID; no addresses or commands accepted.",
+                    "description": "Read current Linux evidence and explicitly requested bounded directory usage. Bound to the verified Zabbix Host ID; no addresses or commands accepted.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -717,7 +883,7 @@ async def run(
                         }
                     )
                 elif can_ssh:
-                    gaps.append("SSH MCP 诊断预算或剩余时间不足，未执行自动实时采集")
+                    available_call(15)
                 if client is None:
                     client = await stack.enter_async_context(
                         AsyncOpenAI(
@@ -735,6 +901,7 @@ async def run(
                                     "alert": event,
                                     "diagnostic_type": kind,
                                     "device_type": effective_type,
+                                    "verified_target": target_metadata,
                                     "initial_monitoring": monitoring,
                                     "limitations": gaps,
                                 },
@@ -764,7 +931,13 @@ async def run(
                         or totals["total"] >= limits["tokens"]
                         or time.monotonic() > deadline - 8
                     ):
-                        budget_end = True
+                        if totals["total"] >= limits["tokens"]:
+                            budget_end = True
+                            budget_reasons.append(
+                                "模型已返回的实际 Token 达到阈值，停止后续请求"
+                            )
+                        else:
+                            available_call(8)
                         break
                     tools = (
                         [DISCOVERY_TOOL, LOAD_TOOL]
@@ -780,6 +953,11 @@ async def run(
                         instructions=CORE + "\n" + safe_text(prompt),
                         input=conversation,
                         tools=tools,
+                        **(
+                            {"tool_choice": "none"}
+                            if round_number == limits["rounds"] - 1
+                            else {}
+                        ),
                         timeout=min(45, max(1, int(deadline - time.monotonic()))),
                         max_output_tokens=min(
                             3000, max(256, limits["tokens"] - totals["total"])
@@ -860,6 +1038,8 @@ async def run(
                     if (
                         totals["total"] < limits["tokens"]
                         and time.monotonic() < deadline - 3
+                        and sum(d["kind"] == "round" for d in telemetry)
+                        < limits["rounds"]
                     ):
                         response = await client.responses.create(
                             model=model,
@@ -877,15 +1057,27 @@ async def run(
                         track(response)
                         result_text = (response.output_text or "").strip()
                     else:
+                        budget_end = True
+                        if (
+                            sum(d["kind"] == "round" for d in telemetry)
+                            >= limits["rounds"]
+                        ):
+                            budget_reasons.append("模型轮次已达上限，停止后续请求")
                         result_text = "诊断预算已用尽。已保存实际采集证据；证据不足以形成完整结论，请查看诊断详情。"
     except (TimeoutError, asyncio.TimeoutError):
         gaps.append("任务达到时间预算")
+        budget_reasons.append("任务达到时间预算")
         result_text = result_text or "诊断超时，已保存已有证据，尚无法确认根因。"
         budget_end = True
     except (tasks.Cancelled, asyncio.CancelledError):
         tasks.finish(
             task_id,
-            {"answer": "任务已取消", "limitations": gaps},
+            {
+                "answer": "任务已取消",
+                "limitations": gaps,
+                "target": target_metadata,
+                "budget": budget_snapshot(),
+            },
             usage=usage_snapshot(),
             status="cancelled",
             duration_ms=int((time.monotonic() - began) * 1000),
@@ -894,7 +1086,12 @@ async def run(
     except Exception as exc:
         tasks.finish(
             task_id,
-            {"answer": "分析失败，已有证据保留", "limitations": gaps},
+            {
+                "answer": "分析失败，已有证据保留",
+                "limitations": gaps,
+                "target": target_metadata,
+                "budget": budget_snapshot(),
+            },
             usage=usage_snapshot(),
             status="failed",
             error_type=type(exc).__name__,
@@ -915,6 +1112,8 @@ async def run(
             "answer": redact(readable_report_answer(result_text), 40000),
             "device_type": effective_type,
             "diagnostic_type": kind,
+            "target": target_metadata,
+            "budget": budget_snapshot(),
             "limitations": list(dict.fromkeys(gaps)),
             "evidence_policy": "监控事实和 SSH 实时证据单独记录；AI 输出属于推断，需结合证据核验",
             "budget_exhausted": budget_end,

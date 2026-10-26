@@ -118,6 +118,16 @@ tasks.evidence(
     },
     120,
 )
+tasks.evidence(
+    task["task_id"],
+    "ssh_mcp",
+    "kernel",
+    {
+        "status": "failed",
+        "error": "SSH MCP 诊断预算不足，停止补查",
+        "output": "隔离测试日志，仅用于显示权限回归",
+    },
+)
 tasks.finish(
     task["task_id"],
     {

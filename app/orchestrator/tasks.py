@@ -187,9 +187,23 @@ def evidence_page(task_id, include_logs=False):
     for row in rows:
         row["payload"] = decode(row["payload"])
         if row["tool"] in {"logs", "kernel"} and not include_logs:
+            payload = row["payload"]
+            error = str(payload.get("error") or "").casefold()
+            reason = None
+            if "预算" in error or "budget" in error:
+                reason = "采集预算不足，工具未调用；可提高对应模式的采集次数或时间上限"
+            elif any(
+                word in error
+                for word in ("权限", "拒绝", "permission", "denied", "forbidden")
+            ):
+                reason = "SSH MCP 拒绝采集，请检查客户端动作授权及目标主机日志读取权限"
+            elif row["status"] == "failed":
+                reason = "日志工具调用失败；有权限的用户可读取原始错误详情"
             row["payload"] = {
                 "restricted": True,
-                "message": "查看日志证据需要独立 logs.read 权限",
+                "status": row["status"],
+                "message": "日志正文默认隐藏；具有 logs.read 权限可点击“读取日志证据”查看。此提示不代表工具调用被拒绝。",
+                **({"failure_reason": reason} if reason else {}),
             }
     return rows
 
