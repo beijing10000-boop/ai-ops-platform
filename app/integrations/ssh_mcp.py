@@ -35,6 +35,7 @@ TOOLS = {
         "kernel",
     )
 }
+TOOLS["directory"] = "ssh_diagnose_directory_usage"
 SERVICE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$")
 
 
@@ -63,7 +64,11 @@ class SSHMCPAdapter:
                 "SSH MCP 调用未完成：" + type(exc).__name__
             ) from None
         if result.isError:
-            raise IntegrationError("SSH MCP 拒绝工具调用")
+            raise IntegrationError(
+                "SSH MCP 拒绝工具调用；请检查专用客户端令牌的动作授权、主机组范围及有效期（工具 "
+                + name
+                + "）"
+            )
         payload = result.structuredContent
         if payload is None:
             texts = [item.text for item in result.content if item.type == "text"]
@@ -101,12 +106,19 @@ class SSHMCPAdapter:
         *,
         service: str | None = None,
         minutes: int = 30,
+        directory_root: str | None = None,
     ) -> dict:
         if action not in TOOLS:
             raise IntegrationError("不支持的 SSH 诊断动作")
         if type(minutes) is not int or not 1 <= minutes <= 120:
             raise IntegrationError("时间范围必须为 1–120 分钟")
         args = {"host_id": binding.host_id, "expected_revision": binding.revision}
+        if action == "directory":
+            from ..diagnostics.targets import validate_directory
+
+            args["root"] = validate_directory(directory_root)
+        elif directory_root is not None:
+            raise IntegrationError("该动作不接受目录参数")
         if action in {"service", "logs"}:
             if not isinstance(service, str) or not SERVICE.fullmatch(service):
                 raise IntegrationError("需要管理员授权的合法服务名")
@@ -122,6 +134,19 @@ class SSHMCPAdapter:
             or data.get("status") not in {"success", "partial", "failed", "cancelled"}
         ):
             raise IntegrationError("SSH MCP 返回的主机、动作或状态不匹配")
+        if action == "directory" and data.get("status") == "success":
+            summary = data.get("summary")
+            analysis = data.get("data") or (
+                summary.get("analysis") if isinstance(summary, dict) else None
+            )
+            if (
+                not isinstance(analysis, dict)
+                or analysis.get("root") != args["root"]
+                or not isinstance(analysis.get("top_directories"), list)
+            ):
+                raise IntegrationError(
+                    "SSH MCP 未返回匹配的目录占用结构；请检查版本及 directory 动作授权"
+                )
         return {
             **data,
             "provider": "ssh_mcp",

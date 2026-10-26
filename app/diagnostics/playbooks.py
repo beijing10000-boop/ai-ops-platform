@@ -72,6 +72,8 @@ def classify(text):
                 "disk space",
                 "filesystem",
                 "disk full",
+                "space is low",
+                "fs [",
                 "磁盘空间",
                 "磁盘容量",
                 "inode",
@@ -85,7 +87,10 @@ def classify(text):
         ("service", ("service", "服务", "process is not")),
         ("network", ("network", "packet", "网络", "丢包", "interface")),
         ("logs", ("日志", "log error")),
-        ("system", ("reboot", "kernel", "重启", "内核")),
+        (
+            "system",
+            ("reboot", "kernel", "installed packages", "重启", "内核", "软件包"),
+        ),
     ]:
         if any(term in lower for term in terms):
             return kind

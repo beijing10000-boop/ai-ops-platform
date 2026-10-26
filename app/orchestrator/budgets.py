@@ -12,7 +12,7 @@ PROFILES = {
     },
     "standard": {
         "rounds": 4,
-        "calls": 8,
+        "calls": 12,
         "per_round": 4,
         "result_chars": 4000,
         "seconds": 110,

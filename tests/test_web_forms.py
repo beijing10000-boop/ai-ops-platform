@@ -31,7 +31,7 @@ def test_default_prompts_are_visible_and_cannot_disable_core_rules():
         )
         assert client.get("/api/v1/settings").json()[key] == settings[key]
     options = client.get("/api/v1/settings/options").json()
-    assert options["profiles"]["standard"]["calls"] == 8
+    assert options["profiles"]["standard"]["calls"] == 12
     assert "host_get" in options["tools"]
 
 

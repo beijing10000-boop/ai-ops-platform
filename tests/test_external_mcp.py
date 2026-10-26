@@ -43,6 +43,21 @@ def server(provider):
         }
 
     @mcp.tool()
+    def ssh_diagnose_directory_usage(
+        host_id: int, root: str = "/data", expected_revision: int | None = None
+    ) -> dict:
+        assert expected_revision == 3
+        return {
+            "host_id": host_id,
+            "action": "directory",
+            "status": "success",
+            "data": {
+                "root": root,
+                "top_directories": [{"directory": root + "/app", "bytes": 1024}],
+            },
+        }
+
+    @mcp.tool()
     def host_get(
         hostids: list[str] | None = None,
         output: list[str] | None = None,
@@ -109,6 +124,14 @@ def test_two_real_mcp_connections_keep_tokens_bindings_and_failures_separate():
                     assert (
                         result["provider"] == "ssh_mcp"
                         and result["job_id"] == "fixture-job"
+                    )
+                    directory = await adapter.diagnose(
+                        binding, "directory", directory_root="/data"
+                    )
+                    assert directory["data"]["root"] == "/data"
+                    assert (
+                        directory["data"]["top_directories"][0]["directory"]
+                        == "/data/app"
                     )
                     stale = await adapter.diagnose(
                         ssh_mcp.HostBinding("10", 92, 2), "cpu"

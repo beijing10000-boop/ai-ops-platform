@@ -100,9 +100,7 @@ async def execute(
         progress_id = await reply_card(
             message_id,
             "AI 分析中",
-            "**问题：** "
-            + question[:180]
-            + "\\n\\n⏳ 正在查询 Zabbix MCP 并进行分析……",
+            "**问题：** " + question[:180] + "\n\n⏳ 正在查询后台MCP服务并进行分析……",
         )
         mark_pending(chat_id, progress_id)
         log.info("FEISHU_PROGRESS_SENT message_id=%s", message_id)
@@ -118,11 +116,22 @@ async def execute(
             return_usage=True,
             **({"event": verified_event} if verified_event else {}),
         )
+        from .worker import report_url
+        from .orchestrator import tasks
+
+        task = tasks.get(usage.get("task_id")) if usage.get("task_id") else None
+        partial = bool(task and task["status"] == "partial")
+        title = "AI 分析结果 · 部分完成" if partial else "AI 分析完成"
         display_result = result + "\n\n---\n" + format_usage(usage)
+        url = report_url({"_token_usage": usage})
+        if url:
+            display_result += "\n\n[查看完整诊断报告](" + url + ")"
         record_ai_question("feishu", message_id, question, "success", token_usage=usage)
         if progress_id:
             try:
-                await update_card(progress_id, "AI 分析完成", display_result)
+                await update_card(
+                    progress_id, title, display_result, "orange" if partial else "green"
+                )
                 remember(
                     chat_id,
                     message_id,
@@ -136,7 +145,9 @@ async def execute(
                 return
             except Exception:
                 log.exception("FEISHU_CARD_UPDATE_FAILED message_id=%s", message_id)
-        fallback_id = await reply_card(message_id, "AI 分析完成", display_result)
+        fallback_id = await reply_card(
+            message_id, title, display_result, "orange" if partial else "green"
+        )
         remember(
             chat_id,
             message_id,

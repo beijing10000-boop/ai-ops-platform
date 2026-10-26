@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 def test_default_standard_profile():
     assert PROFILES["standard"]["rounds"] == 4
-    assert PROFILES["standard"]["calls"] == 8
+    assert PROFILES["standard"]["calls"] == 12
     assert (
         PROFILES["quick"]["calls"]
         < PROFILES["standard"]["calls"]

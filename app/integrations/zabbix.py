@@ -110,6 +110,11 @@ SELECTS = {
 }
 
 
+def search_fields(name):
+    fields = {"name", "host", "key_", "status", "value_type", "value"}
+    return fields | {"ip"} if name == "host_get" else fields
+
+
 def input_schema(name):
     """Curated schemas describe only arguments accepted by our local policy."""
     properties = {}
@@ -150,14 +155,7 @@ def input_schema(name):
                             },
                         ]
                     }
-                    for field in (
-                        "name",
-                        "host",
-                        "key_",
-                        "status",
-                        "value_type",
-                        "value",
-                    )
+                    for field in sorted(search_fields(name))
                 },
                 "additionalProperties": False,
             }
@@ -265,7 +263,7 @@ def validate_args(name, arguments, *, host_id=None):
             if (
                 not isinstance(val, dict)
                 or len(val) > 5
-                or set(val) - {"name", "host", "key_", "status", "value_type", "value"}
+                or set(val) - search_fields(name)
             ):
                 raise ValueError("invalid search fields")
             if any(len(str(v)) > 160 for v in val.values()):

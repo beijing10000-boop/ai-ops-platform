@@ -124,6 +124,49 @@ def test_raw_logs_require_separate_permission_and_are_encrypted():
         )
 
 
+def test_hidden_kernel_error_retains_budget_reason_without_exposing_raw_logs():
+    task, _ = tasks.create({"question": "内核"})
+    tasks.evidence(
+        task["task_id"],
+        "ssh_mcp",
+        "kernel",
+        {
+            "status": "failed",
+            "error": "SSH MCP 诊断预算不足，停止补查",
+            "output": "sensitive-kernel-content",
+        },
+    )
+    data = client_for("auditor").get("/api/v1/platform/tasks/" + task["task_id"]).json()
+    payload = data["evidence"][0]["payload"]
+    assert payload["restricted"] and "采集预算不足" in payload["failure_reason"]
+    assert "不代表工具调用被拒绝" in payload["message"]
+    assert "sensitive-kernel-content" not in json.dumps(data)
+    assert data["budget"]["limits"]["calls"] == 12
+
+
+def test_qa_report_exposes_verified_host_and_original_budget_snapshot():
+    task, _ = tasks.create({"question": "查看172.20.2.101的目录"}, source="qa")
+    tasks.finish(
+        task["task_id"],
+        {
+            "answer": "已采集",
+            "device_type": "linux",
+            "target": {"host_id": "11600", "host_name": "172.20.2.101"},
+        },
+    )
+    with main.connection() as db:
+        db.execute(
+            "INSERT INTO settings VALUES ('ai_profile_budgets',?,0)",
+            ('{"standard":{"calls":24}}',),
+        )
+    data = client_for("auditor").get("/api/v1/platform/tasks/" + task["task_id"]).json()
+    assert (
+        data["alert"]["host_id"] == "11600"
+        and data["alert"]["host_name"] == "172.20.2.101"
+    )
+    assert data["budget"]["limits"]["calls"] == 12
+
+
 def test_cancellation_and_retry_create_independent_trace(monkeypatch):
     monkeypatch.setattr(tasks, "enqueue", lambda _: None)
     task, _ = tasks.create({"question": "query"})

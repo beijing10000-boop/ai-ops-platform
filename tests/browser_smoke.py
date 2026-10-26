@@ -496,6 +496,31 @@ try:
         page.locator('[data-action="report"]').first.click()
         page.get_by_text("证据与工具执行记录", exact=True).wait_for()
         assert page.locator(".report-answer h3").count() == 3
+        assert (
+            "12"
+            in page.get_by_role("heading", name="分析预算", exact=True)
+            .locator("xpath=ancestor::section[1]")
+            .inner_text()
+        )
+        assert "采集预算不足" in page.locator("details.evidence").last.text_content()
+        assert (
+            "隔离测试日志，仅用于显示权限回归"
+            not in page.locator("details.evidence").last.text_content()
+        )
+        page.get_by_role("button", name="读取日志证据", exact=True).click()
+        page.get_by_role("button", name="隐藏原始日志", exact=True).wait_for()
+        assert (
+            "隔离测试日志，仅用于显示权限回归"
+            in page.locator("details.evidence").last.text_content()
+        )
+        page.get_by_role("button", name="隐藏原始日志", exact=True).click()
+        page.get_by_role("button", name="配置分析预算", exact=True).click()
+        page.get_by_role("spinbutton", name="标准分析 采集次数", exact=True).wait_for(
+            state="visible"
+        )
+        page.locator('[data-page="history"]').click()
+        page.locator('[data-action="report"]').first.click()
+        page.get_by_text("证据与工具执行记录", exact=True).wait_for()
         with page.expect_download() as downloaded:
             page.locator('[data-action="download-report"]').click()
         exported = Path(downloaded.value.path()).read_text()
@@ -513,7 +538,12 @@ try:
         page.locator("#theme-toggle").click()
         assert page.locator("html").get_attribute("data-theme") == "dark"
         page.screenshot(path=str(OUT / "diagnosis-dark-1440.png"), full_page=True)
-        checks.append({"workflow": "report, evidence, theme toggle", "ok": True})
+        checks.append(
+            {
+                "workflow": "report budget navigation, raw-log visibility, evidence, theme toggle",
+                "ok": True,
+            }
+        )
         running_id = page.request.get(base + "/__ui_running").json()["task_id"]
         detail_requests = []
         page.on(

@@ -119,21 +119,45 @@ def report_url(info):
 
 
 def analysis_summary(info):
-    # Body budget is independent of the original event metadata and Token footer.
+    # Render the same result as the Web report; make any excerpt explicit.
     status = {"success": "已完成", "partial": "部分完成", "failed": "失败"}.get(
         info.get("_diagnostic_status")
     )
-    return (
-        (("**诊断状态**  " + status + "\n\n") if status else "")
-        + "\n\n".join(
-            "**" + label + "**\n" + safe(info.get(field), size)
-            for label, field, size in (
-                ("故障原因（AI 推断）", "cause", 100),
-                ("关键依据", "analysis", 180),
-                ("处理建议", "action", 150),
+    prefix = ("**诊断状态**  " + status + "\n\n") if status else ""
+    fields = [
+        ("故障原因（AI 推断）", "cause"),
+        ("处理建议", "action"),
+        ("分析与依据", "analysis"),
+    ]
+    values = [str(info.get(key) or "未提供").strip() for _, key in fields]
+    human = "\n\n需人工核验：是" if info.get("human_required") is True else ""
+
+    def render(parts):
+        return (
+            prefix
+            + "\n\n".join(
+                "**" + label + "**\n" + value
+                for (label, _), value in zip(fields, parts)
             )
+            + human
         )
-    )[:500]
+
+    complete = render(values)
+    if len(complete) <= 500:
+        return complete
+    notice = "\n\n摘要已省略部分内容，完整依据见诊断报告。"
+    available = 500 - len(render(["", "", ""])) - len(notice)
+    sizes = [min(100, len(values[0])), min(140, len(values[1]))]
+    sizes.append(available - sum(sizes))
+
+    def excerpt(value, size):
+        if len(value) <= size:
+            return value
+        head = value[: size - 1]
+        end = max(head.rfind(mark) for mark in ("。", "；", "\n"))
+        return (head[: end + 1] if end >= size // 2 else head) + "…"
+
+    return render([excerpt(value, size) for value, size in zip(values, sizes)]) + notice
 
 
 def valid_macro(value):
@@ -712,7 +736,7 @@ async def analyze_on_demand(event, message_id, chat_id=None):
             "AI 分析中",
             "**分析对象**  "
             + question[:240]
-            + "\n\n⏳ 正在查询 Zabbix MCP 并进行分析……",
+            + "\n\n⏳ 正在查询后台MCP服务并进行分析……",
         )
         if chat_id:
             mark_pending(chat_id, progress_id)
