@@ -10,6 +10,7 @@ import httpx
 import pytest
 import uvicorn
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 from starlette.responses import PlainTextResponse
 
 from app.integrations import ssh_mcp, zabbix
@@ -19,7 +20,19 @@ from app.integrations import ssh_mcp, zabbix
 def server(provider):
     mcp = FastMCP(provider, stateless_http=True, json_response=True)
 
-    @mcp.tool()
+    annotations = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
+
+    @mcp.tool(annotations=annotations)
+    def ssh_resolve_target(address: str) -> dict:
+        return {
+            "status": "success",
+            "host_id": 92,
+            "revision": 3,
+            "address": address,
+            "name": "direct-native",
+        }
+
+    @mcp.tool(annotations=annotations)
     def ssh_resolve_host(zabbix_hostid: str) -> dict:
         if zabbix_hostid != "10":
             return {"status": "failed"}
@@ -30,7 +43,7 @@ def server(provider):
             "revision": 3,
         }
 
-    @mcp.tool()
+    @mcp.tool(annotations=annotations)
     def ssh_diagnose_cpu(host_id: int, expected_revision: int) -> dict:
         if expected_revision != 3:
             return {"host_id": host_id, "action": "cpu", "status": "failed"}
@@ -42,7 +55,7 @@ def server(provider):
             "output": "current CPU evidence",
         }
 
-    @mcp.tool()
+    @mcp.tool(annotations=annotations)
     def ssh_diagnose_directory_usage(
         host_id: int, root: str = "/data", expected_revision: int | None = None
     ) -> dict:
@@ -163,3 +176,35 @@ def test_http_client_never_forwards_tokens_through_redirects_or_environment_prox
             assert isinstance(client, httpx.AsyncClient)
 
     asyncio.run(run())
+
+
+def test_skill_bridge_uses_native_ssh_schema_over_real_transport():
+    from app.skill_mcp import SkillMCP
+
+    with server("ssh") as (url, token, requests):
+        settings = {
+            "ssh_mcp_enabled": "true",
+            "ssh_mcp_url": url,
+            "ssh_mcp_token": token,
+        }
+
+        async def run():
+            async with SkillMCP(
+                lambda key: settings.get(key, ""),
+                ["ssh_mcp"],
+                deadline=time.monotonic() + 20,
+                target=("ip", "172.20.2.101"),
+            ) as bridge:
+                found = await bridge.definitions("ssh_mcp", "ssh_resolve_target")
+                assert "address" in found[0]["parameters"]["properties"]
+                await bridge.call(
+                    "ssh_mcp", "ssh_resolve_target", {"address": "172.20.2.101"}
+                )
+                result = await bridge.call(
+                    "ssh_mcp", "ssh_diagnose_cpu", {"host_id": 92}
+                )
+                assert result["data"]["job_id"] == "fixture-job"
+                assert bridge.target_metadata["ssh_host_id"] == 92
+
+        asyncio.run(run())
+        assert set(requests) == {"Bearer " + token}

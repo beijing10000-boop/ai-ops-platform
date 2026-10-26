@@ -24,6 +24,7 @@ for name in (
     "connections-1440.png",
     "alerts-1440.png",
     "settings-ai-1440.png",
+    "skills-1440.png",
 ):
     (OUT / name).unlink(missing_ok=True)
 with socket.socket() as sock:
@@ -60,7 +61,9 @@ try:
         raise RuntimeError("UI test API failed to start")
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
-            headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
+            headless=True,
+            channel=os.getenv("AIOPS_BROWSER_CHANNEL") or None,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
         )
         page = browser.new_page(
             viewport={"width": 1440, "height": 1080}, device_scale_factor=1
@@ -83,6 +86,7 @@ try:
                 "alerts",
                 "diagnostics",
                 "connections",
+                "skills",
                 "history",
                 "settings",
                 "audit",
@@ -589,6 +593,45 @@ try:
                 "ok": True,
             }
         )
+        # Real file upload, format preview, versioned editing and enable/disable.
+        page.locator('nav [data-page="skills"]').click()
+        page.locator("#skill-import").wait_for()
+        template = page.request.get(base + "/api/v1/platform/skills/template")
+        assert template.status == 200
+        page.locator('#skill-import input[type="file"]').set_input_files(
+            {
+                "name": "ops-skill.zip",
+                "mimeType": "application/zip",
+                "buffer": template.body(),
+            }
+        )
+        page.locator('[data-action="skill-check-import"]').click()
+        page.locator('#skill-import [data-verify-result][data-result="ok"]').wait_for()
+        assert "ssh_resolve_target" in page.locator("#skill-preview pre").inner_text()
+        page.locator('#skill-import select[name="enabled"]').select_option("true")
+        page.locator('#skill-import button[type="submit"]').click()
+        page.locator('[data-action="skill-open"]').wait_for()
+        row = page.locator("tbody tr").filter(has_text="ops-mcp-readonly")
+        assert "已启用" in row.inner_text()
+        row.locator('[data-action="skill-open"]').click()
+        page.locator("#skill-edit").wait_for()
+        page.locator('#skill-edit textarea[name="description"]').fill(
+            "值班实时查询与历史告警分析"
+        )
+        page.locator('[data-action="skill-check-edit"]').click()
+        page.locator('#skill-edit [data-verify-result][data-result="ok"]').wait_for()
+        page.locator('#skill-edit button[type="submit"]').click()
+        page.get_by_role("heading", name="ops-mcp-readonly · v2").wait_for()
+        page.screenshot(path=str(OUT / "skills-1440.png"), full_page=True)
+        page.locator('nav [data-page="skills"]').click()
+        page.locator('[data-action="skill-toggle"]').click()
+        page.locator("tbody tr").filter(has_text="已停用").wait_for()
+        checks.append(
+            {
+                "workflow": "Skill ZIP upload/preview + enable + versioned edit + disable",
+                "ok": True,
+            }
+        )
         for role in ("operator", "auditor", "ops_admin"):
             page.goto(base + "/__ui_login?role=" + role)
             page.locator('nav [data-page="connections"]').click()
@@ -614,13 +657,20 @@ try:
                     "ok": True,
                 }
             )
+            page.locator('nav [data-page="skills"]').click()
+            page.get_by_role("heading", name="已加载的 Skill").wait_for()
+            assert page.locator("#skill-import").count() == (
+                1 if role == "ops_admin" else 0
+            )
         assert errors == [], errors
         assert failed == [], failed
         browser.close()
     (ROOT / "docs/UI-TEST-RESULTS.json").write_text(
         json.dumps(
             {
-                "browser": "Chromium headless",
+                "browser": "Google Chrome headless"
+                if os.getenv("AIOPS_BROWSER_CHANNEL") == "chrome"
+                else "Chromium headless",
                 "fixture": "disposable local database; no production data",
                 "checks": checks,
                 "javascript_errors": errors,

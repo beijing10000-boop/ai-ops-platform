@@ -230,6 +230,19 @@ async def run(
         task = tasks.get(task_id, private=True)
         limits = task["request"]["limits"]
     tasks.start(task_id)
+    if task["request"].get("skills"):
+        from .skill_runtime import run as run_with_skills
+
+        return await run_with_skills(
+            prompt,
+            question,
+            task=task,
+            client=client,
+            model=model,
+            context=context,
+            return_usage=return_usage,
+            read_setting=read_setting,
+        )
     began = time.monotonic()
     totals = {"input": 0, "output": 0, "total": 0}
     usage_complete = True

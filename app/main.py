@@ -23,7 +23,7 @@ DB = DATA_DIR / "app.sqlite3"
 MASTER_KEY = os.getenv("APP_ENCRYPTION_KEY", "")
 ADMIN_TOKEN = os.getenv("ADMIN_API_TOKEN", "")
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
-app = FastAPI(title="Zabbix AI Ops · Unified Platform", version="0.8.2")
+app = FastAPI(title="Zabbix AI Ops · Unified Platform", version="0.9.0")
 app.mount(
     "/assets",
     StaticFiles(directory=Path(__file__).parent.parent / "web" / "assets"),
@@ -1271,3 +1271,6 @@ from . import feishu_auth  # noqa: E402,F401
 from .platform_api import router as platform_router  # noqa: E402
 
 app.include_router(platform_router)
+from .skill_api import router as skill_router  # noqa: E402
+
+app.include_router(skill_router)

@@ -25,7 +25,7 @@
   },
   {
     "repository": "https://github.com/beijing10000-boop/ssh-mcp-server.git",
-    "commit": "d2ea0d748f64fd946617127ba5af46f0bf54aafa",
-    "usage": "MCP client example/protocol only; no SSH executor copied"
+    "commit": "3405a7c42b057712273d1fe77d9853a61e46743e",
+    "usage": "Native read-only tools and registered-IP resolution for Skill template; no SSH executor copied"
   }
 ]

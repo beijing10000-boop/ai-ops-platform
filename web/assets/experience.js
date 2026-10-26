@@ -32,7 +32,7 @@ const OpsUI = (() => {
     return html;
   }
   const baselines = new WeakMap();
-  const forms = () => [...document.querySelectorAll("form.settings-form, form.connection-form")];
+  const forms = () => [...document.querySelectorAll("form.settings-form, form.connection-form, #skill-edit")];
   const fingerprint = form => JSON.stringify([...new FormData(form)]);
   function changed(form) {
     return baselines.has(form) && baselines.get(form) !== fingerprint(form);

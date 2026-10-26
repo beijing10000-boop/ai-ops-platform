@@ -9,3 +9,4 @@ httpx>=0.27,<1
 mcp>=1.10,<2
 lark-oapi>=1.7.5,<2
 jsonschema>=4.23,<5
+PyYAML>=6,<7

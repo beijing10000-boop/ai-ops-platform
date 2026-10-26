@@ -180,6 +180,14 @@ async def validate_task(body):
             raise HTTPException(422, "所选主机与告警 Host ID 不匹配")
     host_id = str(event.get("host_id") or body.zabbix_hostid or "")
     host = None
+    from .skill_store import snapshot
+
+    if snapshot({"event": event}, "web"):
+        if host_id and not event:
+            event = {"host_id": host_id, "event_name": body.question}
+        if body.diagnostic_type == "auto":
+            body.diagnostic_type = classify(event.get("event_name") or body.question)
+        return None, event
     if host_id:
         host = (await live_hosts(host_id=host_id))[0]
         if not event:
@@ -225,7 +233,7 @@ async def validate_diagnostic(body: TaskInput, who=Depends(require("diagnostics.
             ) from None
     return {
         "ok": True,
-        "message": "诊断参数验证通过；本次未执行 SSH 或 AI 分析。实际任务按监控设备类型和 SSH MCP 配置决定是否补查。",
+        "message": "诊断参数验证通过；本次未执行 SSH 或 AI 分析。实际查询按已启用的 Skill 决定；未启用时采用兼容流程。",
     }
 
 
@@ -293,6 +301,9 @@ def task_detail(
     if not task:
         raise HTTPException(404, "任务不存在")
     request = task.pop("request")
+    from .skill_store import summary
+
+    task["skills"] = summary(request.get("skills", []))
     task["budget"] = (task.get("report") or {}).get("budget") or {
         "limits": request.get("limits", {}),
         "used": {"calls": task["tools"]},

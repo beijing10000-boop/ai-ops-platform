@@ -263,7 +263,7 @@ def test_legacy_schema_upgrade_removes_credentials_and_preserves_reports():
         )
         assert (
             db.execute("SELECT MAX(version) FROM platform_migrations").fetchone()[0]
-            == 4
+            == 5
         )
 
 

@@ -1,7 +1,7 @@
 """Current platform schema and one-time removal of the retired local SSH backend."""
 
 
-def migrate(db):
+def _migrate_v4(db):
     db.execute(
         "CREATE TABLE IF NOT EXISTS platform_migrations(version INTEGER PRIMARY KEY, applied_at TEXT DEFAULT CURRENT_TIMESTAMP)"
     )
@@ -84,6 +84,18 @@ def migrate(db):
         "CREATE INDEX IF NOT EXISTS ix_token_period ON ai_token_runs(created_at,source,model)"
     )
     db.execute("INSERT INTO platform_migrations(version) VALUES (4)")
+
+
+def migrate(db):
+    _migrate_v4(db)
+    if not db.execute("SELECT 1 FROM platform_migrations WHERE version=5").fetchone():
+        db.execute("""CREATE TABLE IF NOT EXISTS platform_skills(
+            id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 0, priority INTEGER NOT NULL DEFAULT 100,
+            scopes TEXT NOT NULL, providers TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+            digest TEXT NOT NULL, bundle TEXT NOT NULL, updated_by TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+        db.execute("INSERT INTO platform_migrations(version) VALUES (5)")
 
 
 def row_dict(row, cur):

@@ -107,6 +107,7 @@ const nav = [
   ["alerts", "告警中心", "◴", "reports.read"],
   ["diagnostics", "AI 诊断", "✧", "diagnostics.run"],
   ["connections", "连接管理", "⇄", "tools.read"],
+  ["skills", "Skill 管理", "◇", "tools.read"],
   ["history", "分析历史", "◷", "reports.read"],
   ["settings", "系统配置", "⚙", "settings.manage"],
   ["audit", "审计日志", "≡", "audit.read"],
@@ -127,7 +128,7 @@ const badge = (s) =>
 const sourceLabel = value => ({web: "Web 诊断", alert: "告警分析", qa: "监控问答", feishu: "飞书", ui_test: "界面测试"}[value] || value);
 function stageLabel(value) {
   if (String(value).startsWith("ssh_mcp:")) return "SSH 采集中 · " + ({resolve: "核验主机", cpu: "CPU", memory: "内存", processes: "进程", memory_processes: "内存进程", disk: "磁盘", directory: "目录占用", io: "磁盘 IO", network: "网络", sockets: "连接", system: "系统", service: "服务", logs: "日志", kernel: "内核"}[value.split(":")[1]] || "补充证据");
-  return labels[value] || ({collecting: "收集证据", zabbix_history: "查询监控历史", ai_reasoning: "AI 分析中", retired: "旧任务已停用"}[value]) || value || "等待执行";
+  return labels[value] || ({collecting: "收集证据", zabbix_history: "查询监控历史", ai_reasoning: "AI 分析中", skill_analysis: "按 Skill 分析查询步骤", skill_ssh_mcp: "正在查询后台 MCP 服务并进行分析", skill_zabbix_mcp: "正在查询后台 MCP 服务并进行分析", retired: "旧任务已停用"}[value]) || value || "等待执行";
 }
 const btn = (action, text, id = "", kind = "", disabled = false) =>
   `<button type="button" class="button ${kind}" data-action="${action}" data-id="${E(id)}" ${disabled ? "disabled" : ""}>${text}</button>`;
@@ -273,26 +274,26 @@ async function diagnostics() {
   const options = await api(P + "/diagnostic-options");
   return (
     intro(
-      "选择 Zabbix 监控主机或已接收的告警发起诊断。执行前查询监控，必要时补充 Linux 实时证据。",
+      "输入问题发起诊断。启用 Skill 后按指引选择后台服务，可直接查询已登记的 SSH 主机 IP，也可选择监控主机或关联告警。",
     ) +
     panel(
       "新建诊断",
-      `<form id="diagnostic-form">${state.selectedEvent ? `<div class="notice context-banner"><div><strong>正在分析告警 ${E(state.selectedEvent)}</strong><p>${E(state.selectedEventTitle || "以告警中记录的主机为诊断目标。")}</p></div>${btn("clear-event", "取消关联", "", "small")}</div>` : ""}<div class="form-grid"><div class="field wide"><span>查询监控主机</span><div class="toolbar"><input id="host-search" aria-label="搜索 Zabbix 主机" placeholder="输入主机名称或 Zabbix Host ID">${btn("search-hosts", "查询 Zabbix 主机")}</div><small id="host-search-result" role="status">直接从 Zabbix MCP 读取主机，无需在平台登记资产。</small></div>${field("zabbix_hostid", "诊断主机", "", "text", "选择监控主机后，平台通过相同 Host ID 关联独立 SSH MCP；填写告警事件 ID 时以事件主机为准。", [["", "未选择主机"], ...state.hostRows.map(h => [h.zabbix_hostid, h.name + " · Host ID " + h.zabbix_hostid + " · " + (labels[h.device_type] || h.device_type)])])}${field("event_id", "告警事件 ID", state.selectedEvent || "", "text", "可选，必须是平台已经接收的事件。")}${field("diagnostic_type", "诊断类型", "auto", "text", "", [["auto", "自动识别告警类型"], ...Object.entries(PLAY)])}${field(
+      `<form id="diagnostic-form">${state.selectedEvent ? `<div class="notice context-banner"><div><strong>正在分析告警 ${E(state.selectedEvent)}</strong><p>${E(state.selectedEventTitle || "以告警中记录的主机为诊断目标。")}</p></div>${btn("clear-event", "取消关联", "", "small")}</div>` : ""}<div class="form-grid"><div class="field wide"><span>查询监控主机</span><div class="toolbar"><input id="host-search" aria-label="搜索 Zabbix 主机" placeholder="输入主机名称或 Zabbix Host ID">${btn("search-hosts", "查询 Zabbix 主机")}</div><small id="host-search-result" role="status">直接从 Zabbix MCP 读取主机，无需在平台登记资产。</small></div>${field("zabbix_hostid", "诊断主机", "", "text", "可选。按 Skill 查询明确 SSH IP 时可不选择；选择 Host ID 或关联告警时，以该主机为准。", [["", "未选择主机"], ...state.hostRows.map(h => [h.zabbix_hostid, h.name + " · Host ID " + h.zabbix_hostid + " · " + (labels[h.device_type] || h.device_type)])])}${field("event_id", "告警事件 ID", state.selectedEvent || "", "text", "可选，必须是平台已经接收的事件。")}${field("diagnostic_type", "诊断类型", "auto", "text", "", [["auto", "自动识别告警类型"], ...Object.entries(PLAY)])}${field(
         "profile",
         "分析模式",
         options.default_profile,
         "text",
-        "快速只查监控；标准和深度对已核验的 Linux 主机自动补充一轮 SSH 证据，受权限与预算限制。",
+        "选择本次轮次、次数和时间预算；启用 Skill 后，查询来源和步骤由 Skill 决定。",
         [
           ["quick", "快速分析"],
           ["standard", "标准分析"],
           ["deep", "深度分析"],
         ],
-      )}${field("service", "systemd 服务名", "", "text", "服务/日志诊断时填写，如 nginx.service。")}${field("time_window", "日志窗口（分钟）", "30", "number", "范围 1–120 分钟；监控历史默认围绕告警前 30 分钟。")}${field("question", "诊断问题", "请根据实际证据诊断故障并给出建议", "textarea", "", null, true)}</div><div class="form-actions">${btn("validate-diagnostic", "验证诊断参数与关联")}<button class="button primary" type="submit">开始诊断 →</button></div><p role="status" data-verify-result></p></form>`,
+      )}${field("service", "systemd 服务名", "", "text", "服务/日志诊断时填写，如 nginx.service。")}${field("time_window", "日志窗口（分钟）", "30", "number", "范围 1–120 分钟；Skill 按此窗口及原生工具参数查询日志。")}${field("question", "诊断问题", "请根据实际证据诊断故障并给出建议", "textarea", "", null, true)}</div><div class="form-actions">${btn("validate-diagnostic", "验证诊断参数与关联")}<button class="button primary" type="submit">开始诊断 →</button></div><p role="status" data-verify-result></p></form>`,
     ) +
     panel(
       "监控问答",
-      `<form id="ask-form">${field("question", "查询监控或提出问题", "", "textarea", "问答中的地址文字不会自动成为 SSH 连接目标。", null, true)}<div class="form-actions"><button class="button" type="submit">发送问题</button></div></form><div id="ask-result" class="report-answer"></div>`,
+      `<form id="ask-form">${field("question", "查询监控或提出问题", "", "textarea", "启用 Skill 后，可填写 SSH 服务已登记的明确 IP，按指引直接查询实时证据。", null, true)}<div class="form-actions"><button class="button" type="submit">发送问题</button></div></form><div id="ask-result" class="report-answer"></div>`,
     )
   );
 }
@@ -324,7 +325,7 @@ async function diagnosticTools() {
           )
           .join(""),
       ),
-    "查看两个 MCP 的授权工具与各类问题的诊断边界。",
+    "此表为未启用 Skill 时的兼容流程；启用后按 Skill 查询指引选择原生工具，可在 Skill 管理验证实际目录。",
     "connection-tools",
   );
 }
@@ -395,6 +396,7 @@ async function report(id) {
       (state.includeLogs ? "?include_logs=true" : ""),
   );
   if (location.hash === "#report/" + id) state.currentTask = t;
+  const target = t.report?.target || {};
   return (
     intro(
       `任务 ${E(t.task_id)} · trace_id ${E(t.trace_id)}`,
@@ -411,9 +413,10 @@ async function report(id) {
     reportProgress(t) +
     `<div class="stats"><div class="stat"><div class="label">诊断状态</div><div class="value">${badge(t.status)}</div><div class="hint">${E(stageLabel(t.stage))}</div></div><div class="stat"><div class="label">主机 / 事件 ID</div><div class="value">${E(t.alert?.host_id || t.asset?.zabbix_hostid || "—")}</div><div class="hint">事件 ${E(t.event_id || "未关联")}</div></div><div class="stat"><div class="label">实际 Token / 工具调用</div><div class="value">${fmt(t.token_total)}</div><div class="hint">${fmt(t.tools)} 次采集 · 输入 ${fmt(t.token_input)} / 输出 ${fmt(t.token_output)}</div></div><div class="stat"><div class="label">执行耗时</div><div class="value">${t.duration_ms == null ? "—" : (t.duration_ms / 1000).toFixed(1) + " s"}</div><div class="hint">${date(t.created_at)}</div></div></div>` +
     reportBudget(t) +
+    (t.skills?.length ? panel("本次加载的 Skill", t.skills.map(row => `<p><strong>${E(row.name)}</strong> · v${row.revision} · ${row.providers.map(E).join(" / ")}</p><p class="muted small mono">SHA256 ${E(row.digest)}</p>`).join(""), "查询步骤由任务创建时保存的 Skill 决定。") : "") +
     panel(
       "告警与主机信息",
-      `<p>${E(t.alert?.event_name || "手动诊断 / 连接测试")}</p><p class="muted small">主机：${E(t.asset?.name || t.alert?.host_name || "未关联")} · Host ID：${E(t.asset?.zabbix_hostid || t.alert?.host_id || "—")} · 类型：${E(labels[t.report?.device_type || t.asset?.device_type] || "待确认")}</p>`,
+      `<p>${E(t.alert?.event_name || "手动诊断 / 连接测试")}</p><p class="muted small">主机：${E(t.asset?.name || t.alert?.host_name || "未关联")} · Zabbix Host ID：${E(t.asset?.zabbix_hostid || t.alert?.host_id || "—")}${target.ssh_host_id ? ` · SSH 资产 ID：${E(target.ssh_host_id)} · IP：${E(target.address || "—")}` : ""} · 类型：${E(labels[t.report?.device_type || t.asset?.device_type] || "待确认")}</p>`,
     ) +
     panel(
       "AI 诊断结论 · 分析推断",
@@ -728,6 +731,7 @@ async function navigate(options = {}) {
     }
     else if (page === "diagnostics") html = await diagnostics();
     else if (page === "connections") html = await connections();
+    else if (page === "skills") html = await skillsPage(parts[1]);
     else if (page === "history") html = await analysisHistory();
     else if (page === "report") html = await report(parts[1] || "");
     else if (page === "settings") html = await systemSettings();

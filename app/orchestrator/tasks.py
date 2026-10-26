@@ -69,10 +69,15 @@ def create(
 ):
     from ..main import connection, read_setting
     from .budgets import profile as profile_limits
+    from ..skill_store import snapshot
 
     task_id = uuid.uuid4().hex
     trace_id = uuid.uuid4().hex
-    request = {**request, "limits": profile_limits(profile, read_setting)}
+    request = {
+        **request,
+        "limits": profile_limits(profile, read_setting),
+        "skills": snapshot(request, source),
+    }
     duplicate_id = None
     with connection() as db:
         try:
@@ -192,7 +197,19 @@ def evidence_page(task_id, include_logs=False):
         rows = [row_dict(row, cur) for row in cur.fetchall()]
     for row in rows:
         row["payload"] = decode(row["payload"])
-        if row["tool"] in {"logs", "kernel"} and not include_logs:
+        if (
+            row["tool"]
+            in {
+                "logs",
+                "kernel",
+                "ssh_diagnose_logs",
+                "ssh_diagnose_kernel",
+                "ssh_diagnose_system_errors",
+                "ssh_diagnose_oom",
+                "ssh_triage",
+            }
+            and not include_logs
+        ):
             payload = row["payload"]
             error = str(payload.get("error") or "").casefold()
             reason = None
