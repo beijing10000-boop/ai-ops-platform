@@ -504,6 +504,9 @@ def test_history_skill_calls_zabbix_only_and_adapts_initmax_arguments(monkeypatc
     assert json.loads(text)["cause"] == "历史 CPU 峰值 95"
     assert [name for name, args in log] == ["item_get", "history_get"]
     assert log[0][1]["extra_params"]["hostids"] == ["10"]
+    query_context = json.loads(create.call_args_list[0].kwargs["input"][0]["content"])
+    assert query_context["current_timestamp"] > 0
+    assert query_context["current_time"].endswith("+08:00")
     assert "分析与依据" in tasks.get(usage["task_id"])["report"]["answer"]
 
 

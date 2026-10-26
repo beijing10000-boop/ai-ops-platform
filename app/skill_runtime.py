@@ -2,8 +2,10 @@
 
 import asyncio
 from contextlib import AsyncExitStack
+from datetime import datetime
 import json
 import time
+from zoneinfo import ZoneInfo
 
 from openai import AsyncOpenAI
 from .orchestrator import tasks
@@ -124,6 +126,10 @@ async def run(
                         "service": request.get("service"),
                         "time_window": request.get("time_window"),
                         "diagnostic_type": task["diagnostic_type"],
+                        "current_time": datetime.now(
+                            ZoneInfo("Asia/Shanghai")
+                        ).isoformat(),
+                        "current_timestamp": int(time.time()),
                         "budget": limits,
                     },
                     ensure_ascii=False,
