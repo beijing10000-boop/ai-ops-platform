@@ -4,6 +4,7 @@ import json
 import logging
 import httpx
 from .main import read_setting
+from .feishu_cards import MessageID, message_ids, split_card
 
 log = logging.getLogger(__name__)
 ROOT = "https://open.feishu.cn/open-apis"
@@ -18,7 +19,7 @@ def make_card(title, text, template="blue"):
         before, after = body.rsplit(separator, 1)
         if after.startswith("本轮 Token 消耗：") and "\n" not in after:
             body, token_line = before, after
-    elements = [{"tag": "div", "text": {"tag": "lark_md", "content": body[:11000]}}]
+    elements = [{"tag": "div", "text": {"tag": "lark_md", "content": body}}]
     if token_line:
         elements.extend(
             [
@@ -70,21 +71,40 @@ async def get_token(client):
 async def send_card(chat_id, title, text, template="blue"):
     async with httpx.AsyncClient(timeout=30) as client:
         token = await get_token(client)
-        result = await request(
-            client,
-            "POST",
-            ROOT + "/im/v1/messages",
-            token,
-            params={"receive_id_type": "chat_id"},
-            json={
-                "receive_id": chat_id,
-                "msg_type": "interactive",
-                "content": json.dumps(
-                    make_card(title, text, template), ensure_ascii=False
-                ),
-            },
+        result = await send_rendered_card(
+            client, token, make_card(title, text, template), chat_id=chat_id
         )
         return result.get("data", {}).get("message_id")
+
+
+async def send_rendered_card(client, token, card, *, chat_id=None, reply_to=None):
+    parts = split_card(card)
+    first = None
+    ids = []
+    for part in parts:
+        payload = {
+            "msg_type": "interactive",
+            "content": json.dumps(part, ensure_ascii=False),
+        }
+        kwargs = {}
+        url = ROOT + "/im/v1/messages"
+        if reply_to:
+            url += "/" + reply_to + "/reply"
+            payload["reply_in_thread"] = False
+        else:
+            payload["receive_id"] = chat_id
+            kwargs["params"] = {"receive_id_type": "chat_id"}
+        response = await request(client, "POST", url, token, json=payload, **kwargs)
+        if first is None:
+            first = response
+        result_id = (response.get("data") or {}).get("message_id")
+        if result_id:
+            ids.append(result_id)
+        elif len(parts) > 1:
+            raise RuntimeError("飞书分段回复未返回消息 ID")
+    if ids:
+        first.setdefault("data", {})["message_id"] = MessageID(ids[0], ids)
+    return first
 
 
 async def reply_card(message_id, title, text, template="blue"):
@@ -97,18 +117,8 @@ async def reply_card(message_id, title, text, template="blue"):
         raise ValueError("original message ID is required for a reply")
     async with httpx.AsyncClient(timeout=30) as client:
         token = await get_token(client)
-        result = await request(
-            client,
-            "POST",
-            ROOT + "/im/v1/messages/" + message_id + "/reply",
-            token,
-            json={
-                "msg_type": "interactive",
-                "content": json.dumps(
-                    make_card(title, text, template), ensure_ascii=False
-                ),
-                "reply_in_thread": False,
-            },
+        result = await send_rendered_card(
+            client, token, make_card(title, text, template), reply_to=message_id
         )
         reply_id = (result.get("data") or {}).get("message_id")
         if not reply_id:
@@ -119,17 +129,21 @@ async def reply_card(message_id, title, text, template="blue"):
 async def update_card(message_id, title, text, template="green"):
     async with httpx.AsyncClient(timeout=30) as client:
         token = await get_token(client)
-        return await request(
+        parts = split_card(make_card(title, text, template))
+        response = await request(
             client,
             "PATCH",
             ROOT + "/im/v1/messages/" + message_id,
             token,
-            json={
-                "content": json.dumps(
-                    make_card(title, text, template), ensure_ascii=False
-                )
-            },
+            json={"content": json.dumps(parts[0], ensure_ascii=False)},
         )
+        ids = [str(message_id)]
+        for part in parts[1:]:
+            sent = await send_rendered_card(client, token, part, reply_to=message_id)
+            ids.extend(message_ids((sent.get("data") or {}).get("message_id")))
+        if isinstance(message_id, MessageID):
+            message_id.message_ids = tuple(ids)
+        return response
 
 
 async def send_text(chat_id, text):

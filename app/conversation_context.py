@@ -40,7 +40,7 @@ def remember(
     if not chat_id or not source_id:
         return
     previous = (parent_context or {}).get("turns", [])
-    turn = {"question": str(question)[:3000], "answer": str(answer)[:11000]}
+    turn = {"question": str(question)[:3000], "answer": str(answer)}
     payload = {
         "chat_id": chat_id,
         "turns": previous + [turn],
@@ -49,7 +49,9 @@ def remember(
     }
     client = _client()
     encoded = json.dumps(payload, ensure_ascii=False)
-    for message_id in (source_id, reply_id):
+    from .feishu_cards import message_ids
+
+    for message_id in (source_id, *message_ids(reply_id)):
         if message_id:
             client.set(PREFIX + message_id, encoded, ex=TTL)
     # Retained for compatibility with old data; no fallback to a different reply branch.
@@ -104,5 +106,5 @@ def format_context(payload):
         lines.append("原始告警消息：" + str(origin)[:11000])
     for index, turn in enumerate(turns, 1):
         lines.append(f"第{index}轮用户：{str(turn.get('question', ''))[:3000]}")
-        lines.append(f"第{index}轮AI回答：{str(turn.get('answer', ''))[:11000]}")
+        lines.append(f"第{index}轮AI回答：{str(turn.get('answer', ''))}")
     return "\n".join(lines)

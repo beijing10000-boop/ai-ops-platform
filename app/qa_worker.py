@@ -122,10 +122,18 @@ async def execute(
         task = tasks.get(usage.get("task_id")) if usage.get("task_id") else None
         partial = bool(task and task["status"] == "partial")
         title = "AI 分析结果 · 部分完成" if partial else "AI 分析完成"
-        display_result = result + "\n\n---\n" + format_usage(usage)
+        report = (task or {}).get("report") or {}
+        display_result = report.get("answer") or result
+        if report.get("limitations"):
+            display_result += "\n\n**诊断不足与待核验**\n" + "\n".join(
+                "- " + str(item) for item in report["limitations"]
+            )
+        if task and task.get("duration_ms") is not None:
+            display_result += f"\n\n执行耗时：{task['duration_ms'] / 1000:.1f} 秒"
         url = report_url({"_token_usage": usage})
         if url:
             display_result += "\n\n[查看完整诊断报告](" + url + ")"
+        display_result += "\n\n---\n" + format_usage(usage)
         record_ai_question("feishu", message_id, question, "success", token_usage=usage)
         if progress_id:
             try:

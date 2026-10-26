@@ -28,12 +28,12 @@ PROFILES = {
     },
 }
 RANGES = {
-    "rounds": (1, 8),
-    "calls": (1, 24),
-    "per_round": (1, 8),
-    "result_chars": (500, 10000),
-    "seconds": (20, 240),
-    "tokens": (2000, 100000),
+    "rounds": (1, None),
+    "calls": (1, None),
+    "per_round": (1, None),
+    "result_chars": (500, None),
+    "seconds": (20, None),
+    "tokens": (2000, None),
 }
 
 
@@ -48,7 +48,11 @@ def validate_settings(values):
                     raise ValueError()
                 for key, val in limits.items():
                     lo, hi = RANGES[key]
-                    if type(val) is not int or not lo <= val <= hi:
+                    if (
+                        type(val) is not int
+                        or val < lo
+                        or (hi is not None and val > hi)
+                    ):
                         raise ValueError()
         if "disabled_tools" in values:
             from ..integrations.zabbix import READ_TOOLS

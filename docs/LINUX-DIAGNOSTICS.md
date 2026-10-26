@@ -12,7 +12,7 @@
 
 当前十类剧本：CPU（cpu/processes）、内存（memory/memory_processes/kernel）、磁盘（disk）、IO（io/cpu）、服务（service/sockets/logs/memory/disk）、网络（network/sockets）、系统（system/kernel）、不可达（system）、瓶颈（cpu/memory/io/network）、日志（logs）。服务与日志需要合法服务名。IP 连接与流量等其它能力在独立 SSH MCP 使用；平台不复制其管理与执行实现。
 
-飞书或 Web 问答可直接写“看下 172.20.2.101 这台机器 /data 目录下的空间占用率，列出 5 层”。平台先用 Zabbix 接口 IP 精确过滤，读取 Host ID、主机组、标签、OS；只有唯一精确匹配并确认为 Linux 才进入 SSH 关联。也支持明确的 `Host ID：11600`。多目标、近似匹配、重复 IP、类型未知或 SSH 映射失败时不猜测目标。主机信息写入报告，避免问答报告错误显示“未关联”。
+飞书或 Web 问答可直接写“看下 172.20.2.101 这台机器 /data 目录下的空间占用率，列出 5 层”。平台先通过 `hostinterface_get` 按接口 IP 精确查询，取得 Host ID，再用 `host_get(hostids)` 读取主机组、标签、OS；不再向 `host_get` 传入不被 initMAX 接受的 `filter.ip`。无对应接口时可按完整可见名称精确核验，只有唯一精确匹配并确认为 Linux 才进入 SSH 关联。也支持明确的 `Host ID：11600`。多目标、近似匹配、重复 IP、类型未知或 SSH 映射失败时不猜测目标。主机信息写入报告，避免问答报告错误显示“未关联”。
 
 目录查询使用 SSH MCP 的 `ssh_diagnose_directory_usage`，其客户端令牌须授权 `directory` 动作，远端须提供该工具。平台先查文件系统使用率，再对所选根目录及其直接子目录逐层扫描，最多 5 层。路径受固定根目录校验，子路径只来自父扫描返回的直接子目录；不接收 Shell。每次远端扫描最多 8 秒、同一文件系统、每层根路径最多 30 个子目录排行。采集次数或总时间不足时保留已收集结果并标记覆盖不全；不能把排行当完整目录树，也不能把 `du` 字节数当 `df` 使用率。
 

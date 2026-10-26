@@ -5,17 +5,21 @@ def remember(event, chat_id, message_id, kind):
     if not chat_id or not message_id:
         return
     from ..main import connection
+    from ..feishu_cards import message_ids
 
     with connection() as db:
-        db.execute(
+        db.executemany(
             "INSERT INTO feishu_event_messages VALUES (?,?,?,?,?) ON CONFLICT(message_id) DO NOTHING",
-            (
-                message_id,
-                str(event["event_id"]),
-                str(event.get("event_value", "1")),
-                chat_id,
-                kind,
-            ),
+            [
+                (
+                    part_id,
+                    str(event["event_id"]),
+                    str(event.get("event_value", "1")),
+                    chat_id,
+                    kind,
+                )
+                for part_id in message_ids(message_id)
+            ],
         )
 
 

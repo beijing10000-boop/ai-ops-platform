@@ -281,7 +281,18 @@ try:
         )
         assert page.locator('textarea[name="ai_profile_budgets"]').count() == 0
         budget = page.get_by_role("spinbutton", name="标准分析 采集次数", exact=True)
-        budget.fill("9")
+        budget.fill("32")
+        for label, value in (
+            ("深度分析 最大轮次", "16"),
+            ("深度分析 每轮调用", "16"),
+            ("深度分析 每次结果字符", "16000"),
+            ("深度分析 总时间（秒）", "1200"),
+            ("深度分析 Token 阈值", "160000"),
+        ):
+            control = page.get_by_role("spinbutton", name=label, exact=True)
+            assert control.get_attribute("max") is None
+            control.fill(value)
+            assert control.evaluate("el => el.checkValidity()")
         ai.locator('[data-action="validate-settings"]').click()
         ai.locator("[data-verify-result]").get_by_text(
             "填写内容校验通过", exact=False
@@ -296,7 +307,7 @@ try:
             ai.locator('button[type="submit"]').click()
         assert saved.value.ok
         values = page.request.get(base + "/api/v1/settings").json()
-        assert json.loads(values["ai_profile_budgets"])["standard"]["calls"] == 9
+        assert json.loads(values["ai_profile_budgets"])["standard"]["calls"] == 32
         assert values["web_public_host"] == "127.0.0.1:8765"
         assert values["allowed_chat_ids"] == ""
         draft_checks = []
