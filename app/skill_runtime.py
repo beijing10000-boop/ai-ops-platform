@@ -341,12 +341,29 @@ async def run(
                                 raise ValueError("工具未授权")
                         except (ValueError, TypeError, KeyError) as exc:
                             outcome = {"error": safe(str(exc))}
-                        if outcome.get("error") or outcome.get("is_error"):
+                        label = (
+                            args.get("name", call.name)
+                            if isinstance(args, dict) and call.name == "call_mcp_tool"
+                            else call.name
+                        )
+                        if (
+                            outcome.get("error")
+                            or outcome.get("is_error")
+                            or outcome.get("status")
+                            in {"partial", "failed", "cancelled"}
+                        ):
                             gaps.append(
                                 "工具 "
-                                + str(call.name)
+                                + str(label)
                                 + " 未取得完整证据："
-                                + str(outcome.get("error") or "MCP 返回失败")
+                                + str(
+                                    outcome.get("error")
+                                    or (
+                                        "MCP 仅返回部分采集数据"
+                                        if outcome.get("status") == "partial"
+                                        else "MCP 返回失败"
+                                    )
+                                )
                             )
                         conversation.append(
                             {

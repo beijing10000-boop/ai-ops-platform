@@ -1,6 +1,6 @@
 # v0.9.0 验证范围
 
-本地回归：222 项 Python 测试通过（含临时 Redis/RQ、真实 HTTP MCP fixture 会话）；Chromium 桌面检查 41 项通过，无 JavaScript 异常及 HTTP 5xx。桌面结果见 [UI-TEST-RESULTS.json](UI-TEST-RESULTS.json)，截图使用隔离测试数据。合并前另由 GitHub Actions 执行下列 CI 检查，以对应提交的运行记录为准。
+本地回归：223 项 Python 测试通过（含临时 Redis/RQ、真实 HTTP MCP fixture 会话）；Chromium 桌面检查 41 项通过，无 JavaScript 异常及 HTTP 5xx。桌面结果见 [UI-TEST-RESULTS.json](UI-TEST-RESULTS.json)，截图使用隔离测试数据。合并前另由 GitHub Actions 执行下列 CI 检查，以对应提交的运行记录为准。
 
 - Skill：包/元数据校验、ZIP 路径与脚本拒绝、角色与 CSRF、加密持久化、版本快照、启停与场景范围、原生工具验证、SSH 直接查询时零 Zabbix 连接、历史查询时零 SSH 连接、initMAX 参数适配、目标与版本校验、预算、取消及实际用量；浏览器真实 ZIP 上传、预览、编辑、启停、不同角色及三种桌面宽度。
 

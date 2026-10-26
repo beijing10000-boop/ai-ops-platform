@@ -550,3 +550,56 @@ def test_readiness_check_reports_missing_tools_without_host_queries(rig, monkeyp
     assert not result["ok"]
     assert result["results"][0]["missing"] == ["ssh_diagnose_directory_usage"]
     assert session.calls == []
+
+
+def test_partial_native_evidence_is_a_partial_report(rig, monkeypatch):
+    session, _ = rig
+    install(providers=["ssh_mcp"])
+    original = session.call_tool
+
+    async def call(name, args):
+        result = await original(name, args)
+        if name == "ssh_diagnose_cpu":
+            result.structuredContent["status"] = "partial"
+        return result
+
+    monkeypatch.setattr(session, "call_tool", call)
+    create = AsyncMock(
+        side_effect=[
+            response(
+                Call(
+                    "call_mcp_tool",
+                    {
+                        "provider": "ssh_mcp",
+                        "name": "ssh_resolve_target",
+                        "arguments": {"address": "172.20.2.101"},
+                    },
+                )
+            ),
+            response(
+                Call(
+                    "call_mcp_tool",
+                    {
+                        "provider": "ssh_mcp",
+                        "name": "ssh_diagnose_cpu",
+                        "arguments": {"host_id": 7},
+                    },
+                )
+            ),
+            response(text="取得部分 CPU 证据，需要补充核验。"),
+        ]
+    )
+    _, usage = asyncio.run(
+        mcp_runtime.run(
+            "report",
+            "172.20.2.101 CPU",
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            return_usage=True,
+        )
+    )
+    report = tasks.get(usage["task_id"])
+    assert report["status"] == "partial"
+    assert any(
+        "ssh_diagnose_cpu" in gap and "部分" in gap
+        for gap in report["report"]["limitations"]
+    )

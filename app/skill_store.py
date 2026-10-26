@@ -254,7 +254,9 @@ def snapshot(request, source):
     )
     selected = [row for row in rows(True) if row["enabled"] and scope in row["scopes"]]
     if sum(len(row["files"]["SKILL.md"].encode()) for row in selected) > 128000:
-        raise HTTPException(422, "本场景启用的 Skill 正文合计超过 128 KB，请停用无关 Skill")
+        raise HTTPException(
+            422, "本场景启用的 Skill 正文合计超过 128 KB，请停用无关 Skill"
+        )
     return selected
 
 
