@@ -61,7 +61,9 @@ try:
         raise RuntimeError("UI test API failed to start")
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
-            headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
+            headless=True,
+            channel=os.getenv("AIOPS_BROWSER_CHANNEL") or None,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
         )
         page = browser.new_page(
             viewport={"width": 1440, "height": 1080}, device_scale_factor=1
@@ -666,7 +668,9 @@ try:
     (ROOT / "docs/UI-TEST-RESULTS.json").write_text(
         json.dumps(
             {
-                "browser": "Chromium headless",
+                "browser": "Google Chrome headless"
+                if os.getenv("AIOPS_BROWSER_CHANNEL") == "chrome"
+                else "Chromium headless",
                 "fixture": "disposable local database; no production data",
                 "checks": checks,
                 "javascript_errors": errors,

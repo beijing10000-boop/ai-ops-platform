@@ -274,26 +274,26 @@ async function diagnostics() {
   const options = await api(P + "/diagnostic-options");
   return (
     intro(
-      "选择 Zabbix 监控主机或已接收的告警发起诊断。执行前查询监控，必要时补充 Linux 实时证据。",
+      "输入问题发起诊断。启用 Skill 后按指引选择后台服务，可直接查询已登记的 SSH 主机 IP，也可选择监控主机或关联告警。",
     ) +
     panel(
       "新建诊断",
-      `<form id="diagnostic-form">${state.selectedEvent ? `<div class="notice context-banner"><div><strong>正在分析告警 ${E(state.selectedEvent)}</strong><p>${E(state.selectedEventTitle || "以告警中记录的主机为诊断目标。")}</p></div>${btn("clear-event", "取消关联", "", "small")}</div>` : ""}<div class="form-grid"><div class="field wide"><span>查询监控主机</span><div class="toolbar"><input id="host-search" aria-label="搜索 Zabbix 主机" placeholder="输入主机名称或 Zabbix Host ID">${btn("search-hosts", "查询 Zabbix 主机")}</div><small id="host-search-result" role="status">直接从 Zabbix MCP 读取主机，无需在平台登记资产。</small></div>${field("zabbix_hostid", "诊断主机", "", "text", "选择监控主机后，平台通过相同 Host ID 关联独立 SSH MCP；填写告警事件 ID 时以事件主机为准。", [["", "未选择主机"], ...state.hostRows.map(h => [h.zabbix_hostid, h.name + " · Host ID " + h.zabbix_hostid + " · " + (labels[h.device_type] || h.device_type)])])}${field("event_id", "告警事件 ID", state.selectedEvent || "", "text", "可选，必须是平台已经接收的事件。")}${field("diagnostic_type", "诊断类型", "auto", "text", "", [["auto", "自动识别告警类型"], ...Object.entries(PLAY)])}${field(
+      `<form id="diagnostic-form">${state.selectedEvent ? `<div class="notice context-banner"><div><strong>正在分析告警 ${E(state.selectedEvent)}</strong><p>${E(state.selectedEventTitle || "以告警中记录的主机为诊断目标。")}</p></div>${btn("clear-event", "取消关联", "", "small")}</div>` : ""}<div class="form-grid"><div class="field wide"><span>查询监控主机</span><div class="toolbar"><input id="host-search" aria-label="搜索 Zabbix 主机" placeholder="输入主机名称或 Zabbix Host ID">${btn("search-hosts", "查询 Zabbix 主机")}</div><small id="host-search-result" role="status">直接从 Zabbix MCP 读取主机，无需在平台登记资产。</small></div>${field("zabbix_hostid", "诊断主机", "", "text", "可选。按 Skill 查询明确 SSH IP 时可不选择；选择 Host ID 或关联告警时，以该主机为准。", [["", "未选择主机"], ...state.hostRows.map(h => [h.zabbix_hostid, h.name + " · Host ID " + h.zabbix_hostid + " · " + (labels[h.device_type] || h.device_type)])])}${field("event_id", "告警事件 ID", state.selectedEvent || "", "text", "可选，必须是平台已经接收的事件。")}${field("diagnostic_type", "诊断类型", "auto", "text", "", [["auto", "自动识别告警类型"], ...Object.entries(PLAY)])}${field(
         "profile",
         "分析模式",
         options.default_profile,
         "text",
-        "快速只查监控；标准和深度对已核验的 Linux 主机自动补充一轮 SSH 证据，受权限与预算限制。",
+        "选择本次轮次、次数和时间预算；启用 Skill 后，查询来源和步骤由 Skill 决定。",
         [
           ["quick", "快速分析"],
           ["standard", "标准分析"],
           ["deep", "深度分析"],
         ],
-      )}${field("service", "systemd 服务名", "", "text", "服务/日志诊断时填写，如 nginx.service。")}${field("time_window", "日志窗口（分钟）", "30", "number", "范围 1–120 分钟；监控历史默认围绕告警前 30 分钟。")}${field("question", "诊断问题", "请根据实际证据诊断故障并给出建议", "textarea", "", null, true)}</div><div class="form-actions">${btn("validate-diagnostic", "验证诊断参数与关联")}<button class="button primary" type="submit">开始诊断 →</button></div><p role="status" data-verify-result></p></form>`,
+      )}${field("service", "systemd 服务名", "", "text", "服务/日志诊断时填写，如 nginx.service。")}${field("time_window", "日志窗口（分钟）", "30", "number", "范围 1–120 分钟；Skill 按此窗口及原生工具参数查询日志。")}${field("question", "诊断问题", "请根据实际证据诊断故障并给出建议", "textarea", "", null, true)}</div><div class="form-actions">${btn("validate-diagnostic", "验证诊断参数与关联")}<button class="button primary" type="submit">开始诊断 →</button></div><p role="status" data-verify-result></p></form>`,
     ) +
     panel(
       "监控问答",
-      `<form id="ask-form">${field("question", "查询监控或提出问题", "", "textarea", "问答中的地址文字不会自动成为 SSH 连接目标。", null, true)}<div class="form-actions"><button class="button" type="submit">发送问题</button></div></form><div id="ask-result" class="report-answer"></div>`,
+      `<form id="ask-form">${field("question", "查询监控或提出问题", "", "textarea", "启用 Skill 后，可填写 SSH 服务已登记的明确 IP，按指引直接查询实时证据。", null, true)}<div class="form-actions"><button class="button" type="submit">发送问题</button></div></form><div id="ask-result" class="report-answer"></div>`,
     )
   );
 }
@@ -325,7 +325,7 @@ async function diagnosticTools() {
           )
           .join(""),
       ),
-    "查看两个 MCP 的授权工具与各类问题的诊断边界。",
+    "此表为未启用 Skill 时的兼容流程；启用后按 Skill 查询指引选择原生工具，可在 Skill 管理验证实际目录。",
     "connection-tools",
   );
 }

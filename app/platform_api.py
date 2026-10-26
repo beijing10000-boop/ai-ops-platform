@@ -233,7 +233,7 @@ async def validate_diagnostic(body: TaskInput, who=Depends(require("diagnostics.
             ) from None
     return {
         "ok": True,
-        "message": "诊断参数验证通过；本次未执行 SSH 或 AI 分析。实际任务按监控设备类型和 SSH MCP 配置决定是否补查。",
+        "message": "诊断参数验证通过；本次未执行 SSH 或 AI 分析。实际查询按已启用的 Skill 决定；未启用时采用兼容流程。",
     }
 
 

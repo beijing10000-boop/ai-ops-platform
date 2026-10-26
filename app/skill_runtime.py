@@ -122,6 +122,8 @@ async def run(
                         "context": context,
                         "alert": request.get("event") or {},
                         "service": request.get("service"),
+                        "time_window": request.get("time_window"),
+                        "diagnostic_type": task["diagnostic_type"],
                         "budget": limits,
                     },
                     ensure_ascii=False,
