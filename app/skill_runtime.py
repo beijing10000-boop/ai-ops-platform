@@ -42,7 +42,12 @@ def function(name, description, properties, required):
 async def run(
     prompt, question, *, task, client, model, context, return_usage, read_setting
 ):
-    from .mcp_runtime import usage_counts, readable_report_answer, compact_result
+    from .mcp_runtime import (
+        usage_counts,
+        readable_report_answer,
+        compact_result,
+        incomplete_output_reason,
+    )
     from .main import connection
 
     began = time.monotonic()
@@ -247,6 +252,11 @@ async def run(
                     telemetry.append(
                         {"kind": "round", "round": rounds, **(counts or {})}
                     )
+                    check()
+                    if issue := incomplete_output_reason(response):
+                        gaps.append(issue)
+                        answer = safe((response.output_text or "").strip()) or issue
+                        break
                     output = list(response.output or [])
                     conversation.extend(
                         item.model_dump(exclude_none=True) for item in output
@@ -259,6 +269,7 @@ async def run(
                         break
                     for index, call in enumerate(requested):
                         check()
+                        args = {}
                         try:
                             args = json.loads(call.arguments or "{}")
                             if not isinstance(args, dict):

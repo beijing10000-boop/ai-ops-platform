@@ -206,6 +206,45 @@ def test_cpu_monitoring_precedes_ssh_and_real_provider_usage_is_aggregated(rig):
     assert task["report"]["device_type"] == "linux" and task["status"] == "success"
 
 
+def test_compatibility_final_answer_honors_cancellation_and_keeps_usage(rig):
+    client = rig[3]
+
+    async def cancel(**kwargs):
+        with main.connection() as db:
+            db.execute(
+                "UPDATE diagnostic_tasks SET cancel_requested=1 WHERE status='running'"
+            )
+        return SimpleNamespace(
+            output=[],
+            output_text="不应保存为成功",
+            usage={"input_tokens": 20, "output_tokens": 10, "total_tokens": 30},
+        )
+
+    client.responses.create = cancel
+    with pytest.raises(tasks.Cancelled):
+        run(rig)
+    with main.connection() as db:
+        assert db.execute(
+            "SELECT status,token_total FROM diagnostic_tasks"
+        ).fetchone() == ("cancelled", 30)
+
+
+def test_compatibility_incomplete_answer_is_marked_partial(rig):
+    async def incomplete(**kwargs):
+        return SimpleNamespace(
+            output=[],
+            output_text="尚未输出完的分析",
+            status="incomplete",
+            incomplete_details={"reason": "max_output_tokens"},
+            usage=None,
+        )
+
+    rig[3].responses.create = incomplete
+    result, task = run(rig)
+    assert task["status"] == "partial" and task["report"]["answer"] == result[0]
+    assert any("输出" in gap for gap in task["report"]["limitations"])
+
+
 @pytest.mark.parametrize("device_type", ["windows", "network", "vmware"])
 def test_other_device_types_never_enter_linux_ssh(rig, device_type):
     rig[4]["type"] = device_type

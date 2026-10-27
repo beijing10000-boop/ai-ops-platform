@@ -82,6 +82,32 @@ def test_web_ask_calls_read_only_agent(monkeypatch):
     assert response.json() == {"ok": True, "answer": "已从 MCP 查询"}
 
 
+def test_web_ask_does_not_cancel_at_the_old_fixed_deadline(monkeypatch):
+    import asyncio
+    from app import ai_agent
+
+    original = asyncio.wait_for
+
+    async def simulate_old_deadline(awaitable, timeout):
+        if timeout == 180:
+            awaitable.close()
+            raise TimeoutError("old Web cap expired before the task budget")
+        return await original(awaitable, timeout)
+
+    async def budgeted_ask(*args, **kwargs):
+        return "任务按自身保存的时间预算完成", {"available": False}
+
+    monkeypatch.setattr(asyncio, "wait_for", simulate_old_deadline)
+    monkeypatch.setattr(ai_agent, "ask", budgeted_ask)
+    result = client.post(
+        "/api/v1/ask",
+        headers={"Authorization": "Bearer test-admin"},
+        json={"question": "执行较长的目录诊断"},
+    )
+    assert result.status_code == 200
+    assert "时间预算" in result.json()["answer"]
+
+
 def test_ai_model_requires_configuration(monkeypatch):
     from app import main
 

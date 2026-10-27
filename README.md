@@ -1,6 +1,6 @@
 # AI Ops Platform · AI 智能运维平台
 
-**v0.9.0** · 默认 Web 端口 **8088**。平台负责 Zabbix 告警、飞书协作、AI 分析与报告，通过两个独立的 Streamable HTTP MCP 服务获取证据。
+**v0.9.1** · 默认 Web 端口 **8088**。平台负责 Zabbix 告警、飞书协作、AI 分析与报告，通过两个独立的 Streamable HTTP MCP 服务获取证据。
 
 | 服务 | 职责 |
 | --- | --- |
@@ -27,7 +27,7 @@
 - 报告支持中文进度、自动刷新、可读结论、复制和下载；分析历史可搜索任务、事件与 Trace ID。服务检查显示各队列及 Worker 注册数量。
 - 保留分级告警、恢复关联、卡片 AI 分析、追问上下文、任务取消/重试、角色与审计、加密证据和桌面深浅色主题。
 
-标准与深度模式对已核验并精确关联的 Linux 主机，按固定剧本自动采集一轮 SSH 实时证据，再结合 Zabbix 历史进行分析；后续补查受授权和预算限制。目标通过可信任务的 **Zabbix Host ID** 精确解析，固定远端主机 ID 和版本；映射失败或配置变化时停止补查，不按 IP/名称猜测，不切换到本地 SSH。快速模式只查监控，非 Linux 不使用 Linux 诊断。
+启用 Skill 后，由指引决定查询服务、工具和顺序；分析模式决定预算，不强制查询 Zabbix。没有启用 Skill 的场景沿用兼容流程：标准与深度模式对精确关联的 Linux 主机按固定剧本采集 SSH 证据，快速模式只查监控。两种流程都核验目标和远端版本，保留授权与预算检查，不切换到本地 SSH。
 
 ## 安装
 
@@ -45,7 +45,7 @@ docker compose exec -T web cat /app/data/bootstrap.token
 
 在受信任内网打开 `http://服务器IP:8088/setup`，输入一次性凭据和飞书应用、管理员 Open ID、实际外部地址，验证后保存。登录后在 Web 完成两个 MCP、AI 和飞书配置，无需创建业务 `.env`。
 
-独立 SSH MCP 需为 **v0.2.0 或更新版本**，支持 `ssh_resolve_host` 与 `expected_revision`。在其 Web 登记主机并填写 Zabbix Host ID，为平台签发专用客户端令牌。
+使用内置 Skill 按 IP 直接查询时，独立 SSH MCP 需为 **v0.4.1 或更新版本**。在其 Web 登记主机、核验公钥、配置凭据，并为平台签发专用客户端令牌；实时 IP 查询无需填写 Zabbix Host ID。按 Zabbix Host ID 关联告警时仍需填写映射。
 
 完成飞书配置并停止使用同一 App ID 的旧接收器后启动：
 
@@ -60,6 +60,7 @@ docker compose --profile feishu up -d feishu-receiver
 | [安装部署](docs/INSTALLATION.md) | 首次部署、HTTP 内网访问、初始化与启动 |
 | [升级与回滚](docs/UPGRADING.md) | 旧 SSH 配置清理、备份与恢复 |
 | [Web 配置与验证](docs/CONFIGURATION.md) | 表单、验证按钮与默认提示词 |
+| [需求复核记录](docs/REQUIREMENTS-AUDIT.md) | 已实现功能、补充修复、验证结果与生产验收边界 |
 | [架构](docs/ARCHITECTURE.md) / [SSH MCP 接入](docs/LINUX-DIAGNOSTICS.md) | 双 MCP、身份映射、预算与失败处理 |
 | [Zabbix](docs/ZABBIX.md) / [飞书](docs/FEISHU.md) | 告警、恢复、群与卡片 |
 | [安全](SECURITY.md) / [排障](docs/TROUBLESHOOTING.md) | 权限、密钥和常见问题 |

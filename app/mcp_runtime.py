@@ -90,6 +90,21 @@ def usage_counts(response):
     }
 
 
+def incomplete_output_reason(response):
+    if getattr(response, "status", None) != "incomplete":
+        return None
+    details = getattr(response, "incomplete_details", None)
+    reason = (
+        details.get("reason")
+        if isinstance(details, dict)
+        else getattr(details, "reason", None)
+    )
+    return {
+        "max_output_tokens": "模型输出达到单次 Token 上限，报告未完整生成；已保留返回内容，请缩小问题范围或调整模型输出限制",
+        "content_filter": "模型服务限制了本轮输出，报告未完整生成；已保留返回内容",
+    }.get(reason, "模型未完整返回本轮输出；已保留返回内容，不能视为完整报告")
+
+
 def readable_report_answer(raw):
     """Format JSON model output for the Web report without changing card payload.
 
@@ -1011,6 +1026,11 @@ async def run(
                         ),
                     )
                     track(response)
+                    check()
+                    if issue := incomplete_output_reason(response):
+                        gaps.append(issue)
+                        result_text = (response.output_text or "").strip() or issue
+                        break
                     output = list(response.output or [])
                     conversation.extend(x.model_dump(exclude_none=True) for x in output)
                     calls = [x for x in output if x.type == "function_call"]
@@ -1102,6 +1122,9 @@ async def run(
                             ),
                         )
                         track(response)
+                        check()
+                        if issue := incomplete_output_reason(response):
+                            gaps.append(issue)
                         result_text = (response.output_text or "").strip()
                     else:
                         budget_end = True
@@ -1151,12 +1174,12 @@ async def run(
     if not result_text:
         gaps.append("模型未返回可显示的分析结论")
         result_text = "模型未返回可显示的分析结论"
-    result_text = safe_text(result_text, 40000)
+    result_text = safe_text(result_text, None)
     status = "partial" if gaps or budget_end else "success"
     tasks.finish(
         task_id,
         {
-            "answer": redact(readable_report_answer(result_text), 40000),
+            "answer": redact(readable_report_answer(result_text), None),
             "device_type": effective_type,
             "diagnostic_type": kind,
             "target": target_metadata,

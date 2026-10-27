@@ -59,6 +59,7 @@ class SkillMCP:
         self.stack = AsyncExitStack()
         self.sessions, self.tools, self.bindings = {}, {}, {}
         self.item_scope = set()
+        self.monitoring_hostids = set()
         self.target_metadata = {}
         self.configuration = {p: self.config(p) for p in self.providers}
 
@@ -196,6 +197,45 @@ class SkillMCP:
         for ident, row in matching:
             self.bindings[ident] = row
 
+    def observe_monitoring_target(self, name, args, records):
+        """Record returned identity for the report without issuing any extra queries."""
+        if name == "hostinterface_get" and self.target and self.target[0] == "ip":
+            ids = {
+                str(row.get("hostid", ""))
+                for row in records
+                if row.get("ip") == self.target[1]
+                and str(row.get("hostid", "")).isdigit()
+            }
+            self.monitoring_hostids = ids if len(ids) == 1 else set()
+            return
+        if name != "host_get" or len(records) != 1:
+            return
+        expected = (
+            {self.target[1]}
+            if self.target and self.target[0] == "hostid"
+            else self.monitoring_hostids
+            if self.target
+            else {str(value) for value in args.get("hostids", [])}
+        )
+        row = records[0]
+        host_id = str(row.get("hostid", ""))
+        if len(expected) != 1 or host_id not in expected or not host_id.isdigit():
+            return
+        if self.target_metadata.get("host_id") not in (None, "", host_id):
+            return
+        device_type = zabbix.infer_device(row)
+        self.target_metadata = {
+            **self.target_metadata,
+            "host_id": host_id,
+            "host_name": row.get("name")
+            or row.get("host")
+            or self.target_metadata.get("host_name")
+            or host_id,
+            "device_type": self.target_metadata.get("device_type", device_type)
+            if self.target_metadata.get("ssh_host_id") or device_type == "unknown"
+            else device_type,
+        }
+
     async def call(self, provider, name, arguments):
         self.check(provider)
         tools = await self.catalog(provider)
@@ -226,6 +266,8 @@ class SkillMCP:
                     else None,
                 )
                 result = zabbix.safe_result(response, 100000)
+                if not result["is_error"]:
+                    self.observe_monitoring_target(name, args, result["records"])
                 if not result["is_error"] and name == "item_get":
                     self.item_scope.update(
                         str(r["itemid"])
