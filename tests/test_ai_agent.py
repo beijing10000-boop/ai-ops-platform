@@ -140,6 +140,19 @@ def test_model_finishes_without_calls(monkeypatch):
     assert m.call_tool.await_count == 0
 
 
+def test_compatibility_report_preserves_long_answer_in_web_and_feishu(monkeypatch):
+    from app.orchestrator import tasks
+    from app.worker import analysis_summary
+
+    long_answer = "完整依据🙂\n" * 9000 + "最后一段不能丢失"
+    setup(monkeypatch, [Item("function_call", "event_get", "one")], long_answer)
+    answer, usage = asyncio.run(ai_agent.ask("查询", return_usage=True))
+    report = tasks.get(usage["task_id"])["report"]
+    assert answer == long_answer
+    assert report["answer"] == long_answer
+    assert long_answer in analysis_summary({"_report_answer": report["answer"]})
+
+
 def test_native_tools_reject_unknown_tools_even_if_remote_claims_readonly():
     remote = [
         SimpleNamespace(

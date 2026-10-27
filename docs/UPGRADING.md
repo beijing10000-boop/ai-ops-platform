@@ -1,5 +1,19 @@
 # 升级说明
 
+## v0.9.0 → v0.9.1
+
+本次只升级平台，无数据库迁移；保留已导入 Skill、配置、历史与密钥。SSH MCP 已是 v0.4.1 时无需再升级，initMAX 和原 Skill ZIP 均无需修改。先按下方备份流程保存数据与配对密钥，再在原部署目录执行：
+
+```bash
+cd /data/ai-ops-platform
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://127.0.0.1:8088/healthz
+```
+
+没有启用飞书接收器时去掉 `--profile feishu`。Ctrl+F5 刷新，确认版本为 v0.9.1；曾因工具参数、截断或超时失败的任务需要重新发起。原模板需在目标场景保持启用；验收问题见 [需求复核记录](REQUIREMENTS-AUDIT.md)。
+
 ## v0.8.2 → v0.9.0
 
 新增 Skill 驱动的双 MCP 查询。数据库自动升级至 v5，只增加 Skill 表；保留原有设置、告警、主密钥、历史与报告。升级前按下方备份流程保存完整数据卷与配对密钥。

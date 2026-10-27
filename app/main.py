@@ -23,7 +23,7 @@ DB = DATA_DIR / "app.sqlite3"
 MASTER_KEY = os.getenv("APP_ENCRYPTION_KEY", "")
 ADMIN_TOKEN = os.getenv("ADMIN_API_TOKEN", "")
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
-app = FastAPI(title="Zabbix AI Ops · Unified Platform", version="0.9.0")
+app = FastAPI(title="Zabbix AI Ops · Unified Platform", version="0.9.1")
 app.mount(
     "/assets",
     StaticFiles(directory=Path(__file__).parent.parent / "web" / "assets"),
@@ -1188,11 +1188,8 @@ async def ask_web(body: AskRequest):
     request_id = uuid.uuid4().hex
     record_ai_question("web", request_id, body.question, "running")
     try:
-        import asyncio
-
-        answer, usage = await asyncio.wait_for(
-            ask(body.question, return_usage=True), timeout=180
-        )
+        # The shared runtime owns the saved task deadline, including Skill tasks.
+        answer, usage = await ask(body.question, return_usage=True)
         record_ai_question(
             "web", request_id, body.question, "success", token_usage=usage
         )

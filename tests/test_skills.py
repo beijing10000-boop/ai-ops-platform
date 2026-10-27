@@ -606,3 +606,153 @@ def test_partial_native_evidence_is_a_partial_report(rig, monkeypatch):
         "ssh_diagnose_cpu" in gap and "部分" in gap
         for gap in report["report"]["limitations"]
     )
+
+
+def test_malformed_skill_call_is_reported_and_remaining_calls_continue(rig):
+    install(providers=["ssh_mcp"])
+    malformed = Call("call_mcp_tool", {})
+    malformed.arguments = '{"provider":'
+    create = AsyncMock(
+        side_effect=[
+            response(malformed, Call("list_mcp_tools", {"provider": "ssh_mcp"})),
+            response(text="参数有误，仅取得工具目录，未采集主机。"),
+        ]
+    )
+    _, usage = asyncio.run(
+        mcp_runtime.run(
+            "report",
+            "查询 CPU",
+            return_usage=True,
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+        )
+    )
+    task = tasks.get(usage["task_id"])
+    assert task["status"] == "partial" and task["tools"] == 1
+    outputs = [
+        part
+        for part in create.call_args.kwargs["input"]
+        if part.get("type") == "function_call_output"
+    ]
+    assert "error" in json.loads(outputs[0]["output"])
+    assert json.loads(outputs[1]["output"])["tools"]
+
+
+def test_skill_cancellation_during_final_answer_is_not_saved_as_success(rig):
+    install(providers=["ssh_mcp"])
+    task, _ = tasks.create({"question": "CPU"})
+
+    async def cancel(**kwargs):
+        with main.connection() as db:
+            db.execute(
+                "UPDATE diagnostic_tasks SET cancel_requested=1 WHERE task_id=?",
+                (task["task_id"],),
+            )
+        return response(text="不应作为成功报告保存")
+
+    with pytest.raises(tasks.Cancelled):
+        asyncio.run(
+            mcp_runtime.run(
+                "report",
+                "CPU",
+                task_id=task["task_id"],
+                client=SimpleNamespace(responses=SimpleNamespace(create=cancel)),
+            )
+        )
+    stopped = tasks.get(task["task_id"])
+    assert stopped["status"] == "cancelled" and stopped["token_total"] == 30
+
+
+def test_incomplete_skill_model_answer_is_retained_but_marked_partial(rig):
+    install(providers=["ssh_mcp"])
+    partial = response(text="尚未输出完的分析")
+    partial.status = "incomplete"
+    partial.incomplete_details = SimpleNamespace(reason="max_output_tokens")
+    create = AsyncMock(return_value=partial)
+    answer, usage = asyncio.run(
+        mcp_runtime.run(
+            "report",
+            "CPU",
+            return_usage=True,
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+        )
+    )
+    task = tasks.get(usage["task_id"])
+    assert task["status"] == "partial" and task["report"]["answer"] == answer
+    assert any("输出" in gap for gap in task["report"]["limitations"])
+
+
+@pytest.mark.parametrize("target", [("hostid", "10"), ("ip", "172.20.2.101")])
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_skill_zabbix_target_metadata_comes_only_from_unique_returned_host(
+    monkeypatch, target, duplicate
+):
+    config = {"mcp_url": "http://zabbix.invalid/mcp"}
+    calls = []
+
+    class MonitoringSession:
+        async def list_tools(self):
+            return SimpleNamespace(
+                tools=[
+                    remote_tool(
+                        name,
+                        {
+                            "output": {"type": "string"},
+                            "extra_params": {"type": "object"},
+                        },
+                    )
+                    for name in ("hostinterface_get", "host_get")
+                ],
+                nextCursor=None,
+            )
+
+        async def call_tool(self, name, args):
+            calls.append(name)
+            row = (
+                {"hostid": "10", "ip": "172.20.2.101"}
+                if name == "hostinterface_get"
+                else {
+                    "hostid": "10",
+                    "name": "monitoring-linux",
+                    "inventory": {"os": "Rocky Linux"},
+                }
+            )
+            return SimpleNamespace(
+                structuredContent={
+                    "result": [row, dict(row, hostid="11")] if duplicate else [row]
+                },
+                content=[],
+                isError=False,
+            )
+
+    @asynccontextmanager
+    async def connect(*args):
+        yield MonitoringSession()
+
+    monkeypatch.setattr(zabbix, "connect", connect)
+
+    async def run():
+        async with SkillMCP(
+            lambda key: config.get(key, ""),
+            ["zabbix_mcp"],
+            deadline=time.monotonic() + 20,
+            target=target,
+        ) as bridge:
+            if target[0] == "ip":
+                await bridge.call(
+                    "zabbix_mcp", "hostinterface_get", {"filter": {"ip": target[1]}}
+                )
+            await bridge.call(
+                "zabbix_mcp", "host_get", {"hostids": ["10"], "selectInventory": ["os"]}
+            )
+            if duplicate:
+                assert not bridge.target_metadata
+            else:
+                assert bridge.target_metadata["host_id"] == "10"
+                assert bridge.target_metadata["host_name"] == "monitoring-linux"
+                assert bridge.target_metadata["device_type"] == "linux"
+            assert "ssh_mcp" not in bridge.sessions
+
+    asyncio.run(run())
+    assert calls == (
+        ["hostinterface_get", "host_get"] if target[0] == "ip" else ["host_get"]
+    )
