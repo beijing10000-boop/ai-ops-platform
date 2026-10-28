@@ -163,4 +163,9 @@ def test_problem_get_rejects_clock_sort_and_advertises_only_eventid():
         zabbix.validate_args("problem_get", {"sortfield": "clock"})
     good = zabbix.validate_args("problem_get", {"sortfield": "eventid"})
     assert good["sortfield"] == "eventid"
-    assert "clock" in zabbix.input_schema("event_get")["properties"]["sortfield"]["anyOf"][0]["enum"]
+    assert (
+        "clock"
+        in zabbix.input_schema("event_get")["properties"]["sortfield"]["anyOf"][0][
+            "enum"
+        ]
+    )
