@@ -379,7 +379,11 @@ def make_card(event, info=None, *, analysis=False, mute_info=None):
                 "elements": [
                     {
                         "tag": "plain_text",
-                        "content": "◉ " + format_usage(info.get("_token_usage"), duration_ms=info.get("_duration_ms")),
+                        "content": "◉ "
+                        + format_usage(
+                            info.get("_token_usage"),
+                            duration_ms=info.get("_duration_ms"),
+                        ),
                     }
                 ],
             }
