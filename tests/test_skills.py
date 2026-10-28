@@ -332,21 +332,35 @@ def test_skill_timeout_retains_successful_mcp_evidence(rig):
     create = AsyncMock(
         side_effect=[
             response(Call("list_mcp_tools", {"provider": "ssh_mcp"})),
-            response(Call("call_mcp_tool", {
-                "provider": "ssh_mcp", "name": "ssh_resolve_target",
-                "arguments": {"address": "172.20.2.101"}
-            })),
-            response(Call("call_mcp_tool", {
-                "provider": "ssh_mcp", "name": "ssh_diagnose_cpu",
-                "arguments": {"host_id": 7}
-            })),
+            response(
+                Call(
+                    "call_mcp_tool",
+                    {
+                        "provider": "ssh_mcp",
+                        "name": "ssh_resolve_target",
+                        "arguments": {"address": "172.20.2.101"},
+                    },
+                )
+            ),
+            response(
+                Call(
+                    "call_mcp_tool",
+                    {
+                        "provider": "ssh_mcp",
+                        "name": "ssh_diagnose_cpu",
+                        "arguments": {"host_id": 7},
+                    },
+                )
+            ),
             APITimeoutError(request=request),
             APITimeoutError(request=request),
         ]
     )
     answer, usage = asyncio.run(
         mcp_runtime.run(
-            "请分析", "查询 172.20.2.101 现在 CPU", return_usage=True,
+            "请分析",
+            "查询 172.20.2.101 现在 CPU",
+            return_usage=True,
             client=SimpleNamespace(responses=SimpleNamespace(create=create)),
         )
     )
