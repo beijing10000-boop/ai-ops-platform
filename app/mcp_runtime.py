@@ -274,6 +274,8 @@ async def run(
     ssh_failed = False
     result_text = ""
     budget_end = False
+    model_failure = None
+    has_evidence = False
     host_id = str(event.get("host_id") or "")
     effective_type = "unknown"
     host_verified = False
@@ -1190,7 +1192,7 @@ async def run(
         result_text = "模型未返回可显示的分析结论"
     result_text = safe_text(result_text, None)
     status = "partial" if gaps or budget_end else "success"
-    if locals().get("model_failure") and not locals().get("has_evidence"):
+    if model_failure and not has_evidence:
         status = "failed"
     tasks.finish(
         task_id,
@@ -1206,7 +1208,7 @@ async def run(
         },
         usage,
         status,
-        error_type=locals().get("model_failure") if status == "failed" else None,
+        error_type=model_failure if status == "failed" else None,
         duration_ms=int((time.monotonic() - began) * 1000),
     )
     return (result_text, usage) if return_usage else result_text
