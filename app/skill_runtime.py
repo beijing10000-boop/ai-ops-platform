@@ -168,6 +168,7 @@ async def run(
             "available": complete and rounds > 0,
             "task_id": task_id,
             "trace_id": task["trace_id"],
+            "profile": task["profile"],
         }
 
     def budget():
