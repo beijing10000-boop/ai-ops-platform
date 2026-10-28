@@ -2,6 +2,7 @@
 
 Keep original MCP evidence, model output and stored metrics untouched.
 """
+
 import re
 
 _PERCENT = re.compile(r"(?<![A-Za-z0-9_.])(?P<number>\d+(?:\.\d+)?)\s*%")
