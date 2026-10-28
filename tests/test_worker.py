@@ -619,10 +619,18 @@ def test_automatic_analysis_card_shows_token_usage():
         "cause": "CPU高",
         "action": "查看指标",
         "analysis": "历史趋势",
-        "_token_usage": {"input": 750, "output": 250, "total": 1000, "available": True, "profile": "standard"},
+        "_token_usage": {
+            "input": 750,
+            "output": 250,
+            "total": 1000,
+            "available": True,
+            "profile": "standard",
+        },
     }
     card = worker.make_card(event, info, analysis=True)
-    assert "本轮 Token 消耗：1,000（输入 750 / 输出 250） · 分析模式：标准分析" in str(card)
+    assert "本轮 Token 消耗：1,000（输入 750 / 输出 250） · 分析模式：标准分析" in str(
+        card
+    )
 
 
 def test_token_footer_separate_from_body_in_feishu_card():
