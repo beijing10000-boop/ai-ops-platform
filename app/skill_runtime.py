@@ -7,7 +7,8 @@ import json
 import time
 from zoneinfo import ZoneInfo
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, APIConnectionError, APIStatusError
+from .ai_reliability import evidence_fallback, model_failure_code, model_failure_message, request_response
 from .orchestrator import tasks
 from .skill_mcp import SkillMCP
 from .skill_store import summary
@@ -146,6 +147,7 @@ async def run(
     complete, calls, rounds = True, 0, 0
     gaps, reasons = [], []
     answer, status = "", "success"
+    failure_code = None
     bridge = None
     cache = {}
 
@@ -189,6 +191,7 @@ async def run(
             "limitations": list(dict.fromkeys(gaps + reasons)),
             "budget": budget(),
             "budget_exhausted": bool(reasons),
+            "model_error": failure_code,
         }
 
     try:
@@ -206,7 +209,7 @@ async def run(
                     AsyncOpenAI(
                         api_key=read_setting("openai_api_key"),
                         base_url=read_setting("openai_base_url"),
-                        timeout=45,
+                        timeout=int(read_setting("ai_request_timeout_seconds") or 90),
                         max_retries=0,
                     )
                 )
@@ -232,7 +235,11 @@ async def run(
                     ):
                         reasons.append("任务剩余时间不足，停止采集并总结")
                     tasks.stage(task_id, "ai_reasoning" if final else "skill_analysis")
-                    response = await client.responses.create(
+                    response = await request_response(
+                        client,
+                        deadline=deadline,
+                        timeout_seconds=int(read_setting("ai_request_timeout_seconds") or 90),
+                        reserve_seconds=0 if final else 18,
                         model=model,
                         instructions=instructions,
                         input=conversation,
@@ -241,7 +248,6 @@ async def run(
                         max_output_tokens=min(
                             6000, max(1, limits["tokens"] - totals["total"])
                         ),
-                        timeout=min(45, max(1, int(deadline - time.monotonic()))),
                     )
                     rounds += 1
                     counts = usage_counts(response)
@@ -297,7 +303,11 @@ async def run(
                                     [call.name, args], sort_keys=True
                                 )
                                 if signature in cache:
-                                    outcome = {**cache[signature], "cached": True}
+                                    outcome = (
+                                        {"already_loaded": True, "message": "工具目录已提供，请使用已返回的参数定义，不要重复发现"}
+                                        if call.name == "list_mcp_tools"
+                                        else {**cache[signature], "cached": True}
+                                    )
                                 else:
                                     if (
                                         calls >= limits["calls"]
@@ -404,9 +414,17 @@ async def run(
     except (tasks.Cancelled, asyncio.CancelledError):
         answer, status = "任务已取消，已保留采集证据。", "cancelled"
         raise
+    except (APIConnectionError, APIStatusError) as exc:
+        failure_code = model_failure_code(exc)
+        reason = model_failure_message(exc)
+        answer, has_evidence = evidence_fallback(task_id, reason)
+        gaps.append(reason + "；本次未形成完整 AI 结论")
+        status = "partial" if has_evidence else "failed"
     except TimeoutError:
+        failure_code = "TaskTimeout"
         reasons.append("任务达到时间预算")
-        answer = answer or "任务达到时间预算，已保留采集证据，尚无法确认结论。"
+        answer, has_evidence = evidence_fallback(task_id, "任务达到时间预算")
+        status = "partial" if has_evidence else "failed"
     except Exception:
         answer, status = "分析失败，已保留采集证据。", "failed"
         raise
@@ -436,7 +454,7 @@ async def run(
             report(),
             usage(),
             status,
-            error_type="SkillAnalysisFailed" if status == "failed" else None,
+            error_type=(failure_code or "SkillAnalysisFailed") if status == "failed" else None,
             duration_ms=int((time.monotonic() - began) * 1000),
         )
     return (answer, usage()) if return_usage else answer
