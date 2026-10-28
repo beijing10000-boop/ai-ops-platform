@@ -32,14 +32,34 @@ def test_diagnostic_prompts_are_replaced_by_skill_and_legacy_values_preserved():
     options = client.get("/api/v1/settings/options").json()
     for key in ("ai_alert_prompt", "ai_qa_prompt"):
         assert key not in settings
-        assert client.put("/api/v1/settings", json={"values": {key: "override"}}).status_code == 422
-        assert client.post("/api/v1/settings/validate", json={"values": {key: "override"}}).status_code == 422
+        assert (
+            client.put(
+                "/api/v1/settings", json={"values": {key: "override"}}
+            ).status_code
+            == 422
+        )
+        assert (
+            client.post(
+                "/api/v1/settings/validate", json={"values": {key: "override"}}
+            ).status_code
+            == 422
+        )
     assert "prompts" not in options
     assert options["profiles"]["standard"]["calls"] == 12
     assert "host_get" in options["tools"]
     with main.connection() as db:
-        assert db.execute("SELECT value FROM settings WHERE key='ai_alert_prompt'").fetchone()[0] == "historical-alert-rule"
-        assert db.execute("SELECT value FROM settings WHERE key='ai_qa_prompt'").fetchone()[0] == "historical-qa-rule"
+        assert (
+            db.execute(
+                "SELECT value FROM settings WHERE key='ai_alert_prompt'"
+            ).fetchone()[0]
+            == "historical-alert-rule"
+        )
+        assert (
+            db.execute(
+                "SELECT value FROM settings WHERE key='ai_qa_prompt'"
+            ).fetchone()[0]
+            == "historical-qa-rule"
+        )
 
 
 def test_draft_configuration_is_validated_without_save_and_secrets_stay_encrypted():
