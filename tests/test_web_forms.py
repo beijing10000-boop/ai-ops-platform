@@ -19,20 +19,27 @@ def isolate(monkeypatch, tmp_path):
         db.execute("INSERT INTO settings VALUES ('feishu_admin_open_ids','ou_super',0)")
 
 
-def test_default_prompts_are_visible_and_cannot_disable_core_rules():
+def test_diagnostic_prompts_are_replaced_by_skill_and_legacy_values_preserved():
     client = client_for()
-    settings = client.get("/api/v1/settings").json()
-    for key in ("ai_alert_prompt", "ai_qa_prompt"):
-        assert "Zabbix" in settings[key] and "SSH MCP" in settings[key]
-        assert "飞书" in settings[key]
-        assert (
-            client.put("/api/v1/settings", json={"values": {key: ""}}).status_code
-            == 200
+    with main.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO settings VALUES ('ai_alert_prompt','historical-alert-rule',0)"
         )
-        assert client.get("/api/v1/settings").json()[key] == settings[key]
+        db.execute(
+            "INSERT OR REPLACE INTO settings VALUES ('ai_qa_prompt','historical-qa-rule',0)"
+        )
+    settings = client.get("/api/v1/settings").json()
     options = client.get("/api/v1/settings/options").json()
+    for key in ("ai_alert_prompt", "ai_qa_prompt"):
+        assert key not in settings
+        assert client.put("/api/v1/settings", json={"values": {key: "override"}}).status_code == 422
+        assert client.post("/api/v1/settings/validate", json={"values": {key: "override"}}).status_code == 422
+    assert "prompts" not in options
     assert options["profiles"]["standard"]["calls"] == 12
     assert "host_get" in options["tools"]
+    with main.connection() as db:
+        assert db.execute("SELECT value FROM settings WHERE key='ai_alert_prompt'").fetchone()[0] == "historical-alert-rule"
+        assert db.execute("SELECT value FROM settings WHERE key='ai_qa_prompt'").fetchone()[0] == "historical-qa-rule"
 
 
 def test_draft_configuration_is_validated_without_save_and_secrets_stay_encrypted():
