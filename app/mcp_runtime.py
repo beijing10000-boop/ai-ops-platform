@@ -145,10 +145,15 @@ def readable_report_answer(raw):
 
 
 def format_usage(usage):
+    profile_labels = {"quick": "快速分析", "standard": "标准分析", "deep": "深度分析"}
+    profile = (usage or {}).get("profile")
+    suffix = (
+        (" · 分析模式：" + profile_labels[profile]) if profile in profile_labels else ""
+    )
     if not usage or usage.get("available") is not True:
-        return "本轮 Token 消耗：模型未返回用量"
-    return "本轮 Token 消耗：{:,}（输入 {:,} / 输出 {:,}）".format(
-        usage["total"], usage["input"], usage["output"]
+        return "本轮 Token 消耗：模型未返回用量" + suffix
+    return "本轮 Token 消耗：{:,}（输入 {:,} / 输出 {:,}）{}".format(
+        usage["total"], usage["input"], usage["output"], suffix
     )
 
 
@@ -371,6 +376,7 @@ async def run(
             and any(d["kind"] == "round" for d in telemetry),
             "task_id": task_id,
             "trace_id": task["trace_id"],
+            "profile": profile_name,
         }
 
     def save_usage():
