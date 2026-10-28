@@ -213,7 +213,7 @@ def test_deprecated_settings_are_rejected_and_hidden():
     assert "min_severity" not in result
     assert "ai_prompt" not in result
     assert "ai_min_severity" in result
-    assert "ai_alert_prompt" in result and "ai_qa_prompt" in result
+    assert "ai_alert_prompt" not in result and "ai_qa_prompt" not in result
 
 
 def test_mcp_tool_loading_setting_allowed_and_validated():
