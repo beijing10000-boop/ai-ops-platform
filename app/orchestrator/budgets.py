@@ -41,7 +41,11 @@ def validate_settings(values):
     try:
         if "ai_request_timeout_seconds" in values:
             raw = values["ai_request_timeout_seconds"]
-            if not isinstance(raw, str) or not raw.isdecimal() or not 15 <= int(raw) <= 180:
+            if (
+                not isinstance(raw, str)
+                or not raw.isdecimal()
+                or not 15 <= int(raw) <= 180
+            ):
                 raise ValueError()
         if "ai_profile_budgets" in values:
             obj = json.loads(values["ai_profile_budgets"] or "{}")
