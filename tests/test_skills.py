@@ -472,6 +472,7 @@ def test_native_ssh_logs_still_require_logs_read():
 def test_history_skill_calls_zabbix_only_and_adapts_initmax_arguments(monkeypatch):
     install(providers=["zabbix_mcp"])
     log = []
+    directory_calls = []
     config = {"openai_model": "fixture", "mcp_url": "http://zabbix.invalid/mcp"}
     monkeypatch.setattr(mcp_runtime, "read_setting", lambda key: config.get(key, ""))
     monkeypatch.setattr(
@@ -482,6 +483,7 @@ def test_history_skill_calls_zabbix_only_and_adapts_initmax_arguments(monkeypatc
 
     class ZabbixSession:
         async def list_tools(self):
+            directory_calls.append(True)
             return SimpleNamespace(
                 tools=[
                     remote_tool(
@@ -515,6 +517,7 @@ def test_history_skill_calls_zabbix_only_and_adapts_initmax_arguments(monkeypatc
     monkeypatch.setattr(zabbix, "connect", connect)
     create = AsyncMock(
         side_effect=[
+            response(Call("list_mcp_tools", {"provider": "zabbix_mcp", "names": ["item_get", "history_get"]})),
             response(
                 Call(
                     "call_mcp_tool",
@@ -555,6 +558,8 @@ def test_history_skill_calls_zabbix_only_and_adapts_initmax_arguments(monkeypatc
     )
     assert json.loads(text)["cause"] == "历史 CPU 峰值 95"
     assert [name for name, args in log] == ["item_get", "history_get"]
+    assert len(directory_calls) == 1
+    assert len([r for r in tasks.evidence_page(usage["task_id"]) if r["tool"] == "list_tools"]) == 1
     assert log[0][1]["extra_params"]["hostids"] == ["10"]
     query_context = json.loads(create.call_args_list[0].kwargs["input"][0]["content"])
     assert query_context["current_timestamp"] > 0
