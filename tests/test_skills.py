@@ -323,6 +323,41 @@ def test_skill_selects_direct_ssh_without_zabbix_and_preserves_actual_usage(rig)
         assert db.execute("SELECT token_total FROM ai_token_runs").fetchone()[0] == 120
 
 
+def test_skill_timeout_retains_successful_mcp_evidence(rig):
+    import httpx
+    from openai import APITimeoutError
+
+    install(providers=["ssh_mcp"])
+    request = httpx.Request("POST", "https://example.invalid")
+    create = AsyncMock(
+        side_effect=[
+            response(Call("list_mcp_tools", {"provider": "ssh_mcp"})),
+            response(Call("call_mcp_tool", {
+                "provider": "ssh_mcp", "name": "ssh_resolve_target",
+                "arguments": {"address": "172.20.2.101"}
+            })),
+            response(Call("call_mcp_tool", {
+                "provider": "ssh_mcp", "name": "ssh_diagnose_cpu",
+                "arguments": {"host_id": 7}
+            })),
+            APITimeoutError(request=request),
+            APITimeoutError(request=request),
+        ]
+    )
+    answer, usage = asyncio.run(
+        mcp_runtime.run(
+            "请分析", "查询 172.20.2.101 现在 CPU", return_usage=True,
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+        )
+    )
+    task = tasks.get(usage["task_id"])
+    assert task["status"] == "partial"
+    assert task["report"]["model_error"] == "ModelTimeout"
+    assert "ssh_diagnose_cpu" in answer
+    assert usage["total"] == 90
+    assert any("超时" in gap for gap in task["report"]["limitations"])
+
+
 def test_generic_bridge_rejects_unresolved_wrong_target_writes_and_changed_revision(
     rig,
 ):
