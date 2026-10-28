@@ -17,7 +17,7 @@
 | `ssh_diagnose_kernel` | host_id、minutes: 1–120、expected_revision | 内核日志 |
 | `ssh_diagnose_directory_usage` | host_id、root、expected_revision | 指定根路径下一层目录用量 |
 
-以下无额外场景参数的诊断工具，均传 host_id、expected_revision；detail 可选 summary（默认）或 full（需要原文且预算允许时）。先看实际参数结构：
+以下无额外场景参数的诊断工具，均传 host_id、expected_revision；detail 可选 summary（默认）或 full（需要原文且预算允许时）。先看实际参数结构。新版 SSH MCP 的 ssh_diagnose_memory_processes 在获准读取时，summary.processes[] 可返回 application（已识别的 JAR 基名或 systemd 单元）与 identity_source（jar/service）。没有字段时只显示实际 comm/name 和 PID，不猜测业务归属；不得把完整 JVM 命令行、参数或环境变量写进报告：
 
 CPU、内存和进程：`ssh_diagnose_cpu`、`ssh_diagnose_memory`、`ssh_diagnose_processes`、`ssh_diagnose_memory_processes`、`ssh_diagnose_pressure`、`ssh_diagnose_resource_limits`。
 
