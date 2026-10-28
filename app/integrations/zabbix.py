@@ -171,7 +171,10 @@ def input_schema(name):
                     {"type": "string", "enum": SORT_FIELDS.get(name, FIELDS[name])},
                     {
                         "type": "array",
-                        "items": {"type": "string", "enum": SORT_FIELDS.get(name, FIELDS[name])},
+                        "items": {
+                            "type": "string",
+                            "enum": SORT_FIELDS.get(name, FIELDS[name]),
+                        },
                     },
                 ]
             }
@@ -241,8 +244,10 @@ def validate_args(name, arguments, *, host_id=None):
     if "sortfield" in args:
         value = args["sortfield"]
         fields = [value] if isinstance(value, str) else value
-        if not isinstance(fields, list) or not fields or any(
-            field not in SORT_FIELDS.get(name, FIELDS[name]) for field in fields
+        if (
+            not isinstance(fields, list)
+            or not fields
+            or any(field not in SORT_FIELDS.get(name, FIELDS[name]) for field in fields)
         ):
             raise ValueError(f"{name} 不支持该排序字段；请使用允许的 sortfield")
     # Always request a minimal explicit field set; never retrieve host secrets or item credentials.
