@@ -141,9 +141,9 @@ def analysis_summary(info):
         body += "\n\n**诊断不足与待核验**\n" + "\n".join(
             "- " + str(item) for item in info["_limitations"]
         )
-    if info.get("_duration_ms") is not None:
-        body += f"\n\n执行耗时：{info['_duration_ms'] / 1000:.1f} 秒"
-    return body
+    from .report_presentation import human_metrics
+
+    return human_metrics(body)
 
 
 def valid_macro(value):
@@ -379,7 +379,7 @@ def make_card(event, info=None, *, analysis=False, mute_info=None):
                 "elements": [
                     {
                         "tag": "plain_text",
-                        "content": "◉ " + format_usage(info.get("_token_usage")),
+                        "content": "◉ " + format_usage(info.get("_token_usage"), duration_ms=info.get("_duration_ms")),
                     }
                 ],
             }
@@ -719,7 +719,9 @@ async def analyze_on_demand(event, message_id, chat_id=None):
             detail += "\n\n[查看完整诊断报告](" + detail_url + ")"
         from .mcp_runtime import format_usage
 
-        detail += "\n\n---\n" + format_usage(result.get("_token_usage"))
+        detail += "\n\n---\n" + format_usage(
+            result.get("_token_usage"), duration_ms=result.get("_duration_ms")
+        )
         if progress_id:
             try:
                 await update_card(progress_id, "AI 分析结果", detail)
