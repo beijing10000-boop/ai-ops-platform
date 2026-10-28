@@ -222,7 +222,9 @@ async def run(
                     final = (
                         number == limits["rounds"] - 1
                         or calls >= limits["calls"]
-                        or time.monotonic() > deadline - 8
+                        or (calls > 0 and calls >= max(1, limits["calls"] - 2))
+                        or totals["total"] >= int(limits["tokens"] * 0.8)
+                        or time.monotonic() > deadline - 30
                     )
                     if (
                         calls >= limits["calls"]
