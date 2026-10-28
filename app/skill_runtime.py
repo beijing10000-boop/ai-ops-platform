@@ -359,8 +359,11 @@ async def run(
                                                     raise ValueError("工具名称列表无效")
                                                 definitions = []
                                                 for name in dict.fromkeys(names):
+                                                    selected = await bridge.definitions(provider, name)
+                                                    if not any(tool["name"] == name for tool in selected):
+                                                        raise ValueError("批量工具名称未在授权目录中")
                                                     definitions.extend(
-                                                        await bridge.definitions(provider, name)
+                                                        tool for tool in selected if tool["name"] == name
                                                     )
                                             else:
                                                 definitions = await bridge.definitions(
