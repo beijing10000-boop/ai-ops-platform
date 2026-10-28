@@ -8,7 +8,12 @@ import time
 from zoneinfo import ZoneInfo
 
 from openai import AsyncOpenAI, APIConnectionError, APIStatusError
-from .ai_reliability import evidence_fallback, model_failure_code, model_failure_message, request_response
+from .ai_reliability import (
+    evidence_fallback,
+    model_failure_code,
+    model_failure_message,
+    request_response,
+)
 from .orchestrator import tasks
 from .skill_mcp import SkillMCP
 from .skill_store import summary
@@ -240,7 +245,9 @@ async def run(
                     response = await request_response(
                         client,
                         deadline=deadline,
-                        timeout_seconds=int(read_setting("ai_request_timeout_seconds") or 90),
+                        timeout_seconds=int(
+                            read_setting("ai_request_timeout_seconds") or 90
+                        ),
                         reserve_seconds=0 if final else 18,
                         model=model,
                         instructions=instructions,
@@ -306,7 +313,10 @@ async def run(
                                 )
                                 if signature in cache:
                                     outcome = (
-                                        {"already_loaded": True, "message": "工具目录已提供，请使用已返回的参数定义，不要重复发现"}
+                                        {
+                                            "already_loaded": True,
+                                            "message": "工具目录已提供，请使用已返回的参数定义，不要重复发现",
+                                        }
                                         if call.name == "list_mcp_tools"
                                         else {**cache[signature], "cached": True}
                                     )
@@ -456,7 +466,9 @@ async def run(
             report(),
             usage(),
             status,
-            error_type=(failure_code or "SkillAnalysisFailed") if status == "failed" else None,
+            error_type=(failure_code or "SkillAnalysisFailed")
+            if status == "failed"
+            else None,
             duration_ms=int((time.monotonic() - began) * 1000),
         )
     return (answer, usage()) if return_usage else answer
