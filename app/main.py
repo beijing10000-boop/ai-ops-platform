@@ -16,14 +16,13 @@ from pydantic import BaseModel, Field
 from cryptography.fernet import Fernet
 from redis import Redis
 from rq import Queue
-from .configuration import DEFAULT_PROMPTS
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DB = DATA_DIR / "app.sqlite3"
 MASTER_KEY = os.getenv("APP_ENCRYPTION_KEY", "")
 ADMIN_TOKEN = os.getenv("ADMIN_API_TOKEN", "")
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
-app = FastAPI(title="Zabbix AI Ops · Unified Platform", version="0.9.2")
+app = FastAPI(title="Zabbix AI Ops · Unified Platform", version="0.9.3")
 app.mount(
     "/assets",
     StaticFiles(directory=Path(__file__).parent.parent / "web" / "assets"),
@@ -43,8 +42,6 @@ ALLOWED = SENSITIVE | {
     "lark_app_id",
     "allowed_chat_ids",
     "ai_min_severity",
-    "ai_alert_prompt",
-    "ai_qa_prompt",
     "feishu_enabled",
     "web_protocol",
     "web_public_host",
@@ -63,7 +60,6 @@ ALLOWED |= {
     "zabbix_frontend_url",
 }
 DEFAULTS = {
-    **DEFAULT_PROMPTS,
     "ai_min_severity": "4",
     "feishu_enabled": "false",
     "web_protocol": "http",
@@ -243,11 +239,7 @@ def read_setting(key):
     if not row:
         return DEFAULTS.get(key, "")
     value = cipher().decrypt(row[0].encode()).decode() if row[1] else row[0]
-    return (
-        DEFAULT_PROMPTS.get(key, "")
-        if key in DEFAULT_PROMPTS and not value.strip()
-        else value
-    )
+    return value
 
 
 def beijing_time(value):
@@ -498,9 +490,6 @@ def settings_snapshot():
             values[key] = (
                 encryption.decrypt(value.encode()).decode() if secret else value
             )
-    for key, prompt in DEFAULT_PROMPTS.items():
-        if not values[key].strip():
-            values[key] = prompt
     return values
 
 
@@ -584,7 +573,6 @@ def settings_options():
     from .integrations.zabbix import READ_TOOLS
 
     return {
-        "prompts": DEFAULT_PROMPTS,
         "profiles": PROFILES,
         "ranges": RANGES,
         "tools": sorted(READ_TOOLS),
