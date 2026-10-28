@@ -17,6 +17,7 @@ from .ai_reliability import (
 from .orchestrator import tasks
 from .skill_mcp import SkillMCP
 from .skill_store import summary
+from .skill_context import model_view
 from .security.redact import redact, redact_data
 from .integrations.ssh_mcp import IntegrationError
 from .diagnostics.targets import question_target
@@ -64,10 +65,14 @@ async def run(
     tools = [
         function(
             "list_mcp_tools",
-            "按服务列出获准的原生只读工具。query 为空仅列名称；query 填完整工具名获取参数结构。不会查询主机。",
+            "按服务查看原生只读工具目录。先用 query 为空列名称；推荐用 names 一次查询多个确切工具的参数结构，避免逐个重复请求；也支持 query 单项查询。",
             {
                 "provider": {"type": "string", "enum": providers},
                 "query": {"type": "string", "maxLength": 100},
+                "names": {
+                    "type": "array", "items": {"type": "string", "maxLength": 100},
+                    "minItems": 1, "maxItems": 4,
+                },
             },
             ["provider"],
         ),
@@ -341,11 +346,27 @@ async def run(
                                     try:
                                         tasks.stage(task_id, "skill_" + str(provider))
                                         if call.name == "list_mcp_tools":
-                                            outcome = {
-                                                "tools": await bridge.definitions(
+                                            names = args.get("names")
+                                            if names is not None:
+                                                if (
+                                                    not isinstance(names, list)
+                                                    or not 1 <= len(names) <= 4
+                                                    or any(
+                                                        not isinstance(n, str) or not n
+                                                        for n in names
+                                                    )
+                                                ):
+                                                    raise ValueError("工具名称列表无效")
+                                                definitions = []
+                                                for name in dict.fromkeys(names):
+                                                    definitions.extend(
+                                                        await bridge.definitions(provider, name)
+                                                    )
+                                            else:
+                                                definitions = await bridge.definitions(
                                                     provider, args.get("query", "")
                                                 )
-                                            }
+                                            outcome = {"tools": definitions}
                                         else:
                                             outcome = await bridge.call(
                                                 provider, native, args.get("arguments")
@@ -412,8 +433,17 @@ async def run(
                                 "type": "function_call_output",
                                 "call_id": call.call_id,
                                 "output": compact_result(
-                                    safe(json.dumps(outcome, ensure_ascii=False)),
-                                    limits["result_chars"],
+                                    safe(json.dumps(
+                                        model_view(
+                                            args.get("provider"),
+                                            args.get("name", "list_tools")
+                                            if call.name == "call_mcp_tool"
+                                            else call.name,
+                                            outcome,
+                                        ),
+                                        ensure_ascii=False,
+                                    )),
+                                    min(limits["result_chars"], 4000),
                                 ),
                             }
                         )
