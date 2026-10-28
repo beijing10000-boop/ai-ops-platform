@@ -11,7 +11,12 @@ from zoneinfo import ZoneInfo
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from openai import AsyncOpenAI, APIConnectionError, APIStatusError
-from .ai_reliability import evidence_fallback, model_failure_code, model_failure_message, request_response
+from .ai_reliability import (
+    evidence_fallback,
+    model_failure_code,
+    model_failure_message,
+    request_response,
+)
 from .main import read_setting
 from .integrations import zabbix, ssh_mcp
 from .integrations.zabbix import infer_device
@@ -952,7 +957,12 @@ async def run(
                 if client is None:
                     client = await stack.enter_async_context(
                         AsyncOpenAI(
-                            api_key=key, base_url=base, timeout=int(read_setting("ai_request_timeout_seconds") or 90), max_retries=0
+                            api_key=key,
+                            base_url=base,
+                            timeout=int(
+                                read_setting("ai_request_timeout_seconds") or 90
+                            ),
+                            max_retries=0,
                         )
                     )
                 conversation = [
@@ -1016,8 +1026,12 @@ async def run(
                     response = await request_response(
                         client,
                         deadline=deadline,
-                        timeout_seconds=int(read_setting("ai_request_timeout_seconds") or 90),
-                        reserve_seconds=18 if round_number < limits["rounds"] - 1 else 0,
+                        timeout_seconds=int(
+                            read_setting("ai_request_timeout_seconds") or 90
+                        ),
+                        reserve_seconds=18
+                        if round_number < limits["rounds"] - 1
+                        else 0,
                         model=model,
                         instructions=CORE + "\n" + safe_text(prompt),
                         input=conversation,
@@ -1117,7 +1131,9 @@ async def run(
                         response = await request_response(
                             client,
                             deadline=deadline,
-                            timeout_seconds=int(read_setting("ai_request_timeout_seconds") or 90),
+                            timeout_seconds=int(
+                                read_setting("ai_request_timeout_seconds") or 90
+                            ),
                             reserve_seconds=0,
                             model=model,
                             instructions=CORE
