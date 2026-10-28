@@ -179,7 +179,7 @@ def test_severe_analysis_has_detail():
     initial = worker.make_card(event, details)
     analyzed = worker.make_card(event, details, analysis=True)
     assert "故障原因" not in str(initial)
-    assert "故障原因" in str(analyzed)
+    assert "诊断结论" in str(analyzed)
 
 
 def test_alert_card_newlines_are_real():
