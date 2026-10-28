@@ -117,6 +117,8 @@ def readable_report_answer(raw):
     Worker callers still receive the original JSON text for Feishu card fields.
     All generated strings remain escaped by the browser renderer.
     """
+    from .report_presentation import human_metrics
+
     text = str(raw or "").strip()
     if text.startswith("```"):
         import re
@@ -125,35 +127,36 @@ def readable_report_answer(raw):
     try:
         result = json.loads(text)
     except (TypeError, ValueError):
-        return raw
+        return human_metrics(raw)
     if not isinstance(result, dict) or not any(
         isinstance(result.get(key), str) for key in ("cause", "action", "analysis")
     ):
-        return raw
+        return human_metrics(raw)
     parts = []
     for name, key in (
-        ("故障原因（AI 推断）", "cause"),
+        ("诊断结论", "cause"),
         ("处理建议", "action"),
         ("分析与依据", "analysis"),
     ):
         content = result.get(key)
         if isinstance(content, str) and content.strip():
-            parts.append(name + "\n" + content.strip())
-    if result.get("human_required") is True:
-        parts.append("需人工核验：是")
-    return "\n\n".join(parts) if parts else raw
+            parts.append(name + "\n" + human_metrics(content.strip()))
+    return "\n\n".join(parts) if parts else human_metrics(raw)
 
 
-def format_usage(usage):
+def format_usage(usage, *, duration_ms=None):
     profile_labels = {"quick": "快速分析", "standard": "标准分析", "deep": "深度分析"}
     profile = (usage or {}).get("profile")
     suffix = (
         (" · 分析模式：" + profile_labels[profile]) if profile in profile_labels else ""
     )
+    duration = ""
+    if type(duration_ms) in (float, int) and duration_ms >= 0:
+        duration = f" · 执行耗时：{duration_ms / 1000:.1f} 秒"
     if not usage or usage.get("available") is not True:
-        return "本轮 Token 消耗：模型未返回用量" + suffix
-    return "本轮 Token 消耗：{:,}（输入 {:,} / 输出 {:,}）{}".format(
-        usage["total"], usage["input"], usage["output"], suffix
+        return "本轮 Token 消耗：模型未返回用量" + suffix + duration
+    return "本轮 Token 消耗：{:,}（输入 {:,} / 输出 {:,}）{}{}".format(
+        usage["total"], usage["input"], usage["output"], suffix, duration
     )
 
 
