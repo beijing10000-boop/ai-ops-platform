@@ -145,7 +145,10 @@ def test_web_diagnosis_ignores_retired_prompts(monkeypatch, event_id):
     with main.connection() as db:
         db.executemany(
             "INSERT INTO settings VALUES (?,?,0)",
-            [("ai_alert_prompt", "old-alert-override"), ("ai_qa_prompt", "old-qa-override")],
+            [
+                ("ai_alert_prompt", "old-alert-override"),
+                ("ai_qa_prompt", "old-qa-override"),
+            ],
         )
     task, _ = tasks.create({"question": "CPU", "event": {}}, event_id=event_id)
     run = AsyncMock(return_value="answer")
