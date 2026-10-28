@@ -10,7 +10,8 @@ from zoneinfo import ZoneInfo
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, APIConnectionError, APIStatusError
+from .ai_reliability import evidence_fallback, model_failure_code, model_failure_message, request_response
 from .main import read_setting
 from .integrations import zabbix, ssh_mcp
 from .integrations.zabbix import infer_device
@@ -949,7 +950,7 @@ async def run(
                 if client is None:
                     client = await stack.enter_async_context(
                         AsyncOpenAI(
-                            api_key=key, base_url=base, timeout=45, max_retries=0
+                            api_key=key, base_url=base, timeout=int(read_setting("ai_request_timeout_seconds") or 90), max_retries=0
                         )
                     )
                 conversation = [
@@ -1010,7 +1011,11 @@ async def run(
                     if can_ssh:
                         tools = tools + [ssh_definition]
                     tasks.stage(task_id, "ai_reasoning")
-                    response = await client.responses.create(
+                    response = await request_response(
+                        client,
+                        deadline=deadline,
+                        timeout_seconds=int(read_setting("ai_request_timeout_seconds") or 90),
+                        reserve_seconds=18 if round_number < limits["rounds"] - 1 else 0,
                         model=model,
                         instructions=CORE + "\n" + safe_text(prompt),
                         input=conversation,
@@ -1020,7 +1025,6 @@ async def run(
                             if round_number == limits["rounds"] - 1
                             else {}
                         ),
-                        timeout=min(45, max(1, int(deadline - time.monotonic()))),
                         max_output_tokens=min(
                             3000, max(256, limits["tokens"] - totals["total"])
                         ),
@@ -1108,7 +1112,11 @@ async def run(
                         and sum(d["kind"] == "round" for d in telemetry)
                         < limits["rounds"]
                     ):
-                        response = await client.responses.create(
+                        response = await request_response(
+                            client,
+                            deadline=deadline,
+                            timeout_seconds=int(read_setting("ai_request_timeout_seconds") or 90),
+                            reserve_seconds=0,
                             model=model,
                             instructions=CORE
                             + "\n"
@@ -1116,7 +1124,6 @@ async def run(
                             + "\n停止补查，根据已收集证据给出最终结论并标明不足。",
                             input=conversation,
                             tool_choice="none",
-                            timeout=min(30, max(1, int(deadline - time.monotonic()))),
                             max_output_tokens=min(
                                 2000, max(256, limits["tokens"] - totals["total"])
                             ),
@@ -1134,6 +1141,13 @@ async def run(
                         ):
                             budget_reasons.append("模型轮次已达上限，停止后续请求")
                         result_text = "诊断预算已用尽。已保存实际采集证据；证据不足以形成完整结论，请查看诊断详情。"
+    except (APIConnectionError, APIStatusError) as exc:
+        model_failure = model_failure_code(exc)
+        reason = model_failure_message(exc)
+        gaps.append(reason + "；本次未形成完整 AI 结论")
+        result_text, has_evidence = evidence_fallback(task_id, reason)
+        if not has_evidence:
+            budget_reasons.append("尚未采集到可用的 MCP 证据")
     except (TimeoutError, asyncio.TimeoutError):
         gaps.append("任务达到时间预算")
         budget_reasons.append("任务达到时间预算")
@@ -1176,6 +1190,8 @@ async def run(
         result_text = "模型未返回可显示的分析结论"
     result_text = safe_text(result_text, None)
     status = "partial" if gaps or budget_end else "success"
+    if locals().get("model_failure") and not locals().get("has_evidence"):
+        status = "failed"
     tasks.finish(
         task_id,
         {
@@ -1190,6 +1206,7 @@ async def run(
         },
         usage,
         status,
+        error_type=locals().get("model_failure") if status == "failed" else None,
         duration_ms=int((time.monotonic() - began) * 1000),
     )
     return (result_text, usage) if return_usage else result_text
