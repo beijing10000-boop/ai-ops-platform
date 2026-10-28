@@ -124,6 +124,9 @@ def test_skill_scopes_priority_and_bundled_template():
     parsed = skills.parse_package("template.zip", base64.b64encode(raw))
     assert parsed["name"] == "ops-mcp-readonly" and len(parsed["files"]) == 4
     assert "ssh_resolve_target" in parsed["instructions"]
+    assert "诊断规则" in parsed["instructions"]
+    assert "重复 list_mcp_tools" in parsed["instructions"]
+    assert "sortfield" in parsed["files"]["references/zabbix-tools.md"]
 
 
 @pytest.mark.parametrize(
