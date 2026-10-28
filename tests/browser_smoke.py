@@ -240,7 +240,7 @@ try:
         )
         page.locator('[data-page="settings"]').click()
         page.get_by_role("tab", name="基础设置", exact=True).click()
-        page.locator('textarea[name="ai_alert_prompt"]').wait_for(state="attached")
+        page.locator('input[name="openai_model"]').wait_for(state="attached")
         general = page.locator("#settings-settings-form")
         feishu = page.locator("#feishu-settings-form")
         ai = page.locator("#ai-settings-form")
@@ -280,9 +280,9 @@ try:
             feishu.locator('input[name="allowed_chat_ids"]').input_value()
             == "oc_browser_draft"
         )
-        assert (
-            "Zabbix" in page.locator('textarea[name="ai_alert_prompt"]').input_value()
-        )
+        assert page.locator('textarea[name="ai_alert_prompt"]').count() == 0
+        assert page.locator('textarea[name="ai_qa_prompt"]').count() == 0
+        assert ai.locator('a[href="#skills"]').count() == 1
         assert page.locator('textarea[name="ai_profile_budgets"]').count() == 0
         budget = page.get_by_role("spinbutton", name="标准分析 采集次数", exact=True)
         budget.fill("32")
@@ -338,13 +338,7 @@ try:
             assert "openai_model" not in draft_checks[-1][1]
         page.unroute("**/api/v1/test/**")
         page.get_by_role("tab", name="AI 配置", exact=True).click()
-        page.locator('textarea[name="ai_alert_prompt"]').fill(
-            "临时测试提示词内容，需要恢复成项目提供的默认提示词"
-        )
-        page.locator('[data-action="reset-prompts"]').click()
-        assert (
-            "运维经理" in page.locator('textarea[name="ai_alert_prompt"]').input_value()
-        )
+        assert page.locator('[data-action="reset-prompts"]').count() == 0
         page.get_by_role("tab", name="基础设置", exact=True).click()
         general.locator('input[name="enabled_tool"]').first.uncheck()
         assert page.locator('textarea[name="disabled_tools"]').count() == 0
