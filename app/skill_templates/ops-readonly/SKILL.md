@@ -7,7 +7,7 @@ description: 使用已连接的 SSH MCP 和 initMAX Zabbix MCP 回答中文运�
 
 ## 执行约定
 
-使用平台提供的 list_mcp_tools 按需获取原生工具。每个 provider 在本任务中只列一次目录；已获取过同名工具的参数结构时，复用该结构，不再重复 list_mcp_tools。首次 query 为空仅列名称，填完整工具名获取参数结构，再通过 call_mcp_tool 调用。provider 为 ssh_mcp 或 zabbix_mcp；地址、Token、凭据由后台连接管理提供，不写进 Skill。工具参数遵循实际发现的结构，禁止编造接口或执行任意 Shell。多个独立的目录查询或已知目标的只读动作可在同一模型轮次发出，避免浪费轮次。
+使用平台提供的 list_mcp_tools 按需获取原生工具。每个 provider 在本任务中只列一次目录；已获取过同名工具的参数结构时，复用该结构，不再重复 list_mcp_tools。首次 query 为空仅列名称；后续优先使用 names: ["event_get", "item_get", "history_get"] 一次获取最多四个已知工具的参数结构（按任务替换工具名称），不再逐个查询。也可以对单个确切工具名填 query；随后通过 call_mcp_tool 调用。provider 为 ssh_mcp 或 zabbix_mcp；地址、Token、凭据由后台连接管理提供，不写进 Skill。工具参数遵循实际发现的结构，禁止编造接口或执行任意 Shell。多个独立的目录查询或已知目标的只读动作可在同一模型轮次发出，避免浪费轮次。
 
 平台加载的其他 Skill 如有专门场景，优先采用与当前问题最相关、优先级较高的指引。保持调用方要求的输出格式；告警入口要求 JSON 时，把完整报告写入对应字符串字段，保持可解析。
 
