@@ -55,6 +55,7 @@ ALLOWED = SENSITIVE | {
 }
 ALLOWED |= {
     "ai_profile_budgets",
+    "ai_request_timeout_seconds",
     "ssh_mcp_enabled",
     "ssh_mcp_url",
     "ssh_mcp_timeout_seconds",
@@ -68,6 +69,7 @@ DEFAULTS = {
     "web_protocol": "http",
     "ai_analysis_profile": "standard",
     "ai_tool_loading": "dynamic",
+    "ai_request_timeout_seconds": "90",
     "ssh_mcp_enabled": "false",
     "ssh_mcp_timeout_seconds": "90",
 }
