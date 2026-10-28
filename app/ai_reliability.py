@@ -31,7 +31,9 @@ def model_failure_message(exc):
     }.get(model_failure_code(exc), "AI 模型请求失败")
 
 
-async def request_response(client, *, deadline, timeout_seconds, reserve_seconds=12, **kwargs):
+async def request_response(
+    client, *, deadline, timeout_seconds, reserve_seconds=12, **kwargs
+):
     """Up to one bounded retry, only for transient model errors and sufficient time."""
     for attempt in range(2):
         remaining = deadline - time.monotonic() - reserve_seconds
@@ -45,7 +47,11 @@ async def request_response(client, *, deadline, timeout_seconds, reserve_seconds
                 isinstance(exc, APIStatusError)
                 and (exc.status_code == 429 or exc.status_code >= 500)
             )
-            if not transient or attempt or deadline - time.monotonic() - reserve_seconds < 25:
+            if (
+                not transient
+                or attempt
+                or deadline - time.monotonic() - reserve_seconds < 25
+            ):
                 raise
             # Do not retry cancelled tasks, non-transient 4xx errors, or without time.
             await asyncio.sleep(1)
@@ -58,7 +64,8 @@ def evidence_fallback(task_id, reason):
 
     rows = tasks.evidence_page(task_id, include_logs=False)
     useful = [
-        row for row in rows
+        row
+        for row in rows
         if row["status"] in ("success", "partial")
         and row["tool"] not in ("list_tools", "list_mcp_tools")
         and isinstance(row.get("payload"), dict)
@@ -71,8 +78,14 @@ def evidence_fallback(task_id, reason):
     ]
     for row in useful[-12:]:
         payload = row["payload"]
-        count = len(payload["records"]) if isinstance(payload.get("records"), list) else None
+        count = (
+            len(payload["records"])
+            if isinstance(payload.get("records"), list)
+            else None
+        )
         suffix = f"（返回 {count} 条记录）" if count is not None else ""
         lines.append(f"- {row['provider']} / {row['tool']}: {row['status']}{suffix}")
-    lines.append("请在下方“证据与工具执行记录”核验具体数值、时间和错误；未采集到的指标不能推断为正常。")
+    lines.append(
+        "请在下方“证据与工具执行记录”核验具体数值、时间和错误；未采集到的指标不能推断为正常。"
+    )
     return "\n".join(lines), bool(useful)
