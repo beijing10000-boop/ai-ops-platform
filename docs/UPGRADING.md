@@ -1,5 +1,21 @@
 # 升级说明
 
+## v0.9.1 → v0.9.2
+
+升级前备份数据库与配套主密钥；本版本无数据库迁移，不修改飞书卡片签名校验。新增 AI 单次请求超时（默认 90 秒），最大允许 180 秒；重试复用已取得的 MCP 证据。修正 problem.get 的排序参数；模型失败后优先输出证据型部分报告。安全起见，未删除旧兼容任务需要的执行入口。
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://127.0.0.1:8088/healthz
+```
+
+请先确认原始旧平台的飞书接收器已停用；如本部署没有启用飞书接收器，去掉 `--profile feishu`。登录 Web 的系统配置 → AI 配置，检查单次请求超时和现有任务预算，修改仅适用于新任务。重新运行此前超时失败的分析，核对模型异常降级、Zabbix 工具参数和飞书报告。保留旧数据卷与 `master.key`，不得使用 `down -v`。
+
+
 ## v0.9.0 → v0.9.1
 
 本次只升级平台，无数据库迁移；保留已导入 Skill、配置、历史与密钥。SSH MCP 已是 v0.4.1 时无需再升级，initMAX 和原 Skill ZIP 均无需修改。先按下方备份流程保存数据与配对密钥，再在原部署目录执行：

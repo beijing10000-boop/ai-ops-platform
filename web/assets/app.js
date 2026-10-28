@@ -454,7 +454,7 @@ function reportAnswer(task) {
 }
 function reportProgress(task) {
   const active = ["queued", "running"].includes(task.status);
-  const reasons = {QueueUnavailable: "诊断队列连接失败。请检查 Redis 和诊断 Worker，恢复后可重试此任务。", WorkerLost: "执行超过允许时间，Worker 可能已退出。请检查服务状态，已有证据仍可查看。", PermissionRevoked: "提交者的诊断权限已撤销，请联系管理员。", LocalSSHRemoved: "此任务使用已停用的旧版执行方式，请重新发起诊断。"};
+  const reasons = {QueueUnavailable: "诊断队列连接失败。请检查 Redis 和诊断 Worker，恢复后可重试此任务。", WorkerLost: "执行超过允许时间，Worker 可能已退出。请检查服务状态，已有证据仍可查看。", PermissionRevoked: "提交者的诊断权限已撤销，请联系管理员。", LocalSSHRemoved: "此任务使用已停用的旧版执行方式，请重新发起诊断。", ModelTimeout: "AI 模型请求超时；已保留已有证据，可调整单次请求超时后重试。", ModelRateLimited: "模型接口受到限流；请检查部署容量、配额或稍后重试。", ModelConnectionError: "模型连接失败；请检查服务连通性。", ModelServiceError: "模型服务返回 5xx；请检查供应商状态。", ModelRequestError: "模型请求被拒绝；请检查部署名及请求参数。"};
   const text = task.cancel_requested && active ? "已请求取消，正在停止后续采集。已开始的远端操作受其自身超时控制。" : active ? stageLabel(task.stage) : task.error_type ? reasons[task.error_type] || "分析未完成。请验证模型、两个 MCP 连接以及主机授权，再重试。" : task.status === "partial" ? "已保存可用证据；请查看诊断不足，补足信息后再判断。" : "分析已结束，可核验依据或下载报告。";
   return `<div class="report-progress ${active ? "is-active" : ""}"><span class="progress-mark">${active ? "◌" : task.status === "success" ? "✓" : "i"}</span><div><strong>${E(text)}</strong><p id="report-refresh-state">${active ? "每 5 秒检查进度，保留展开的证据与阅读位置。" : "历史监控与实时采集分别记录，AI 结论需要结合证据核验。"}</p></div>${task.error_type ? `<span class="mono">${E(task.error_type)}</span>` : ""}</div>`;
 }
@@ -467,12 +467,14 @@ const configHelp = {
   web_public_host: "用户实际访问的平台域名/IP和端口，例如 172.20.200.94:8088。",
   zabbix_frontend_url: "用于从告警卡片和报告打开 Zabbix 网页。",
   zabbix_webhook_secret: "验证 Zabbix 推送告警的身份，需与 Zabbix 告警媒介中的密钥一致。",
+  ai_request_timeout_seconds: "默认 90 秒，受任务总时限及留给总结的时间共同约束。仅影响新任务。",
 };
 const configGroups = {
   ai: [
     ["openai_base_url", "模型 Base URL"],
     ["openai_model", "模型部署名称"],
     ["openai_api_key", "API Key", "password"],
+    ["ai_request_timeout_seconds", "AI 单次请求超时（秒，15–180）", "number"],
     [
       "ai_analysis_profile",
       "默认分析模式",

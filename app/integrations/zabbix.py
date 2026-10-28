@@ -100,6 +100,8 @@ PARAMS = {
     "history_get": {"itemids", "hostids", "history", "time_from", "time_till"},
     "trend_get": {"itemids", "time_from", "time_till"},
 }
+SORT_FIELDS = {"problem_get": ["eventid"]}
+
 SELECTS = {
     "selectInterfaces": ["interfaceid", "type", "ip", "dns", "main", "useip", "port"],
     "selectHostGroups": ["groupid", "name"],
@@ -166,10 +168,13 @@ def input_schema(name):
         elif key == "sortfield":
             value = {
                 "anyOf": [
-                    {"type": "string", "enum": FIELDS[name]},
+                    {"type": "string", "enum": SORT_FIELDS.get(name, FIELDS[name])},
                     {
                         "type": "array",
-                        "items": {"type": "string", "enum": FIELDS[name]},
+                        "items": {
+                            "type": "string",
+                            "enum": SORT_FIELDS.get(name, FIELDS[name]),
+                        },
                     },
                 ]
             }
@@ -236,6 +241,15 @@ def validate_args(name, arguments, *, host_id=None):
     if len(json.dumps(arguments)) > 12000:
         raise ValueError("arguments too large")
     args = dict(arguments)
+    if "sortfield" in args:
+        value = args["sortfield"]
+        fields = [value] if isinstance(value, str) else value
+        if (
+            not isinstance(fields, list)
+            or not fields
+            or any(field not in SORT_FIELDS.get(name, FIELDS[name]) for field in fields)
+        ):
+            raise ValueError(f"{name} 不支持该排序字段；请使用允许的 sortfield")
     # Always request a minimal explicit field set; never retrieve host secrets or item credentials.
     output = args.get("output")
     if output not in (None, "extend") and (

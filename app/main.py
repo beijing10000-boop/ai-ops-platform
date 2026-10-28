@@ -23,7 +23,7 @@ DB = DATA_DIR / "app.sqlite3"
 MASTER_KEY = os.getenv("APP_ENCRYPTION_KEY", "")
 ADMIN_TOKEN = os.getenv("ADMIN_API_TOKEN", "")
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
-app = FastAPI(title="Zabbix AI Ops · Unified Platform", version="0.9.1")
+app = FastAPI(title="Zabbix AI Ops · Unified Platform", version="0.9.2")
 app.mount(
     "/assets",
     StaticFiles(directory=Path(__file__).parent.parent / "web" / "assets"),
@@ -55,6 +55,7 @@ ALLOWED = SENSITIVE | {
 }
 ALLOWED |= {
     "ai_profile_budgets",
+    "ai_request_timeout_seconds",
     "ssh_mcp_enabled",
     "ssh_mcp_url",
     "ssh_mcp_timeout_seconds",
@@ -68,6 +69,7 @@ DEFAULTS = {
     "web_protocol": "http",
     "ai_analysis_profile": "standard",
     "ai_tool_loading": "dynamic",
+    "ai_request_timeout_seconds": "90",
     "ssh_mcp_enabled": "false",
     "ssh_mcp_timeout_seconds": "90",
 }
