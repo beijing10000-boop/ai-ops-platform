@@ -677,3 +677,26 @@ def test_alert_token_usage_is_persisted():
             (event["event_id"],),
         ).fetchone()
     assert row == (120, 100, 20)
+
+
+def test_card_footer_combines_usage_profile_and_elapsed_time():
+    card = worker.make_card(
+        {"event_id": "887", "severity": "4", "event_value": "1"},
+        {
+            "cause": "当前内存高",
+            "analysis": "RSS 已采集",
+            "_token_usage": {
+                "available": True,
+                "total": 500,
+                "input": 400,
+                "output": 100,
+                "profile": "standard",
+            },
+            "_duration_ms": 57100,
+        },
+        analysis=True,
+    )
+    note = card["elements"][-1]["elements"][0]["content"]
+    assert "分析模式：标准分析" in note
+    assert "执行耗时：57.1 秒" in note
+    assert "执行耗时" not in str(card["elements"][1:-1])
