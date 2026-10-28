@@ -154,3 +154,13 @@ def test_readable_ai_json_report_keeps_worker_original_payload():
     assert "分析与依据" in human
     assert "需人工核验：是" in human
     assert readable_report_answer("纯文本结论") == "纯文本结论"
+
+
+def test_problem_get_rejects_clock_sort_and_advertises_only_eventid():
+    schema = zabbix.input_schema("problem_get")["properties"]["sortfield"]
+    assert schema["anyOf"][0]["enum"] == ["eventid"]
+    with pytest.raises(ValueError, match="sortfield"):
+        zabbix.validate_args("problem_get", {"sortfield": "clock"})
+    good = zabbix.validate_args("problem_get", {"sortfield": "eventid"})
+    assert good["sortfield"] == "eventid"
+    assert "clock" in zabbix.input_schema("event_get")["properties"]["sortfield"]["anyOf"][0]["enum"]
