@@ -31,7 +31,9 @@ def test_multi_item_history_summarizes_each_item_without_leaking_metadata():
         {"itemid": "20", "clock": "124", "value": "3.5"},
         {"itemid": "21", "clock": "123", "value": "12.0"},
     ]
-    result = model_view("zabbix_mcp", "history_get", {"records": rows, "is_error": False})
+    result = model_view(
+        "zabbix_mcp", "history_get", {"records": rows, "is_error": False}
+    )
     assert [r["itemid"] for r in result["series"]] == ["20", "21"]
     assert result["series"][0]["numeric_summary"]["value"]["numeric_count"] == 1
 
