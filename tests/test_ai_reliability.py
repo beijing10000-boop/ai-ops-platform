@@ -27,8 +27,11 @@ def test_transient_model_error_retries_once_without_new_tool_calls():
     client = SimpleNamespace(responses=SimpleNamespace(create=create))
     answer = asyncio.run(
         ai_reliability.request_response(
-            client, deadline=time.monotonic() + 120,
-            timeout_seconds=90, model="fixture", input=[]
+            client,
+            deadline=time.monotonic() + 120,
+            timeout_seconds=90,
+            model="fixture",
+            input=[],
         )
     )
     assert answer == "final answer"
@@ -46,7 +49,8 @@ def test_bad_model_request_is_not_retried():
         asyncio.run(
             ai_reliability.request_response(
                 SimpleNamespace(responses=SimpleNamespace(create=create)),
-                deadline=time.monotonic() + 120, timeout_seconds=90
+                deadline=time.monotonic() + 120,
+                timeout_seconds=90,
             )
         )
     assert create.await_count == 1
@@ -56,21 +60,30 @@ def test_evidence_fallback_states_no_unproven_root_cause(monkeypatch):
     from app.orchestrator import tasks
 
     monkeypatch.setattr(
-        tasks, "evidence_page", lambda *args, **kwargs: [
+        tasks,
+        "evidence_page",
+        lambda *args, **kwargs: [
             {
-                "status": "success", "provider": "zabbix_mcp",
-                "tool": "history_get", "payload": {"records": [{"value": "75"}]}
+                "status": "success",
+                "provider": "zabbix_mcp",
+                "tool": "history_get",
+                "payload": {"records": [{"value": "75"}]},
             },
             {
-                "status": "failed", "provider": "zabbix_mcp",
-                "tool": "problem_get", "payload": {"error": "invalid sort"}
+                "status": "failed",
+                "provider": "zabbix_mcp",
+                "tool": "problem_get",
+                "payload": {"error": "invalid sort"},
             },
-        ]
+        ],
     )
     text, useful = ai_reliability.evidence_fallback("any-task", "AI 模型请求超时")
     assert useful
     assert "history_get" in text and "1 条记录" in text
-    assert "根因已经确认" not in text and "problem_get" not in text
-    assert ai_reliability.model_failure_code(
-        APITimeoutError(request=httpx.Request("POST", "https://example.invalid"))
-    ) == "ModelTimeout"
+    assert "不代表故障根因已经确认" in text and "problem_get" not in text
+    assert (
+        ai_reliability.model_failure_code(
+            APITimeoutError(request=httpx.Request("POST", "https://example.invalid"))
+        )
+        == "ModelTimeout"
+    )
