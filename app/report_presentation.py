@@ -21,7 +21,5 @@ def human_metrics(text):
     text = _KIB.sub(kib, text)
     text = _PERCENT.sub(lambda m: f"{float(m['number']):.2f}%", text)
     # Avoid repeating model-provided approximate binary equivalents.
-    text = re.sub(
-        r"(\d+\.\d{2}\s+(?:MiB|GiB))（约\s*\1）", r"\1", text
-    )
+    text = re.sub(r"(\d+\.\d{2}\s+(?:MiB|GiB))（约\s*\1）", r"\1", text)
     return text
