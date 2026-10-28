@@ -16,10 +16,11 @@ def configure_frontend(monkeypatch):
     )
 
 
-def test_alert_prompt_keeps_required_json_contract():
-    value = worker.alert_instructions("请重点分析网络性能")
+def test_alert_output_contract_remains_program_controlled():
+    value = worker.alert_instructions()
     assert "host_groups,cause,action,analysis,human_required" in value
-    assert "重点分析网络性能" in value
+    assert "完整中文结论" in value
+    assert "先查询 Zabbix" not in value
 
 
 def test_card_keeps_complete_report_without_fixed_character_truncation():

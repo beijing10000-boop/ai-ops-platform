@@ -136,22 +136,28 @@ def test_configured_profile_is_used_without_exposing_settings(monkeypatch):
     assert tasks.get(result["task_id"])["profile"] == "quick"
 
 
-@pytest.mark.parametrize(
-    "event_id,prompt", [("100", "alert-custom"), (None, "qa-custom")]
-)
-def test_web_alert_diagnosis_uses_alert_prompt(monkeypatch, event_id, prompt):
+@pytest.mark.parametrize("event_id", ["100", None])
+def test_web_diagnosis_ignores_retired_prompts(monkeypatch, event_id):
     from app import mcp_runtime
+    from app.worker import alert_instructions
+    from app.ai_agent import QA_OUTPUT_CONTRACT
 
     with main.connection() as db:
         db.executemany(
             "INSERT INTO settings VALUES (?,?,0)",
-            [("ai_alert_prompt", "alert-custom"), ("ai_qa_prompt", "qa-custom")],
+            [
+                ("ai_alert_prompt", "old-alert-override"),
+                ("ai_qa_prompt", "old-qa-override"),
+            ],
         )
     task, _ = tasks.create({"question": "CPU", "event": {}}, event_id=event_id)
     run = AsyncMock(return_value="answer")
     monkeypatch.setattr(mcp_runtime, "run", run)
     diagnostic_worker.process(task["task_id"])
-    assert run.await_args.args[0] == prompt
+    expected = alert_instructions() if event_id else QA_OUTPUT_CONTRACT
+    assert run.await_args.args[0] == expected
+    assert "old-alert-override" not in run.await_args.args[0]
+    assert "old-qa-override" not in run.await_args.args[0]
 
 
 def test_saving_unchanged_settings_keeps_last_connection_check():

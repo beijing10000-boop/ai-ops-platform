@@ -16,7 +16,7 @@ list_mcp_tools 返回平台接受的参数结构。call_mcp_tool 中 output 用�
 
 ## 告警与历史
 
-1. 对可信告警 event_id 用 event_get 的 eventids 查询，核实 clock、value、r_eventid；必要时用 problem_get、trigger_get 查询当前问题及触发器状态与描述。当前平台不开放 expression/recovery_expression 字段；描述没有明确阈值时，写明阈值未核实，不自行添加参数。
+1. 对可信告警 event_id 用 event_get 的 eventids 查询，核实 clock、value、r_eventid；必要时用 problem_get、trigger_get 查询当前问题及触发器状态与描述。`problem_get` 的 `sortfield` 只允许 `eventid`（不是 `clock`），按时间分析时读取返回的 clock 并在模型中比较，不向 problem_get 传入 clock 排序。当前平台不开放 expression/recovery_expression 字段；描述没有明确阈值时，写明阈值未核实，不自行添加参数。
 2. item_get 按 hostids 与 search.key_ 或 search.name 找相关监控项；可用 searchByAny，限制结果数量。保留 itemid、value_type、lastvalue、lastclock、units。
 3. history_get 必须使用本任务 item_get 已返回的 itemids；history 对应 value_type；time_from、time_till 为秒级 Unix 时间戳。先查告警前后短窗口，再按需补查。每次不超过 8 个 item、86400 秒、120 条结果；不要混淆字符串类型与数值类型。
 4. trend_get 同样先核验 itemid，再查有界 time_from/time_till，分析 value_min/value_avg/value_max。不能把小时平均值写成瞬时峰值。

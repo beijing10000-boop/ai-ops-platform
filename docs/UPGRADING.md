@@ -1,5 +1,14 @@
 # 升级说明
 
+## v0.9.2 → v0.9.3：Skill 统一诊断策略
+
+升级前备份数据库、配套主密钥和已导入的 Skill ZIP。新版本取消 Web 中的两项提示词输入及恢复按钮，旧的数据库配置值保留供回滚，但不再用于新任务。飞书 JSON 卡片字段、安全和授权规则仍由平台校验。未启用对应场景 Skill 时，会显示提示并使用内置只读兼容流程。
+
+在原部署目录运行 `git fetch origin`、`git switch main`、`git pull --ff-only origin main`，再执行 `docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180`。使用 `curl -fsS http://127.0.0.1:8088/healthz` 检查版本应为 0.9.3。未启用飞书接收器时去掉 `--profile feishu`；不要执行 `down -v`。
+
+升级后在 Skill 管理先导出旧 Skill 备份，然后下载新版运维模板 ZIP。若原 Skill 有自定义规则，手动合并后再上传，选择“更新同名 Skill”，勾选所需的告警分析、飞书问答和 Web 诊断场景并启用、验证工具。旧 Skill 不会自动被模板覆盖；既有任务仍使用创建时的 Skill 快照。浏览器 Ctrl+F5 强制刷新，在系统配置 → AI 配置确认已无两项提示词，发起新任务进行验证。
+
+
 ## v0.9.1 → v0.9.2
 
 升级前备份数据库与配套主密钥；本版本无数据库迁移，不修改飞书卡片签名校验。新增 AI 单次请求超时（默认 90 秒），最大允许 180 秒；重试复用已取得的 MCP 证据。修正 problem.get 的排序参数；模型失败后优先输出证据型部分报告。安全起见，未删除旧兼容任务需要的执行入口。

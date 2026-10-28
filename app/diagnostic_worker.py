@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from .main import REDIS_URL, read_setting
+from .main import REDIS_URL
 from .orchestrator import tasks
 from .security.rbac import permits
 
@@ -28,13 +28,14 @@ def process(task_id):
         )
         return
     from .mcp_runtime import run
+    from .worker import alert_instructions
+    from .ai_agent import QA_OUTPUT_CONTRACT
 
     request = task["request"]
     try:
         return asyncio.run(
             run(
-                read_setting("ai_alert_prompt" if task["event_id"] else "ai_qa_prompt")
-                or "根据实际证据用中文输出结论、依据、建议和诊断不足。",
+                alert_instructions() if task["event_id"] else QA_OUTPUT_CONTRACT,
                 request.get("question", "请诊断告警"),
                 task_id=task_id,
                 event=request.get("event"),

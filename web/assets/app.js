@@ -485,8 +485,6 @@ const configGroups = {
         ["deep", "深度分析"],
       ],
     ],
-    ["ai_alert_prompt", "告警分析提示词", "textarea"],
-    ["ai_qa_prompt", "问答提示词", "textarea"],
     ["ai_tool_loading", "监控工具加载方式", "select", [["dynamic", "按需加载（推荐）"], ["full", "加载全部授权工具"]]],
   ],
   feishu: [
@@ -593,10 +591,6 @@ async function verifyAction(action, id, button) {
   else if (action === "validate-diagnostic") await request(P + "/tasks/validate", formValues(form));
   else if (action === "validate-editor") {
     await request(P + "/members/validate", formValues(form));
-  } else if (action === "reset-prompts") {
-    for (const [key, value] of Object.entries(state.options.prompts)) form.elements[key].value = value;
-    OpsUI.mark(form);
-    show("已恢复项目默认提示词，保存后生效。");
   } else if (action === "validate-mute") {
     const values = formValues(form); values.hours = Number(values.hours);
     await request("/api/v1/alert-mutes/validate", values);
@@ -609,17 +603,17 @@ function configSection(group, values, options) {
   const hints = {
     settings: "配置访问地址、告警认证和 Zabbix 只读工具权限。敏感字段保留掩码表示不修改。",
     feishu: "告警与问答沿用同一飞书应用。更换应用或访问地址后，请同时核对飞书回调地址和机器人权限。更换应用凭据后需重启飞书接收器。",
-    ai: "配置模型、默认提示词与分析预算。单次请求的实际 Token 用量在上游响应后才可确认。验证模型连接会产生少量实际用量。",
+    ai: "仅配置模型、执行超时与预算。诊断规则统一在 Skill 管理中维护；已保存的旧提示词不再参与新分析。",
   };
   const actions = group === "ai"
-    ? btn("test-model", "验证模型连接") + btn("reset-prompts", "恢复默认提示词")
+    ? btn("test-model", "验证模型连接") + '<a class="button" href="#skills">管理诊断 Skill</a>'
     : group === "feishu"
       ? btn("verify-feishu", "验证飞书应用") + btn("verify-feishu-groups", "验证群访问权限")
       : "";
   const fields = configGroups[group].filter(x => can("*") || x[0] !== "feishu_admin_open_ids");
   return panel(
     titles[group],
-    `<form id="${group}-settings-form" class="settings-form" data-group="${group}"><div class="form-grid">${fields.map(([key, label, type, choices]) => field(key, label, values[key] || "", type === "select" ? "text" : type || "text", key.includes("prompt") ? "已提供项目默认提示词；可编辑。留空后使用默认值。平台只读与证据规则始终生效。" : (configHelp[key] || ""), choices || null, type === "textarea")).join("")}</div>${group === "ai" ? budgetFields(values, options) : ""}${group === "settings" && can("*") ? toolFields(values, options) : ""}<div class="form-actions">${btn("validate-settings", "验证填写内容")}${actions}<button class="button primary" type="submit">保存${group === "settings" ? "基础" : group === "feishu" ? "飞书" : "AI"}配置</button></div><p class="muted small" role="status" data-verify-result></p></form>`,
+    `<form id="${group}-settings-form" class="settings-form" data-group="${group}"><div class="form-grid">${fields.map(([key, label, type, choices]) => field(key, label, values[key] || "", type === "select" ? "text" : type || "text", configHelp[key] || "", choices || null, type === "textarea")).join("")}</div>${group === "ai" ? budgetFields(values, options) : ""}${group === "settings" && can("*") ? toolFields(values, options) : ""}<div class="form-actions">${btn("validate-settings", "验证填写内容")}${actions}<button class="button primary" type="submit">保存${group === "settings" ? "基础" : group === "feishu" ? "飞书" : "AI"}配置</button></div><p class="muted small" role="status" data-verify-result></p></form>`,
     hints[group],
     "settings-" + (group === "settings" ? "general" : group),
   );
@@ -969,7 +963,6 @@ document.addEventListener("submit", async (event) => {
         await api("/api/v1/settings", "PUT", { values: data });
         form.querySelectorAll('.secret-control input').forEach(input => { if (input.value) input.value = "********"; input.type = "password"; });
         form.querySelectorAll('[data-action="toggle-secret"]').forEach(button => button.textContent = "显示");
-        if (form.dataset.group === "ai") for (const [key, value] of Object.entries(state.options.prompts)) if (!form.elements[key].value) form.elements[key].value = value;
       } finally { unlock(); }
       OpsUI.saved(form);
       const result = form.querySelector("[data-verify-result]");

@@ -9,7 +9,9 @@ function skillChoices(values = {}) {
 
 async function skillsPage(id) {
   const data = await api(P + "/skills"), manage = can("settings.manage");
-  let html = intro("按 Skill 选择查询来源、工具与步骤。实时诊断可直接查询 SSH；每个新任务保存所用 Skill 版本。", `<a class="button" href="${P}/skills/template">下载运维模板 ZIP</a>` + btn("refresh", "刷新"));
+  const uncovered = [["qa", "飞书问答"], ["web", "Web 诊断"], ["alert", "告警分析"]].filter(([scope]) => !data.items.some(row => row.enabled && row.scopes.includes(scope))).map(([, label]) => label);
+  let html = intro("Skill 是诊断规则的唯一可编辑来源，按任务选择数据源、工具、查询顺序与报告策略；各任务保存所用 Skill 版本。", `<a class="button" href="${P}/skills/template">下载运维模板 ZIP</a>` + btn("refresh", "刷新"));
+  if (uncovered.length) html += `<div class="notice" role="status">尚未为以下场景启用诊断 Skill：${E(uncovered.join("、"))}。这些场景将使用系统内置只读兼容流程，不会读取历史自定义提示词。可导入模板并启用对应适用场景。</div>`;
   html += panel("已加载的 Skill", table(["名称与说明", "状态 / 版本", "适用场景", "操作"], data.items.map(row => `<tr><td><strong>${E(row.name)}</strong><p class="muted small">${E(row.description)}</p><span class="muted small">优先级 ${row.priority} · ${row.providers.map(E).join(" / ")}</span></td><td>${row.enabled ? '<span class="badge success">已启用</span>' : '<span class="badge disabled">已停用</span>'}<p class="small">v${row.revision}</p></td><td>${row.scopes.map(scope => ({qa: "飞书问答", web: "Web 诊断", alert: "告警分析"})[scope]).join(" / ")}</td><td><div class="actions">${btn("skill-open", manage ? "查看 / 编辑" : "查看", row.id, "small")}<a class="button small" href="${P}/skills/${row.id}/export">导出</a>${manage ? btn("skill-verify", "验证工具", row.id, "small") + btn("skill-toggle", row.enabled ? "停用" : "启用", row.id, "small") : ""}</div></td></tr>`).join("")), "同一场景可启用多个 Skill，按优先级向模型加载；工具权限仍由后台服务与平台校验。未启用 Skill 的场景沿用兼容流程。") + '<p id="skill-status" role="status" class="notice" hidden></p>';
   if (id) {
     const row = await api(P + "/skills/" + encodeURIComponent(id));

@@ -68,16 +68,6 @@ def setup(monkeypatch, calls, final_text="分析完成"):
 
     model = SimpleNamespace(responses=SimpleNamespace(create=responses_create))
     monkeypatch.setattr(
-        ai_agent,
-        "read_setting",
-        lambda k: {
-            "mcp_url": "http://example.invalid/mcp",
-            "openai_api_key": "unit-test",
-            "openai_model": "test-model",
-            "openai_base_url": "https://example.invalid/v1",
-        }.get(k, ""),
-    )
-    monkeypatch.setattr(
         mcp_runtime,
         "streamablehttp_client",
         lambda *a, **k: Context(("read", "write", None)),
