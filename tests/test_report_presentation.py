@@ -5,7 +5,7 @@ from app.report_presentation import human_metrics
 def test_human_metrics_convert_iec_values_and_percentage_precision():
     value = "内存 8173636 KiB，可用 800340 KiB；利用率 90.201081%，空闲 9.792%。"
     out = human_metrics(value)
-    assert "7.80 GiB" in out
+    assert "7.79 GiB" in out
     assert "781.58 MiB" in out
     assert "90.20%" in out
     assert "9.79%" in out
