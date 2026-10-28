@@ -51,7 +51,9 @@ def model_view(provider, tool, outcome):
     records = outcome["records"]
     if not records:
         return outcome
-    result = {key: value for key, value in outcome.items() if key not in ("records", "data")}
+    result = {
+        key: value for key, value in outcome.items() if key not in ("records", "data")
+    }
     result["total_records"] = len(records)
     if tool in {"history_get", "trend_get"}:
         groups = defaultdict(list)
@@ -62,21 +64,26 @@ def model_view(provider, tool, outcome):
         for itemid, rows in list(groups.items())[:8]:
             # Keep endpoints plus a few intermediate observations.
             selected = sorted(
-                {0, len(rows) - 1}
-                | {round(i * (len(rows) - 1) / 7) for i in range(8)}
+                {0, len(rows) - 1} | {round(i * (len(rows) - 1) / 7) for i in range(8)}
             )
             sample = [rows[i] for i in selected]
-            metrics = ("value",) if tool == "history_get" else (
-                "value_min", "value_avg", "value_max"
+            metrics = (
+                ("value",)
+                if tool == "history_get"
+                else ("value_min", "value_avg", "value_max")
             )
-            result["series"].append({
-                "itemid": itemid,
-                "record_count": len(rows),
-                "numeric_summary": _numbers(rows, metrics),
-                "sample_records": sample,
-                "sample_only": len(sample) < len(rows),
-            })
-        result["note"] = "统计值由本次完整采集记录计算，样本并非全部历史点；完整证据在任务记录中"
+            result["series"].append(
+                {
+                    "itemid": itemid,
+                    "record_count": len(rows),
+                    "numeric_summary": _numbers(rows, metrics),
+                    "sample_records": sample,
+                    "sample_only": len(sample) < len(rows),
+                }
+            )
+        result["note"] = (
+            "统计值由本次完整采集记录计算，样本并非全部历史点；完整证据在任务记录中"
+        )
     else:
         result["records"] = records[:20]
         if len(records) > 20:
