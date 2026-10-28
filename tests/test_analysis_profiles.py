@@ -61,7 +61,13 @@ def test_duration_is_part_of_usage_footer():
     from app.mcp_runtime import format_usage
 
     text = format_usage(
-        {"available": True, "total": 1250, "input": 1000, "output": 250, "profile": "standard"},
+        {
+            "available": True,
+            "total": 1250,
+            "input": 1000,
+            "output": 250,
+            "profile": "standard",
+        },
         duration_ms=57100,
     )
     assert "分析模式：标准分析 · 执行耗时：57.1 秒" in text
