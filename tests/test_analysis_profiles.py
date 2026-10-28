@@ -38,8 +38,20 @@ def test_native_tools_keeps_only_authorized_discovered_tools():
 def test_usage_footer_profiles_and_missing_usage():
     from app.mcp_runtime import format_usage
 
-    for profile, label in (("quick", "快速分析"), ("standard", "标准分析"), ("deep", "深度分析")):
-        value = format_usage({"available": True, "total": 1200, "input": 1000, "output": 200, "profile": profile})
+    for profile, label in (
+        ("quick", "快速分析"),
+        ("standard", "标准分析"),
+        ("deep", "深度分析"),
+    ):
+        value = format_usage(
+            {
+                "available": True,
+                "total": 1200,
+                "input": 1000,
+                "output": 200,
+                "profile": profile,
+            }
+        )
         assert "1,200" in value and "分析模式：" + label in value
     assert "分析模式：深度分析" in format_usage({"profile": "deep", "available": False})
     assert "分析模式" not in format_usage({"available": False})
