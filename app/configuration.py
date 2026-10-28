@@ -4,6 +4,7 @@ import re
 from urllib.parse import urlsplit
 from fastapi import HTTPException
 
+
 def validate_form(values, read):
     def value(key):
         val = values.get(key)
