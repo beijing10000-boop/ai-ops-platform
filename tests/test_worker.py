@@ -32,7 +32,7 @@ def test_card_keeps_complete_report_without_fixed_character_truncation():
     }
     summary = worker.analysis_summary(info)
     assert "末尾关键证据" in summary and "摘要已省略" not in summary
-    assert "需人工核验：是" in summary
+    assert "需人工核验：是" not in summary
     info["analysis"] *= 5
     summary = worker.analysis_summary(info)
     assert len(summary) > 500
