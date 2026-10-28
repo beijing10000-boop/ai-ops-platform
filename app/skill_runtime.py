@@ -70,8 +70,10 @@ async def run(
                 "provider": {"type": "string", "enum": providers},
                 "query": {"type": "string", "maxLength": 100},
                 "names": {
-                    "type": "array", "items": {"type": "string", "maxLength": 100},
-                    "minItems": 1, "maxItems": 4,
+                    "type": "array",
+                    "items": {"type": "string", "maxLength": 100},
+                    "minItems": 1,
+                    "maxItems": 4,
                 },
             },
             ["provider"],
@@ -359,11 +361,20 @@ async def run(
                                                     raise ValueError("工具名称列表无效")
                                                 definitions = []
                                                 for name in dict.fromkeys(names):
-                                                    selected = await bridge.definitions(provider, name)
-                                                    if not any(tool["name"] == name for tool in selected):
-                                                        raise ValueError("批量工具名称未在授权目录中")
+                                                    selected = await bridge.definitions(
+                                                        provider, name
+                                                    )
+                                                    if not any(
+                                                        tool["name"] == name
+                                                        for tool in selected
+                                                    ):
+                                                        raise ValueError(
+                                                            "批量工具名称未在授权目录中"
+                                                        )
                                                     definitions.extend(
-                                                        tool for tool in selected if tool["name"] == name
+                                                        tool
+                                                        for tool in selected
+                                                        if tool["name"] == name
                                                     )
                                             else:
                                                 definitions = await bridge.definitions(
@@ -436,16 +447,18 @@ async def run(
                                 "type": "function_call_output",
                                 "call_id": call.call_id,
                                 "output": compact_result(
-                                    safe(json.dumps(
-                                        model_view(
-                                            args.get("provider"),
-                                            args.get("name", "list_tools")
-                                            if call.name == "call_mcp_tool"
-                                            else call.name,
-                                            outcome,
-                                        ),
-                                        ensure_ascii=False,
-                                    )),
+                                    safe(
+                                        json.dumps(
+                                            model_view(
+                                                args.get("provider"),
+                                                args.get("name", "list_tools")
+                                                if call.name == "call_mcp_tool"
+                                                else call.name,
+                                                outcome,
+                                            ),
+                                            ensure_ascii=False,
+                                        )
+                                    ),
                                     min(limits["result_chars"], 4000),
                                 ),
                             }
