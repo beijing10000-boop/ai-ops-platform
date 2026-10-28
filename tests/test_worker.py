@@ -32,7 +32,7 @@ def test_card_keeps_complete_report_without_fixed_character_truncation():
     }
     summary = worker.analysis_summary(info)
     assert "末尾关键证据" in summary and "摘要已省略" not in summary
-    assert "需人工核验：是" in summary
+    assert "需人工核验：是" not in summary
     info["analysis"] *= 5
     summary = worker.analysis_summary(info)
     assert len(summary) > 500
@@ -179,7 +179,7 @@ def test_severe_analysis_has_detail():
     initial = worker.make_card(event, details)
     analyzed = worker.make_card(event, details, analysis=True)
     assert "故障原因" not in str(initial)
-    assert "故障原因" in str(analyzed)
+    assert "诊断结论" in str(analyzed)
 
 
 def test_alert_card_newlines_are_real():
@@ -677,3 +677,26 @@ def test_alert_token_usage_is_persisted():
             (event["event_id"],),
         ).fetchone()
     assert row == (120, 100, 20)
+
+
+def test_card_footer_combines_usage_profile_and_elapsed_time():
+    card = worker.make_card(
+        {"event_id": "887", "severity": "4", "event_value": "1"},
+        {
+            "cause": "当前内存高",
+            "analysis": "RSS 已采集",
+            "_token_usage": {
+                "available": True,
+                "total": 500,
+                "input": 400,
+                "output": 100,
+                "profile": "standard",
+            },
+            "_duration_ms": 57100,
+        },
+        analysis=True,
+    )
+    note = card["elements"][-1]["elements"][0]["content"]
+    assert "分析模式：标准分析" in note
+    assert "执行耗时：57.1 秒" in note
+    assert "执行耗时" not in str(card["elements"][1:-1])

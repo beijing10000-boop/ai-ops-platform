@@ -49,7 +49,8 @@ def test_alert_card_contains_same_complete_answer_and_limitations_as_web():
         "_duration_ms": 1234,
     }
     result = worker.analysis_summary(info)
-    assert answer in result and "需要补查历史" in result and "1.2 秒" in result
+    assert answer in result and "需要补查历史" in result
+    assert "执行耗时" not in result
     assert "摘要已省略" not in result
 
 
