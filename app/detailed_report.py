@@ -75,8 +75,17 @@ def build_detailed_report(task_id, *, task=None):
         evidence = [
             dict(
                 zip(
-                    ("id", "task_id", "trace_id", "provider", "tool", "status",
-                     "collected_at", "duration_ms", "payload"),
+                    (
+                        "id",
+                        "task_id",
+                        "trace_id",
+                        "provider",
+                        "tool",
+                        "status",
+                        "collected_at",
+                        "duration_ms",
+                        "payload",
+                    ),
                     row,
                 )
             )
@@ -90,8 +99,18 @@ def build_detailed_report(task_id, *, task=None):
         interactions = [
             dict(
                 zip(
-                    ("id", "round_number", "model", "status", "created_at",
-                     "duration_ms", "token_input", "token_output", "token_total", "payload"),
+                    (
+                        "id",
+                        "round_number",
+                        "model",
+                        "status",
+                        "created_at",
+                        "duration_ms",
+                        "token_input",
+                        "token_output",
+                        "token_total",
+                        "payload",
+                    ),
                     row,
                 )
             )
@@ -163,34 +182,40 @@ def build_detailed_report(task_id, *, task=None):
         "",
         "## 4. 诊断不足和预算",
         "",
-        _json_block({
-            "limitations": report.get("limitations") or [],
-            "budget": budget,
-        }),
+        _json_block(
+            {
+                "limitations": report.get("limitations") or [],
+                "budget": budget,
+            }
+        ),
         "",
         "## 5. 本次加载的 Skill",
         "",
     ]
     if skills:
         for index, skill in enumerate(skills, start=1):
-            parts.extend([
-                f"### Skill {index}",
-                "",
-                _json_block(skill),
-                "",
-            ])
+            parts.extend(
+                [
+                    f"### Skill {index}",
+                    "",
+                    _json_block(skill),
+                    "",
+                ]
+            )
     else:
         parts.extend(["本任务未保存 Skill 快照，可能使用兼容诊断流程。", ""])
 
-    parts.extend([
-        "## 6. 原始任务元数据和请求快照",
-        "",
-        _json_block(task),
-        "",
-        "## 7. 诊断时间线",
-        "",
-        f"- {_beijing(task.get('created_at'))} · 创建任务",
-    ])
+    parts.extend(
+        [
+            "## 6. 原始任务元数据和请求快照",
+            "",
+            _json_block(task),
+            "",
+            "## 7. 诊断时间线",
+            "",
+            f"- {_beijing(task.get('created_at'))} · 创建任务",
+        ]
+    )
     if task.get("started_at"):
         parts.append(f"- {_beijing(task['started_at'])} · 开始分析")
     for item in evidence:
@@ -208,43 +233,51 @@ def build_detailed_report(task_id, *, task=None):
 
     parts.extend(["", "## 8. 逐轮与大模型交互记录", ""])
     if not interactions:
-        parts.extend([
-            "未保存交互记录。v0.9.6 以前的任务不会补录，或本任务未发起模型请求。",
-            "",
-        ])
+        parts.extend(
+            [
+                "未保存交互记录。v0.9.6 以前的任务不会补录，或本任务未发起模型请求。",
+                "",
+            ]
+        )
     for item in interactions:
-        parts.extend([
-            f"### 第 {item['round_number']} 轮 · {item['model']} · {item['status']}",
-            "",
-            f"调用时间（北京时间）：{_beijing(item['created_at'])}；"
-            f"耗时：{item['duration_ms']} ms；"
-            f"Token：输入 {item['token_input']} / 输出 {item['token_output']} / 合计 {item['token_total']}",
-            "",
-            _json_block(item),
-            "",
-        ])
+        parts.extend(
+            [
+                f"### 第 {item['round_number']} 轮 · {item['model']} · {item['status']}",
+                "",
+                f"调用时间（北京时间）：{_beijing(item['created_at'])}；"
+                f"耗时：{item['duration_ms']} ms；"
+                f"Token：输入 {item['token_input']} / 输出 {item['token_output']} / 合计 {item['token_total']}",
+                "",
+                _json_block(item),
+                "",
+            ]
+        )
     parts.extend(["## 9. MCP 工具执行记录和完整已保存证据", ""])
     if not evidence:
         parts.extend(["未采集到 MCP 证据。", ""])
     for item in evidence:
-        parts.extend([
-            f"### {item['provider']} / {item['tool']}（记录 {item['id']}）",
+        parts.extend(
+            [
+                f"### {item['provider']} / {item['tool']}（记录 {item['id']}）",
+                "",
+                f"时间（北京时间）：{_beijing(item['collected_at'])}；"
+                f"状态：{item['status']}；耗时：{item['duration_ms']} ms",
+                "",
+                _json_block(item),
+                "",
+            ]
+        )
+    parts.extend(
+        [
+            "## 10. 数据完整性说明",
             "",
-            f"时间（北京时间）：{_beijing(item['collected_at'])}；"
-            f"状态：{item['status']}；耗时：{item['duration_ms']} ms",
+            "- 本文件包括数据库中当前任务已保存的所有 MCP 证据记录，不受网页分页条数限制。",
+            "- 模型交互保留的是 v0.9.6 起系统已存的脱敏限长预览；早期任务无记录，"
+            "标记为 truncated 的输入或响应无法恢复省略部分。",
+            "- 来自 MCP 的原始采集结果如在采集时已经按预算截断，导出无法还原不存在的数据。",
+            "- 已去除已知 API Key、访问令牌及敏感字段；导出仍可能包含运维系统日志、"
+            "主机信息和内部业务数据，请妥善保存。",
             "",
-            _json_block(item),
-            "",
-        ])
-    parts.extend([
-        "## 10. 数据完整性说明",
-        "",
-        "- 本文件包括数据库中当前任务已保存的所有 MCP 证据记录，不受网页分页条数限制。",
-        "- 模型交互保留的是 v0.9.6 起系统已存的脱敏限长预览；早期任务无记录，"
-        "标记为 truncated 的输入或响应无法恢复省略部分。",
-        "- 来自 MCP 的原始采集结果如在采集时已经按预算截断，导出无法还原不存在的数据。",
-        "- 已去除已知 API Key、访问令牌及敏感字段；导出仍可能包含运维系统日志、"
-        "主机信息和内部业务数据，请妥善保存。",
-        "",
-    ])
+        ]
+    )
     return "\n".join(parts)
