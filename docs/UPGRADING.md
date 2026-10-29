@@ -1,5 +1,28 @@
 # 升级说明
 
+## v1.0.0 → v1.0.1
+
+没有数据库迁移，不改配置，不需要先备份（备份照常做也可以）。在平台部署目录执行：
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://127.0.0.1:8088/healthz
+```
+
+healthz 应返回 version 1.0.1（`WEB_BIND_IP` 设成了服务器地址时 curl 用该地址）。未启用飞书接收器时去掉 `--profile feishu`。升级后第一次打开 Skill 管理页或创建诊断任务时，platform-base 自动更新到新版本（Skill 管理页里版本号 +1），管理员的启用、场景、优先级选择保留；自定义 Skill 不受影响。浏览器按 Ctrl+F5 刷新。
+
+验收：对一条 Linux CPU 告警点“AI 分析”，下载详细报告检查：
+
+- 第 1 轮请求快照的 `prefetched` 里已有 `history_get` 和 `trend_get`，典型情况下只有 1 轮模型请求；
+- “诊断不足”里不再出现 “history window must be 1–86400 seconds” 或 sortfield 相关错误；
+- 模型接口出错时（可临时填错 API Key 验证），飞书卡片显示“部分完成”和原因（如“AI 模型请求被拒绝”），而不是“分析失败，请稍后重试”。
+
+使用带思考的模型（如 DeepSeek）时，建议在 AI 配置里把 standard 预算的 `seconds` 提高到 150–180、`rounds` 保持 4，“模型请求超时”设为 120。
+
 ## v0.9.9 → v1.0.0
 
 本次有两次数据库迁移（v7、v8，启动时自动执行，只新增表和列），不改变飞书卡片签名，也不需要重新配置 MCP、AI 或飞书。按以下顺序操作。

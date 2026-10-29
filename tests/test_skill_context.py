@@ -141,3 +141,22 @@ def test_model_alert_drops_only_unexpanded_zabbix_macros():
         "message": "恢复时间：{EVENT.RECOVERY.TIME}\n监控数据：3.28",
     }
     assert "recovery_date" in event and model_alert(None) == {}
+
+
+def test_ssh_process_lists_keep_busy_rows_only_and_leave_the_evidence_whole():
+    rows = [
+        {"pid": i, "name": "postgres", "cpu_percent": 13.0 - i, "memory_percent": 28.0}
+        for i in range(10)
+    ]
+    rows += [
+        {"pid": 100 + i, "name": "kworker", "cpu_percent": 0.0, "memory_percent": 0.0}
+        for i in range(30)
+    ]
+    rows.append({"pid": 999, "name": "java", "cpu_percent": 0.0, "cpu_interval": 45.5})
+    outcome = {"is_error": False, "data": {"summary": {"processes": rows}}}
+    shown = model_view("ssh_mcp", "ssh_diagnose_processes", outcome)["data"]["summary"]
+    assert [row["pid"] for row in shown["processes"]] == [*range(10), 999]
+    assert (shown["processes_shown"], shown["processes_total"]) == (11, 41)
+    assert len(outcome["data"]["summary"]["processes"]) == 41
+    small = {"data": {"summary": {"processes": rows[:5]}}}
+    assert model_view("ssh_mcp", "ssh_diagnose_processes", small) is small

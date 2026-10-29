@@ -1,9 +1,10 @@
 """Skill-driven diagnostic loop. Skills choose sources, tools and query order."""
 
 import asyncio
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime
 import json
+import re
 import time
 from zoneinfo import ZoneInfo
 
@@ -57,6 +58,122 @@ def function(name, description, properties, required):
         },
         "strict": False,
     }
+
+
+BEIJING = ZoneInfo("Asia/Shanghai")
+# Prefetched Zabbix history: ±30 min around the alert, a 7-day hourly baseline,
+# whole windows in one call instead of the model's 120-row page.
+ALERT_WINDOW, BASELINE_DAYS, HISTORY_ROWS = 1800, 7, 1000
+
+
+@asynccontextmanager
+async def unwrapped():
+    """Re-raise the one exception anyio wrapped while the MCP sessions closed.
+
+    A model or budget error escaping the Streamable HTTP client's task group
+    arrives as an ExceptionGroup; run()'s handlers need the original.
+    """
+    try:
+        yield
+    except BaseExceptionGroup as group:
+        exc = group
+        while isinstance(exc, BaseExceptionGroup) and len(exc.exceptions) == 1:
+            exc = exc.exceptions[0]
+        raise exc from None
+
+
+def event_clock(event, now):
+    """Zabbix {EVENT.DATE} {EVENT.TIME} (Beijing time) as Unix seconds, else now."""
+    try:
+        moment = datetime.strptime(
+            f"{event.get('event_date')} {event.get('event_time')}",
+            "%Y.%m.%d %H:%M:%S",
+        )
+    except (TypeError, ValueError):
+        return now
+    return int(moment.replace(tzinfo=BEIJING).timestamp())
+
+
+def key_matches(pattern, key):
+    """Item key patterns are literal text with `*` wildcards; `[` and `,` are literal."""
+    parts = ".*".join(re.escape(part) for part in pattern.split("*"))
+    return re.fullmatch(parts, key) is not None
+
+
+def history_jobs(patterns, item_results, *, event, now):
+    """history_get around the alert and trend_get over 7 days for matched items.
+
+    Patterns are tried in Skill order over the prefetched item_get rows;
+    numeric items only, at most 8 for the history and the first 4 for the
+    baseline. Returns (provider, tool, arguments, row cap) jobs.
+    """
+    rows = [
+        row
+        for outcome in item_results
+        if isinstance(outcome, dict) and not outcome.get("is_error")
+        for row in outcome.get("records") or []
+        if isinstance(row, dict)
+        and str(row.get("itemid", "")).isdigit()
+        and str(row.get("value_type")) in {"0", "3"}
+    ]
+    chosen, seen = [], set()
+    for pattern in patterns:
+        for row in rows:
+            ident = str(row["itemid"])
+            if ident not in seen and key_matches(pattern, str(row.get("key_", ""))):
+                seen.add(ident)
+                chosen.append(row)
+    chosen = chosen[:8]
+    if not chosen:
+        return []
+    clock = event_clock(event, now)
+    till = min(now, clock + ALERT_WINDOW)
+    since = min(clock, till) - ALERT_WINDOW
+    jobs = []
+    for value_type in ("0", "3"):
+        ids = [
+            str(row["itemid"]) for row in chosen if str(row["value_type"]) == value_type
+        ]
+        if ids:
+            jobs.append(
+                (
+                    "zabbix_mcp",
+                    "history_get",
+                    {
+                        "itemids": ids,
+                        "history": int(value_type),
+                        "time_from": since,
+                        "time_till": till,
+                        "output": ["itemid", "clock", "value"],
+                        "sortfield": "clock",
+                        "sortorder": "ASC",
+                        "limit": HISTORY_ROWS,
+                    },
+                    HISTORY_ROWS,
+                )
+            )
+    jobs.append(
+        (
+            "zabbix_mcp",
+            "trend_get",
+            {
+                "itemids": [str(row["itemid"]) for row in chosen[:4]],
+                "time_from": now - BASELINE_DAYS * 86400,
+                "time_till": now,
+                "output": [
+                    "itemid",
+                    "clock",
+                    "num",
+                    "value_min",
+                    "value_avg",
+                    "value_max",
+                ],
+                "limit": HISTORY_ROWS,
+            },
+            HISTORY_ROWS,
+        )
+    )
+    return jobs
 
 
 async def run(
@@ -253,14 +370,14 @@ async def run(
                 )
             )
 
-    async def execute(provider, native, arguments):
+    async def execute(provider, native, arguments, rows=None):
         """One MCP tool call: counted, recorded as evidence, errors kept as data."""
         nonlocal calls
         calls += 1
         started = time.monotonic()
         try:
             tasks.stage(task_id, "skill_" + str(provider))
-            outcome = await bridge.call(provider, native, arguments)
+            outcome = await bridge.call(provider, native, arguments, rows=rows)
         except (tasks.Cancelled, asyncio.CancelledError):
             raise
         except Exception as exc:
@@ -373,36 +490,52 @@ async def run(
                     },
                 )
             )
-        jobs = jobs[: max(0, room - calls)]
-        results = await asyncio.gather(*(execute(*job) for job in jobs))
         prefetched, collected = [], []
-        for (provider, native, arguments), (outcome, ident) in zip(jobs, results):
-            note_gap(native, outcome)
-            signature = json.dumps(
-                [
-                    "call_mcp_tool",
-                    {"provider": provider, "name": native, "arguments": arguments},
-                ],
-                sort_keys=True,
-            )
-            cache[signature], cited_ids[signature] = outcome, ident
-            collected.append((provider, native, outcome, ident))
-            prefetched.append(
-                {
-                    "provider": provider,
-                    "tool": native,
-                    "arguments": arguments,
-                    "result": shown(
-                        ident,
-                        model_view(
-                            provider,
-                            native,
-                            outcome,
-                            max_chars=min(limits["result_chars"], 4000),
+
+        async def collect(jobs):
+            jobs = jobs[: max(0, room - calls)]
+            results = await asyncio.gather(*(execute(*job) for job in jobs))
+            for (provider, native, arguments, *_), (outcome, ident) in zip(
+                jobs, results
+            ):
+                note_gap(native, outcome)
+                signature = json.dumps(
+                    [
+                        "call_mcp_tool",
+                        {"provider": provider, "name": native, "arguments": arguments},
+                    ],
+                    sort_keys=True,
+                )
+                cache[signature], cited_ids[signature] = outcome, ident
+                collected.append((provider, native, outcome, ident))
+                prefetched.append(
+                    {
+                        "provider": provider,
+                        "tool": native,
+                        "arguments": arguments,
+                        "result": shown(
+                            ident,
+                            model_view(
+                                provider,
+                                native,
+                                outcome,
+                                max_chars=min(limits["result_chars"], 4000),
+                            ),
                         ),
-                    ),
-                }
+                    }
+                )
+
+        await collect(jobs)
+        # Alert window and 7-day baseline for the item keys the Skills name, so
+        # a typical alert needs no history round at all.
+        await collect(
+            history_jobs(
+                plan["history"],
+                [outcome for _, tool, outcome, _ in collected if tool == "item_get"],
+                event=event,
+                now=int(time.time()),
             )
+        )
         if prefetched:
             found["prefetched"] = prefetched
         signals = derive_signals(collected)
@@ -498,7 +631,7 @@ async def run(
             if (request.get("event") or {}).get("host_id")
             else question_target(question)
         )
-        async with AsyncExitStack() as stack:
+        async with unwrapped(), AsyncExitStack() as stack:
             bridge = await stack.enter_async_context(
                 SkillMCP(read_setting, providers, deadline=deadline, target=target)
             )
@@ -525,6 +658,18 @@ async def run(
                     if totals["total"] >= limits["tokens"]:
                         reasons.append("模型实际 Token 达到停止阈值，停止后续请求")
                         break
+                    # One more collection round plus the summary must both fit.
+                    # Thinking models take 15–40 s a round, so judge by this
+                    # task's own rounds rather than a fixed 30 seconds.
+                    longest = max(
+                        (
+                            item["seconds"]
+                            for item in telemetry
+                            if item["kind"] == "round"
+                        ),
+                        default=0.0,
+                    )
+                    remaining = deadline - time.monotonic()
                     stop = next(
                         (
                             text
@@ -546,8 +691,9 @@ async def run(
                                     f"Token 用量 {totals['total']} 达到预算 80%，本轮只总结",
                                 ),
                                 (
-                                    time.monotonic() > deadline - 30,
-                                    "剩余时间不足 30 秒，本轮只总结",
+                                    remaining < max(30.0, 2 * longest),
+                                    f"剩余 {remaining:.0f} 秒不足以再采集一轮并总结"
+                                    f"（最长一轮 {longest:.0f} 秒），本轮只总结",
                                 ),
                             )
                             if hit
@@ -568,6 +714,7 @@ async def run(
                     ):
                         reasons.append("任务剩余时间不足，停止采集并总结")
                     tasks.stage(task_id, "ai_reasoning" if final else "skill_analysis")
+                    asked = time.monotonic()
                     response = await traced_response(
                         client,
                         task_id=task_id,
@@ -595,7 +742,12 @@ async def run(
                         totals[key] += (counts or {}).get(key) or 0
                     cached_tokens += (counts or {}).get("cached") or 0
                     telemetry.append(
-                        {"kind": "round", "round": rounds, **(counts or {})}
+                        {
+                            "kind": "round",
+                            "round": rounds,
+                            "seconds": round(time.monotonic() - asked, 1),
+                            **(counts or {}),
+                        }
                     )
                     check()
                     if issue := incomplete_output_reason(response):

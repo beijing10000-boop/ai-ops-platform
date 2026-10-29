@@ -94,7 +94,9 @@ def validate_prefetch(rules):
 
     Each rule: scopes, types (diagnostic types or "*"), and any of ssh (fixed
     read-only SSH diagnostics), zabbix_items (item key search terms for the task
-    host) and schemas (tool schemas handed to the model up front).
+    host), history (exact item keys or `*` patterns among the found items whose
+    alert-window history and 7-day trend are collected) and schemas (tool
+    schemas handed to the model up front).
     """
     from .diagnostics.playbooks import PLAYBOOKS
     from .integrations.zabbix import READ_TOOLS
@@ -108,14 +110,15 @@ def validate_prefetch(rules):
             "types",
             "ssh",
             "zabbix_items",
+            "history",
             "schemas",
         }:
             raise ValueError(
-                "prefetch 规则须包含 scopes、types，可选 ssh、zabbix_items、schemas"
+                "prefetch 规则须包含 scopes、types，可选 ssh、zabbix_items、history、schemas"
             )
         lists = {
             key: rule.get(key, [])
-            for key in ("scopes", "types", "ssh", "zabbix_items", "schemas")
+            for key in ("scopes", "types", "ssh", "zabbix_items", "history", "schemas")
         }
         if any(
             not isinstance(value, list)
@@ -136,8 +139,11 @@ def validate_prefetch(rules):
             raise ValueError(
                 "prefetch ssh 只能是无需额外参数的 ssh_diagnose_* 工具（最多 4 个）"
             )
-        if any(not ITEM_KEY.fullmatch(key) for key in lists["zabbix_items"]):
-            raise ValueError("prefetch zabbix_items 须为监控项 key 片段")
+        if any(
+            not ITEM_KEY.fullmatch(key)
+            for key in lists["zabbix_items"] + lists["history"]
+        ):
+            raise ValueError("prefetch zabbix_items、history 须为监控项 key 片段或模式")
         if len(lists["schemas"]) > 4 or any(
             tool not in READ_TOOLS
             and not re.fullmatch(r"ssh_diagnose_[a-z_]{1,40}", tool)
@@ -173,17 +179,19 @@ def scope_of(request, source):
 
 def prefetch_plan(skills, scope, diagnostic_type):
     """Merge the loaded Skills' matching rules, higher priority first, no repeats."""
-    plan = {"ssh": [], "zabbix_items": [], "schemas": []}
+    plan = {"ssh": [], "zabbix_items": [], "history": [], "schemas": []}
     for skill in skills:
         for rule in skill.get("prefetch") or []:
             if scope in rule["scopes"] and (
                 diagnostic_type in rule["types"] or "*" in rule["types"]
             ):
                 for key in plan:
-                    plan[key].extend(x for x in rule[key] if x not in plan[key])
+                    # Snapshots taken before `history` existed have no such key.
+                    plan[key].extend(x for x in rule.get(key, []) if x not in plan[key])
     plan["ssh"] = plan["ssh"][:4]
     plan["schemas"] = plan["schemas"][:4]
     plan["zabbix_items"] = plan["zabbix_items"][:8]
+    plan["history"] = plan["history"][:8]
     return plan
 
 
