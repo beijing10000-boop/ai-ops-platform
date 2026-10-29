@@ -27,16 +27,18 @@ def test_feishu_card_shows_conclusion_and_actions_without_evidence_ids():
     info = {
         "cause": "每核 5 分钟负载 1.65（E2）超过阈值 1.5，CPU 利用率 33.57%（E5、E6）；负载来自 postgres 周期性任务 (E4)。",
         "action": "1. 核对 postgres 定时任务（E4）\n2. 评估是否扩容 CPU，参考 E3",
-        "analysis": "证据之间的关联：E2 与 E4 时间吻合。",
+        "analysis": "可用性项由 1 变 0 的时间（E4）紧接告警时间（E3），7 天趋势始终为 1（E5），可排除阈值不合理。",
         "human_required": True,
         "_report_answer": "完整报告……\n\n证据核对\n- E2 SSH MCP",
         "_limitations": ["工具 trend_get 未取得完整证据"],
         "_diagnostic_status": "partial",
     }
+    # No "需人工处理" wording; the analysis follows the actions.
     assert worker.card_summary(info) == (
         "**诊断状态**  部分完成\n**诊断结论**\n"
         "每核 5 分钟负载 1.65超过阈值 1.5，CPU 利用率 33.57%；负载来自 postgres 周期性任务。\n\n"
-        "**处理建议**（需人工处理）\n1. 核对 postgres 定时任务\n2. 评估是否扩容 CPU，参考"
+        "**处理建议**\n1. 核对 postgres 定时任务\n2. 评估是否扩容 CPU，参考\n\n"
+        "**分析与依据**\n可用性项由 1 变 0 的时间紧接告警时间，7 天趋势始终为 1，可排除阈值不合理。"
     )
     # Hardware model numbers are not evidence references.
     assert (
@@ -52,28 +54,41 @@ def test_feishu_card_shows_conclusion_and_actions_without_evidence_ids():
         == "**诊断结论**\n磁盘将满\n\n**处理建议**\n1. 清理日志"
     )
     long = {
-        "cause": "负载来自周期性任务，建议核对。" * 20,
-        "action": [f"建议 {n}" for n in range(1, 9)],
+        "cause": "负载来自周期性任务，建议核对。" * 40,
+        "action": [f"建议 {n}" for n in range(1, 10)],
         "_diagnostic_status": "success",
     }
     text = worker.card_summary(long)
-    # The conclusion is cut at a sentence end within 200 characters.
+    # The conclusion is cut at a sentence end within 400 characters.
     assert (
         text.split("\n")[1]
-        == "负载来自周期性任务，建议核对。" * 13 + "（详见完整报告）"
+        == "负载来自周期性任务，建议核对。" * 26 + "（详见完整报告）"
     )
-    assert "6. 建议 6\n其余建议见完整诊断报告。" in text and "建议 7" not in text
-    # Body text stays within 300 characters: actions that do not fit are dropped.
+    assert "8. 建议 8\n其余建议见完整诊断报告。" in text and "建议 9" not in text
+    # Body text stays within ~1000 characters: the analysis takes what is left
+    # and is cut at a sentence end, or dropped when under 80 characters remain.
     step = "核对定时任务并记录执行时长，必要时调整执行窗口以避开业务高峰。"
     text = worker.card_summary(
         {
-            "cause": "负载偏高。" * 30,
+            "cause": "负载偏高。" * 80,
             "action": [step] * 4,
+            "analysis": "分析句子。" * 200,
             "_diagnostic_status": "success",
         }
     )
-    assert "3. " + step in text and "4. " + step not in text
-    assert text.endswith("其余建议见完整诊断报告。") and len(text) <= 300
+    assert "4. " + step in text
+    assert text.split("**分析与依据**\n")[1] == "分析句子。" * 92 + "（详见完整报告）"
+    assert len(text) <= 1100
+    text = worker.card_summary(
+        {
+            "cause": "负载偏高。" * 80,
+            "action": [step * 2] * 9,
+            "analysis": "分析句子。" * 50,
+            "_diagnostic_status": "success",
+        }
+    )
+    assert text.endswith("其余建议见完整诊断报告。") and "分析与依据" not in text
+    assert len(text) <= 1100
     assert worker.clipped("结论" * 120, 200) == "结论" * 99 + "结…"
     # Model-error fallbacks are plain text: the first line says why.
     partial = {
@@ -97,71 +112,6 @@ def test_report_links_open_inside_the_feishu_client():
         "https://applink.feishu.cn/client/web_url/open?mode=window&url="
         "http%3A%2F%2F192.0.2.10%3A8088%2F%23report%2F0123456789abcdef0123456789abcdef"
     )
-
-
-def test_full_report_button_is_signed_and_the_worker_replies_with_the_whole_report(
-    monkeypatch, tmp_path
-):
-    from unittest.mock import AsyncMock
-    from app import feishu_client, main
-    from app.orchestrator import tasks
-
-    monkeypatch.setenv("APP_ENCRYPTION_KEY", "unit-test-secret")
-    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(main, "DB", tmp_path / "app.sqlite3")
-    monkeypatch.setattr(
-        worker,
-        "cfg",
-        lambda key: {"web_protocol": "http", "web_public_host": "ops.example.com"}.get(
-            key, ""
-        ),
-    )
-    task_id = "0123456789abcdef0123456789abcdef"
-    button = worker.report_button({"_task_id": task_id})
-    assert button["value"] == {
-        "op": "full_report",
-        "task_id": task_id,
-        "sig": worker.report_signature(task_id),
-    }
-    assert worker.report_button({"_task_id": "not-a-task"}) is None
-    card = worker.make_card(
-        {"event_id": "1", "severity": "4", "event_value": "1"},
-        {"cause": "负载高", "_task_id": task_id},
-        analysis=True,
-    )
-    buttons = [
-        b for e in card["elements"] if e["tag"] == "action" for b in e["actions"]
-    ]
-    assert [b["value"]["op"] if "value" in b else "url" for b in buttons] == [
-        "full_report",
-        "url",
-    ]
-    # The worker job posts what the Web report page shows, as a reply to the card.
-    task, _ = tasks.create({"question": "q"}, source="qa")
-    tasks.start(task["task_id"])
-    tasks.finish(
-        task["task_id"],
-        {"answer": "完整结论\n\n证据核对\n- E2 SSH MCP", "limitations": ["缺口 A"]},
-        {
-            "input": 10,
-            "output": 5,
-            "total": 15,
-            "available": True,
-            "profile": "standard",
-        },
-        "partial",
-        duration_ms=1234,
-    )
-    sent = AsyncMock(return_value="om_reply")
-    monkeypatch.setattr(feishu_client, "reply_card", sent)
-    assert (
-        asyncio.run(worker.send_full_report(task["task_id"], "om_card")) == "om_reply"
-    )
-    (message_id, title, text), _ = sent.call_args
-    assert message_id == "om_card" and title == "完整诊断报告"
-    assert "完整结论" in text and "E2 SSH MCP" in text and "缺口 A" in text
-    assert "**诊断状态**  部分完成" in text
-    assert "本轮 Token 消耗：15（输入 10 / 输出 5） · 分析模式：标准分析" in text
 
 
 def test_card_keeps_complete_report_without_fixed_character_truncation():
@@ -731,12 +681,12 @@ def test_manual_analysis_progress_updates_and_context_for_both_states(monkeypatc
             "analysis": "CPU趋势连续上升",
         }
 
-    async def reply(message_id, title, detail, **kwargs):
-        events.append(("reply", message_id, title, detail, kwargs.get("actions")))
+    async def reply(message_id, title, detail):
+        events.append(("reply", message_id, title, detail))
         return "om_progress"
 
-    async def update(message_id, title, detail, template="green", **kwargs):
-        events.append(("update", message_id, title, detail, kwargs.get("actions")))
+    async def update(message_id, title, detail, template="green"):
+        events.append(("update", message_id, title, detail))
 
     async def chat(message_id):
         return "oc_group"
@@ -771,10 +721,10 @@ def test_manual_analysis_progress_updates_and_context_for_both_states(monkeypatc
         assert len(events) == 2
         assert events[0][0:3] == ("reply", "om_original", "AI 分析中")
         assert events[1][0:3] == ("update", "om_progress", "AI 分析结果")
-        # The card carries the conclusion and actions; the analysis stays in
-        # the conversation context for follow-up questions and on the Web.
+        # The card carries conclusion, actions and analysis; the conversation
+        # context keeps the full summary for follow-up questions.
         assert "负载较高" in events[1][3] and "检查进程" in events[1][3]
-        assert "CPU趋势连续上升" not in events[1][3]
+        assert "CPU趋势连续上升" in events[1][3]
         assert saved[-1][0:3] == ("oc_group", "om_original", "om_progress")
         assert "CPU趋势连续上升" in saved[-1][4]
 

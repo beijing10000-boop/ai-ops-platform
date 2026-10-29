@@ -123,10 +123,6 @@ def on_card_action(data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
                 or getattr(context, "open_chat_id", None),
             )
             log.info("FEISHU_ANALYZE_ACTION success=%s", ok)
-        elif value.get("op") == "full_report":
-            from .alert_actions import handle_full_report
-
-            ok, message = handle_full_report(value, open_id, message_id)
         else:
             ok, message = handle_mute_action(value, open_id)
             log.info("FEISHU_MUTE_ACTION success=%s", ok)

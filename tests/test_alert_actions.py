@@ -62,27 +62,6 @@ def test_analyze_requires_admin_and_valid_event(monkeypatch):
     assert handle_analyze_action({**value, "sig": "wrong"}, "ou_admin")[0] is False
 
 
-def test_full_report_button_requires_a_valid_signature_and_card_message(monkeypatch):
-    from app import worker
-    from app.alert_actions import handle_full_report
-
-    monkeypatch.setenv("APP_ENCRYPTION_KEY", "unit-test-secret")
-    task_id = "0123456789abcdef0123456789abcdef"
-    value = {
-        "op": "full_report",
-        "task_id": task_id,
-        "sig": worker.report_signature(task_id),
-    }
-    jobs = []
-    monkeypatch.setattr(worker, "enqueue_full_report", lambda *args: jobs.append(args))
-    assert handle_full_report({**value, "sig": "wrong"}, "ou_x", "om_card")[0] is False
-    assert handle_full_report({**value, "task_id": "x"}, "ou_x", "om_card")[0] is False
-    assert handle_full_report(value, "ou_x", None)[0] is False
-    assert jobs == []
-    ok, message = handle_full_report(value, "ou_x", "om_card")
-    assert ok and "完整报告" in message and jobs == [(task_id, "om_card")]
-
-
 def test_manual_analysis_uses_priority_queue_and_refuses_repeat_clicks(monkeypatch):
     from types import SimpleNamespace
     from app import worker
