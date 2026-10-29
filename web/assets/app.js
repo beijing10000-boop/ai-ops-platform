@@ -497,6 +497,7 @@ const configHelp = {
   zabbix_frontend_url: "用于从告警卡片和报告打开 Zabbix 网页。",
   zabbix_webhook_secret: "验证 Zabbix 推送告警的身份，需与 Zabbix 告警媒介中的密钥一致。",
   ai_request_timeout_seconds: "默认 90 秒，受任务总时限及留给总结的时间共同约束。仅影响新任务。",
+  ai_thinking: "只对混合思考模型有效（如百炼上的 DeepSeek V4.1、Qwen3，默认开启思考）。关闭后每轮通常快一半以上、输出 Token 大幅减少；改后点“验证模型连接”确认网关接受该参数。仅影响新任务。",
   ai_alert_reuse_hours: "同一主机、同一触发器在此时间内已完成 AI 分析时，新告警不再自动分析，原告警卡片附上该次报告链接和 24 小时告警次数。手动点击“AI分析”不受影响。",
   ai_daily_token_limit: "只统计自动告警分析（北京时间自然日）。达到上限后新告警只发送通知并在卡片注明，手动分析不受限制。",
   ai_quick_severity_max: "达到自动分析门槛、但级别不高于所选值的告警，使用快速分析模式的预算。",
@@ -509,6 +510,17 @@ const configGroups = {
     ["openai_model", "模型部署名称"],
     ["openai_api_key", "API Key", "password"],
     ["ai_request_timeout_seconds", "AI 单次请求超时（秒，15–180）", "number"],
+    [
+      "ai_thinking",
+      "深度思考",
+      "select",
+      [
+        ["", "模型默认"],
+        ["off", "关闭（更快、更省 Token）"],
+        ["low", "低"],
+        ["high", "高"],
+      ],
+    ],
     [
       "ai_analysis_profile",
       "默认分析模式",

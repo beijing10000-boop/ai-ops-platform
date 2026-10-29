@@ -9,6 +9,25 @@ import time
 from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 
 
+# Request fields for the model's thinking depth. OpenAI-compatible gateways such
+# as Bailian take reasoning.effort; "none" switches a hybrid-thinking model (e.g.
+# DeepSeek V4.1 on Bailian, thinking on by default) off. enable_thinking is the
+# older Bailian switch, sent too in case the model is not in the effort table.
+THINKING = {
+    "off": {
+        "reasoning": {"effort": "none"},
+        "extra_body": {"enable_thinking": False},
+    },
+    "low": {"reasoning": {"effort": "low"}},
+    "high": {"reasoning": {"effort": "high"}},
+}
+
+
+def thinking_params(read_setting):
+    """Extra request fields for the configured thinking depth; none by default."""
+    return dict(THINKING.get(read_setting("ai_thinking") or "", {}))
+
+
 def model_failure_code(exc):
     if isinstance(exc, APITimeoutError):
         return "ModelTimeout"

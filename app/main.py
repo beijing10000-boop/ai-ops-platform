@@ -23,7 +23,7 @@ DB = DATA_DIR / "app.sqlite3"
 MASTER_KEY = os.getenv("APP_ENCRYPTION_KEY", "")
 ADMIN_TOKEN = os.getenv("ADMIN_API_TOKEN", "")
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
-app = FastAPI(title="Zabbix AI Ops · Unified Platform", version="1.0.8")
+app = FastAPI(title="Zabbix AI Ops · Unified Platform", version="1.1.0")
 app.mount(
     "/assets",
     StaticFiles(directory=Path(__file__).parent.parent / "web" / "assets"),
@@ -53,6 +53,7 @@ ALLOWED = SENSITIVE | {
 ALLOWED |= {
     "ai_profile_budgets",
     "ai_request_timeout_seconds",
+    "ai_thinking",
     "ssh_mcp_enabled",
     "ssh_mcp_url",
     "ssh_mcp_timeout_seconds",
@@ -75,6 +76,8 @@ DEFAULTS = {
     "web_protocol": "http",
     "ai_analysis_profile": "standard",
     "ai_request_timeout_seconds": "90",
+    # "" leaves the model's own default; "off" / "low" / "high" set reasoning.effort.
+    "ai_thinking": "",
     "ssh_mcp_enabled": "false",
     "ssh_mcp_timeout_seconds": "90",
 }
@@ -1107,6 +1110,8 @@ async def test_ai_model(
         RateLimitError,
     )
 
+    from .ai_reliability import thinking_params
+
     reader = draft_reader(body, identity)
     key = reader("openai_api_key")
     model = reader("openai_model")
@@ -1127,6 +1132,9 @@ async def test_ai_model(
                     instructions="你是模型连通性检查服务。请只回复：AI连接成功",
                     input="测试连接",
                     max_output_tokens=80,
+                    # Same thinking fields as a diagnosis, so the test proves the
+                    # gateway accepts them for this model.
+                    **thinking_params(reader),
                 ),
                 timeout=95,
             )

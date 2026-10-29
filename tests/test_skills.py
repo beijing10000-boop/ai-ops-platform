@@ -1068,6 +1068,33 @@ def test_prompt_cache_hits_do_not_count_against_the_token_budget(rig):
     assert spent["limits_hit"] == ["已到最后一轮（上限 2 轮），本轮只总结"]
 
 
+def test_thinking_setting_is_sent_with_every_model_request(rig):
+    session, config = rig
+    install(providers=["ssh_mcp"])
+    create = AsyncMock(return_value=response(text="默认设置，不传思考参数。"))
+    asyncio.run(
+        mcp_runtime.run(
+            "report",
+            "CPU",
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+        )
+    )
+    assert "reasoning" not in create.call_args.kwargs
+    assert "extra_body" not in create.call_args.kwargs
+    # "关闭": Bailian's reasoning.effort=none, plus the older enable_thinking switch.
+    config["ai_thinking"] = "off"
+    create = AsyncMock(return_value=response(text="关闭思考。"))
+    asyncio.run(
+        mcp_runtime.run(
+            "report",
+            "CPU",
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+        )
+    )
+    assert create.call_args.kwargs["reasoning"] == {"effort": "none"}
+    assert create.call_args.kwargs["extra_body"] == {"enable_thinking": False}
+
+
 def test_alert_is_sent_once_without_unexpanded_macros(rig):
     install(providers=["ssh_mcp"])
     event = {

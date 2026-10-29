@@ -13,6 +13,7 @@ from .ai_reliability import (
     evidence_fallback,
     model_failure_code,
     model_failure_message,
+    thinking_params,
 )
 from .orchestrator import tasks
 from .skill_mcp import SkillMCP
@@ -792,6 +793,7 @@ async def run(
                         input=conversation,
                         tools=tools,
                         **({"tool_choice": "none"} if final else {}),
+                        **thinking_params(read_setting),
                         max_output_tokens=min(
                             6000, max(1, limits["tokens"] - billed())
                         ),

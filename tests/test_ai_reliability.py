@@ -21,6 +21,23 @@ def test_model_timeout_setting_is_bounded():
             budgets.validate_settings({"ai_request_timeout_seconds": value})
 
 
+def test_thinking_setting_maps_to_request_fields_and_is_validated():
+    read = lambda key: {"ai_thinking": "off"}.get(key, "")  # noqa: E731
+    assert ai_reliability.thinking_params(read) == {
+        "reasoning": {"effort": "none"},
+        "extra_body": {"enable_thinking": False},
+    }
+    assert ai_reliability.thinking_params(lambda key: "high") == {
+        "reasoning": {"effort": "high"}
+    }
+    # Default: nothing is sent, so models without the parameter are untouched.
+    assert ai_reliability.thinking_params(lambda key: "") == {}
+    for value in ("", "off", "low", "high"):
+        budgets.validate_settings({"ai_thinking": value})
+    with pytest.raises(Exception):
+        budgets.validate_settings({"ai_thinking": "max"})
+
+
 def test_transient_model_error_retries_once_without_new_tool_calls():
     error = APITimeoutError(request=httpx.Request("POST", "https://example.invalid"))
     create = AsyncMock(side_effect=[error, "final answer"])
