@@ -75,7 +75,7 @@ document.addEventListener("click", async event => {
     } else if (action === "skill-verify") {
       feedback.hidden = false; feedback.textContent = "正在验证后台 MCP 服务的工具目录…";
       const result = await api(P + "/skills/" + id + "/verify", "POST", {});
-      feedback.textContent = (result.ok ? "工具验证通过。" : "工具验证未通过。") + result.results.map(row => `${row.provider}：${row.error || (row.missing.length ? "缺少 " + row.missing.join("、") : row.tools + " 个只读工具可用")}`).join("；");
+      feedback.textContent = (result.ok ? "工具验证通过。" : "工具验证未通过。") + result.results.map(row => `${row.provider}：${row.error || (row.missing.length ? "缺少或未授权 " + row.missing.join("、") : row.tools + " 个只读工具可用")}`).join("；");
     } else if (action === "skill-toggle") {
       const row = await api(P + "/skills/" + id);
       await api(P + "/skills/" + id, "PUT", {enabled: !row.enabled});

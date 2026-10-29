@@ -14,6 +14,29 @@ SSH_META = {
     "ssh_resolve_host",
     "ssh_resolve_target",
 }
+# SSH MCP action ids whose tool name is not ssh_diagnose_<id> (servers before
+# v0.5.0 do not return the `tool` field in ssh_list_tool_catalog).
+ACTION_TOOLS = {
+    "connection": "ssh_test_connection",
+    "triage": "ssh_triage",
+    "directory": "ssh_diagnose_directory_usage",
+    "mount_health": "ssh_diagnose_mounts",
+    "log_errors": "ssh_diagnose_system_errors",
+}
+
+
+def authorized_ssh_tools(entries):
+    """Tool names this client token may run, from ssh_list_tool_catalog."""
+    names = set()
+    for entry in entries if isinstance(entries, list) else []:
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str):
+            tool = entry.get("tool")
+            names.add(
+                tool
+                if isinstance(tool, str)
+                else ACTION_TOOLS.get(entry["id"], "ssh_diagnose_" + entry["id"])
+            )
+    return names
 
 
 def ssh_allowed(tool):
@@ -124,10 +147,34 @@ class SkillMCP:
                     seen.add(cursor)
                 else:
                     raise ValueError("MCP 工具分页超过限制")
+                if provider == "ssh_mcp" and "ssh_list_tool_catalog" in tools:
+                    tools = await self.authorized(session, tools)
                 self.tools[provider] = tools
         if provider not in self.tools:
             raise ValueError("MCP 工具发现失败，请创建新任务重试")
         return self.tools[provider]
+
+    async def authorized(self, session, tools):
+        """Hide diagnostics this token may not run, so the model never plans them.
+
+        A visible-but-forbidden tool only fails at call time and marks the task
+        partial; resolve/list tools stay. On any catalog error keep the full list
+        (the server still refuses unauthorized calls).
+        """
+        try:
+            response = await session.call_tool("ssh_list_tool_catalog", {})
+            allowed = (
+                None if response.isError else authorized_ssh_tools(payload(response))
+            )
+        except Exception:
+            allowed = None
+        if not allowed:
+            return tools
+        return {
+            name: tool
+            for name, tool in tools.items()
+            if name in SSH_META or name in allowed
+        }
 
     async def definitions(self, provider, query=""):
         if not isinstance(query, str):
