@@ -1,8 +1,10 @@
 """Zabbix AI Ops unified management API and webhook ingress."""
 
+import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 from datetime import datetime, timezone
@@ -10,7 +12,7 @@ from zoneinfo import ZoneInfo
 from contextlib import contextmanager
 from pathlib import Path
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from cryptography.fernet import Fernet
@@ -24,11 +26,26 @@ MASTER_KEY = os.getenv("APP_ENCRYPTION_KEY", "")
 ADMIN_TOKEN = os.getenv("ADMIN_API_TOKEN", "")
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 app = FastAPI(title="Zabbix AI Ops · Unified Platform", version="1.0.0")
-app.mount(
-    "/assets",
-    StaticFiles(directory=Path(__file__).parent.parent / "web" / "assets"),
-    name="assets",
-)
+WEB = Path(__file__).parent.parent / "web"
+ASSET_REF = re.compile(r'"(/assets/[\w.-]+)"')
+app.mount("/assets", StaticFiles(directory=WEB / "assets"), name="assets")
+
+
+def page(name):
+    """HTML whose asset URLs carry a content hash, so a browser never runs JS
+    cached from an older release against the new API."""
+
+    def versioned(match):
+        asset = WEB / match.group(1).lstrip("/")
+        if not asset.is_file():
+            return match.group(0)
+        digest = hashlib.sha256(asset.read_bytes()).hexdigest()[:12]
+        return f'"{match.group(1)}?v={digest}"'
+
+    html = ASSET_REF.sub(versioned, (WEB / name).read_text(encoding="utf-8"))
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
+
+
 SENSITIVE = {
     "openai_api_key",
     "mcp_token",
@@ -323,7 +340,7 @@ class Alert(BaseModel):
 
 @app.get("/")
 def home():
-    return FileResponse(Path(__file__).parent.parent / "web" / "index.html")
+    return page("index.html")
 
 
 @app.get("/healthz")
@@ -364,7 +381,7 @@ def setup_status():
 
 @app.get("/setup")
 def setup_page():
-    return FileResponse(Path(__file__).parent.parent / "web" / "setup.html")
+    return page("setup.html")
 
 
 def validate_setup(body):
