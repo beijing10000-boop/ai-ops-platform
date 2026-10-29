@@ -86,7 +86,7 @@ const OpsUI = (() => {
     if (!copied) throw Error("复制未成功，请使用下载报告按钮");
   }
   function runtime(data) {
-    const names = {"ai-alerts": "告警处理", "ai-questions": "飞书问答", "ai-diagnostics": "Web 诊断"};
+    const names = {"ai-alerts": "告警通知", "ai-alert-manual": "手动告警分析", "ai-alert-analysis": "自动告警分析", "ai-questions": "飞书问答", "ai-diagnostics": "Web 诊断"};
     const ok = data.redis === "ok";
     return `<div class="runtime-summary"><span class="tag success">数据库可访问</span><span class="tag ${ok ? "success" : "failed"}">Redis ${ok ? "可访问" : "不可用"}</span><span class="muted small">版本 ${escape(data.version)}</span></div>` +
       (ok ? `<div class="runtime-grid">${Object.entries(names).map(([key, name]) => `<div class="runtime-cell"><strong>${name}</strong><p>${escape(data.queues[key] ?? "—")} 个排队任务</p><span class="tag ${data.workers?.[key] ? "success" : "failed"}">${escape(data.workers?.[key] ?? 0)} 个已注册 Worker</span></div>`).join("")}</div><p class="muted small">Worker 数量来自 Redis 注册记录；飞书长连接接收器需结合实际消息联调。</p>` : '<p class="notice error">队列连接失败。请检查 Redis 服务；已有失败任务可在服务恢复后重试。</p>');

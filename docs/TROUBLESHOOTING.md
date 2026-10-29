@@ -20,4 +20,4 @@
 | 报告为部分完成 | 查看“诊断不足与待核验”和逐项证据；采集失败、超时或预算耗尽不表示主机正常，也不等同于根因已证实 |
 | 配置无法解密 | 保留旧APP_ENCRYPTION_KEY或原master.key，与对应数据库成对恢复 |
 
-查看日志：`docker compose logs --tail=100 web alert-worker qa-worker diagnostic-worker`。日志/工具采集失败代表证据不足，不能推断主机正常或故障根因。
+查看日志：`docker compose logs --tail=100 web alert-worker alert-analysis-worker qa-worker diagnostic-worker`。日志/工具采集失败代表证据不足，不能推断主机正常或故障根因。

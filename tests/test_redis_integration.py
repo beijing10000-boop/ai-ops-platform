@@ -90,6 +90,42 @@ def test_real_webhook_dedup_and_rq_alert_delivery_without_feishu(real_redis):
         )
 
 
+def test_real_alert_job_hands_analysis_to_its_own_queue(real_redis):
+    secret = "disposable-test-webhook"
+    with main.connection() as db:
+        db.execute(
+            "INSERT INTO settings VALUES (?,?,1)",
+            ("zabbix_webhook_secret", main.cipher().encrypt(secret.encode()).decode()),
+        )
+    response = TestClient(main.app).post(
+        "/zabbix",
+        headers={"authorization": "Bearer " + secret},
+        json={
+            "event_id": "900002",
+            "severity": "4",
+            "event_name": "Linux: Load average is too high",
+            "host_id": "10913",
+        },
+    )
+    assert response.status_code == 202
+    alerts = Queue("ai-alerts", connection=real_redis)
+    SimpleWorker([alerts], connection=real_redis).work(
+        burst=True, with_scheduler=False, logging_level="WARNING"
+    )
+    assert alerts.fetch_job(response.json()["job_id"]).is_finished
+    # The notification job returns after queueing; the model runs elsewhere.
+    [job] = Queue("ai-alert-analysis", connection=real_redis).jobs
+    assert job.func_name == "app.worker.process_alert_analysis"
+    assert job.timeout == -1
+    task = tasks.get(job.id)
+    assert task["status"] == "queued" and task["event_id"] == "900002"
+    assert len(Queue("ai-alert-manual", connection=real_redis)) == 0
+    with main.connection() as db:
+        assert db.execute(
+            "SELECT notify_status,ai_status FROM alert_events WHERE event_id='900002'"
+        ).fetchone() == ("disabled", "pending")
+
+
 def test_real_diagnostic_queue_retires_old_local_ssh_jobs(real_redis):
     task, _ = tasks.create(
         {},

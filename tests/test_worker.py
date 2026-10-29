@@ -40,24 +40,32 @@ def test_card_keeps_complete_report_without_fixed_character_truncation():
     assert "摘要已省略部分内容" not in summary
 
 
-def test_all_alerts_notified_before_ai_and_severity_gate(monkeypatch):
-    sent = []
+class FakeQueue:
+    jobs = []
+
+    def __init__(self, name, connection=None):
+        self.name = name
+
+    def enqueue(self, func, *args, **kwargs):
+        self.jobs.append((self.name, func, args, kwargs))
+
+
+def test_alert_notifies_then_queues_analysis_without_running_the_model(monkeypatch):
+    sent, queued = [], []
 
     async def notify(card, event=None, **kwargs):
         sent.append(card)
 
-    async def analyze(event):
-        assert len(sent) == 2  # low-priority card + original severe card
-        return {
-            "host_groups": "test",
-            "cause": "原因",
-            "action": "处理",
-            "analysis": "AI诊断",
-            "human_required": False,
-        }
+    async def analyze(event, task_id=None):
+        raise AssertionError("the notification job must not wait for the model")
+
+    def enqueue(queue_name, func, event, *args):
+        queued.append((queue_name, func, event["event_id"]))
+        return {"task_id": "task-" + event["event_id"]}, True
 
     monkeypatch.setattr(worker, "notify", notify)
     monkeypatch.setattr(worker, "analyze", analyze)
+    monkeypatch.setattr(worker, "enqueue_analysis", enqueue)
     monkeypatch.setattr(
         worker, "cfg", lambda key: "4" if key == "ai_min_severity" else ""
     )
@@ -65,41 +73,195 @@ def test_all_alerts_notified_before_ai_and_severity_gate(monkeypatch):
         worker.handle_alert({"event_id": "low", "severity": "2", "event_value": "1"})
     )
     assert low["ai_skipped"] is True
-    assert len(sent) == 1
+    assert len(sent) == 1 and queued == []
     high = asyncio.run(
         worker.handle_alert({"event_id": "high", "severity": "4", "event_value": "1"})
     )
-    assert high["diagnosed"] is True
-    assert len(sent) == 3
+    assert high["analysis_queued"] is True and high["diagnosed"] is False
+    assert high["task_id"] == "task-high"
+    assert len(sent) == 2
+    assert queued == [
+        ("ai-alert-analysis", "app.worker.process_alert_analysis", "high")
+    ]
     recovered = asyncio.run(
         worker.handle_alert(
             {"event_id": "recovered", "severity": "5", "event_value": "0"}
         )
     )
     assert recovered["ai_skipped"] is True
-    assert len(sent) == 3
+    assert len(sent) == 2 and len(queued) == 1
     assert recovered["recovery_suppressed"] is True
 
 
-def test_ai_failure_does_not_block_initial_alert(monkeypatch):
-    async def broken(_):
-        raise RuntimeError("model offline")
-
+def test_queue_failure_does_not_block_initial_alert(monkeypatch):
     sent = []
 
     async def notify(card, event=None, **kwargs):
         sent.append(card)
 
+    def down(*args):
+        raise ConnectionError("redis offline")
+
     monkeypatch.setattr(
         worker, "cfg", lambda key: "4" if key == "ai_min_severity" else ""
     )
-    monkeypatch.setattr(worker, "analyze", broken)
+    monkeypatch.setattr(worker, "enqueue_analysis", down)
     monkeypatch.setattr(worker, "notify", notify)
     result = asyncio.run(
         worker.handle_alert({"event_id": "12345", "severity": "4", "event_value": "1"})
     )
     assert result["ai_failed"] is True and result["notified"] is True
     assert len(sent) == 1
+
+
+def test_alert_analysis_job_reports_into_the_original_alert(monkeypatch):
+    sent, seen = [], []
+
+    async def notify(card, event=None, **kwargs):
+        sent.append(kwargs.get("analysis_info"))
+
+    async def analyze(event, task_id=None):
+        seen.append(task_id)
+        return {"cause": "负载偏高", "action": "核对进程", "analysis": "证据"}
+
+    monkeypatch.setattr(worker, "notify", notify)
+    monkeypatch.setattr(worker, "analyze", analyze)
+    result = asyncio.run(
+        worker.handle_alert_analysis(
+            {"event_id": "770010", "severity": "4", "event_value": "1"}, "task-1"
+        )
+    )
+    assert result["diagnosed"] is True and seen == ["task-1"]
+    assert sent[0]["cause"] == "负载偏高"
+
+
+def test_model_failure_in_analysis_job_sends_no_extra_card(monkeypatch):
+    sent = []
+
+    async def notify(card, event=None, **kwargs):
+        sent.append(card)
+
+    async def broken(event, task_id=None):
+        raise RuntimeError("model offline")
+
+    monkeypatch.setattr(worker, "notify", notify)
+    monkeypatch.setattr(worker, "analyze", broken)
+    result = asyncio.run(
+        worker.handle_alert_analysis(
+            {"event_id": "770011", "severity": "4", "event_value": "1"}, "task-2"
+        )
+    )
+    assert result["ai_failed"] is True and sent == []
+
+
+def test_jobs_for_tasks_cancelled_while_queued_are_skipped(monkeypatch):
+    from app.main import connection
+    from app.orchestrator import tasks
+
+    async def analyze(event, task_id=None):
+        raise AssertionError("a cancelled task must not reach the model")
+
+    async def reply(*args, **kwargs):
+        raise AssertionError("a cancelled task must not post a progress card")
+
+    from app import feishu_client
+
+    monkeypatch.setattr(worker, "analyze", analyze)
+    monkeypatch.setattr(feishu_client, "reply_card", reply)
+    for event_id, run in (
+        (
+            "770030",
+            lambda event, task_id: worker.process_alert_analysis(event, task_id),
+        ),
+        (
+            "770031",
+            lambda event, task_id: worker.process_manual_analysis(
+                event, "om_card", "oc_group", task_id
+            ),
+        ),
+    ):
+        event = {"event_id": event_id, "event_value": "1", "severity": "4"}
+        with connection() as db:
+            db.execute(
+                "INSERT INTO alert_events(event_id,event_value,severity,ai_status) VALUES (?,'1',4,'pending')",
+                (event_id,),
+            )
+        task, _ = tasks.create({"event": event}, source="alert", event_id=event_id)
+        with connection() as db:
+            db.execute(
+                "UPDATE diagnostic_tasks SET status='cancelled' WHERE task_id=?",
+                (task["task_id"],),
+            )
+        assert run(event, task["task_id"])["skipped"] is True
+        with connection() as db:
+            assert (
+                db.execute(
+                    "SELECT ai_status FROM alert_events WHERE event_id=?", (event_id,)
+                ).fetchone()[0]
+                == "cancelled"
+            )
+
+
+def test_enqueue_creates_the_queued_task_first_and_refuses_duplicates(monkeypatch):
+    from types import SimpleNamespace
+    import pytest
+    from app.orchestrator import tasks
+
+    FakeQueue.jobs = []
+    lost = set()
+    monkeypatch.setattr(worker, "Queue", FakeQueue)
+    monkeypatch.setattr(
+        worker,
+        "Job",
+        SimpleNamespace(exists=lambda job_id, connection=None: job_id not in lost),
+    )
+    event = {
+        "event_id": "770020",
+        "event_value": "1",
+        "severity": "4",
+        "event_name": "Linux: Load average is too high",
+        "host_id": "10913",
+    }
+    task, created = worker.enqueue_analysis(
+        "ai-alert-manual", "app.worker.process_manual_analysis", event, "om_1", "oc_1"
+    )
+    assert created and tasks.get(task["task_id"])["status"] == "queued"
+    assert tasks.get(task["task_id"], private=True)["request"]["event"] == event
+    name, func, args, kwargs = FakeQueue.jobs[0]
+    assert (name, func) == ("ai-alert-manual", "app.worker.process_manual_analysis")
+    assert args == (event, "om_1", "oc_1", task["task_id"])
+    assert kwargs["job_id"] == task["task_id"] and kwargs["job_timeout"] == -1
+    again, created = worker.enqueue_analysis(
+        "ai-alert-manual", "app.worker.process_manual_analysis", event, "om_1", "oc_1"
+    )
+    assert not created and again["task_id"] == task["task_id"]
+    assert len(FakeQueue.jobs) == 1
+    # A queued task whose job vanished must not block the event forever.
+    lost.add(task["task_id"])
+    fresh, created = worker.enqueue_analysis(
+        "ai-alert-manual", "app.worker.process_manual_analysis", event, "om_1", "oc_1"
+    )
+    assert created and fresh["task_id"] != task["task_id"]
+    assert tasks.get(task["task_id"])["error_type"] == "QueueLost"
+    assert len(FakeQueue.jobs) == 2
+
+    class Down(FakeQueue):
+        def enqueue(self, *args, **kwargs):
+            raise ConnectionError("redis offline")
+
+    monkeypatch.setattr(worker, "Queue", Down)
+    other = {**event, "event_id": "770021"}
+    with pytest.raises(ConnectionError):
+        worker.enqueue_analysis(
+            "ai-alert-analysis", "app.worker.process_alert_analysis", other
+        )
+    from app.main import connection
+
+    with connection() as db:
+        row = db.execute(
+            "SELECT status,error_type FROM diagnostic_tasks WHERE event_id='770021'"
+        ).fetchone()
+    assert row == ("failed", "QueueUnavailable")
 
 
 def test_enterprise_app_alert_notifier(monkeypatch):
@@ -418,8 +580,10 @@ def test_manual_analysis_progress_updates_and_context_for_both_states(monkeypatc
     from app import feishu_client, conversation_context
 
     events = []
+    task_ids = []
 
-    async def analyze(event):
+    async def analyze(event, task_id=None):
+        task_ids.append(task_id)
         return {
             "cause": "负载较高",
             "action": "检查进程",
@@ -459,9 +623,10 @@ def test_manual_analysis_progress_updates_and_context_for_both_states(monkeypatc
                 },
                 "om_original",
                 "oc_group",
+                "task-" + state,
             )
         )
-        assert result["diagnosed"]
+        assert result["diagnosed"] and task_ids[-1] == "task-" + state
         assert len(events) == 2
         assert events[0][0:3] == ("reply", "om_original", "AI 分析中")
         assert events[1][0:3] == ("update", "om_progress", "AI 分析结果")

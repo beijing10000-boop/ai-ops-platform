@@ -8,7 +8,9 @@ import re
 import httpx
 from redis import Redis
 from rq import Worker, Queue
+from rq.job import Job
 from .main import read_setting
+from .orchestrator import queues
 
 log = logging.getLogger(__name__)
 # Immutable Feishu card output contract; diagnostic policy lives in enabled Skills.
@@ -45,7 +47,7 @@ def cfg(key):
     return read_setting(key)
 
 
-async def analyze(event):
+async def analyze(event, task_id=None):
     key = cfg("openai_api_key")
     model = cfg("openai_model")
     url = cfg("openai_base_url")
@@ -62,6 +64,7 @@ async def analyze(event):
         model=model,
         return_usage=True,
         event=event,
+        task_id=task_id,
     )
     raw = raw.strip()
     try:
@@ -89,6 +92,54 @@ async def analyze(event):
         data["_limitations"] = (task.get("report") or {}).get("limitations", [])
         data["_duration_ms"] = task.get("duration_ms")
     return data
+
+
+def enqueue_analysis(queue_name, func, event, *args):
+    """Create the queued task before its job, so the active-task index refuses
+    duplicates while the job waits. Returns (task, created)."""
+    from .main import REDIS_URL
+    from .mcp_runtime import create_task
+    from .orchestrator import tasks
+
+    redis = Redis.from_url(REDIS_URL, socket_connect_timeout=2, socket_timeout=3)
+    question = json.dumps({"alert": event}, ensure_ascii=False)
+    task, created = create_task(question, event)
+    if (
+        not created
+        and task["status"] == "queued"
+        and not Job.exists(task["task_id"], connection=redis)
+    ):
+        # A queued task whose job vanished (e.g. Redis data lost) would block
+        # this event forever; close it and queue a fresh one.
+        tasks.finish(
+            task["task_id"],
+            {"message": "排队中的分析任务已丢失，已重新提交"},
+            status="failed",
+            error_type="QueueLost",
+        )
+        task, created = create_task(question, event)
+    if not created:
+        return task, False
+    try:
+        Queue(queue_name, connection=redis).enqueue(
+            func,
+            event,
+            *args,
+            task["task_id"],
+            job_id=task["task_id"],
+            # The runtime enforces the task's saved deadline; no second fixed cap.
+            job_timeout=-1,
+            result_ttl=86400,
+        )
+    except Exception:
+        tasks.finish(
+            task["task_id"],
+            {"message": "任务入队失败，请检查 Redis 后重试"},
+            status="failed",
+            error_type="QueueUnavailable",
+        )
+        raise
+    return task, True
 
 
 def safe(value, n):
@@ -619,9 +670,44 @@ async def handle_alert(event):
             "diagnosed": False,
             "ai_skipped": True,
         }
+    # Analysis runs on its own workers so the next alert's notification never
+    # waits behind a model call.
+    try:
+        task, queued = enqueue_analysis(
+            queues.ALERT_ANALYSIS, "app.worker.process_alert_analysis", event
+        )
+    except Exception as exc:
+        update_event(event, ai_status="failed")
+        log.warning(
+            "ALERT_ANALYSIS_ENQUEUE_FAILED event_id=%s error=%s",
+            event.get("event_id"),
+            type(exc).__name__,
+        )
+        return {
+            "event_id": event["event_id"],
+            "notified": True,
+            "diagnosed": False,
+            "ai_failed": True,
+        }
+    if not queued:
+        log.info(
+            "ALERT_ANALYSIS_ALREADY_ACTIVE event_id=%s task_id=%s",
+            event.get("event_id"),
+            task["task_id"],
+        )
+    return {
+        "event_id": event["event_id"],
+        "notified": True,
+        "diagnosed": False,
+        "analysis_queued": queued,
+        "task_id": task["task_id"],
+    }
+
+
+async def handle_alert_analysis(event, task_id=None):
     update_event(event, ai_status="running")
     try:
-        analysis = await analyze(event)
+        analysis = await analyze(event, task_id)
         store_alert_usage(event, analysis.get("_token_usage"))
     except Exception as exc:
         update_event(event, ai_status="failed")
@@ -656,15 +742,40 @@ def process_alert(event):
     return asyncio.run(handle_alert(event))
 
 
+def task_still_queued(task_id):
+    """Skip jobs whose task was cancelled while waiting, like diagnostic_worker."""
+    if task_id is None:
+        return True  # Jobs queued before v0.9.9 create their task when they run.
+    from .orchestrator import tasks
+
+    task = tasks.get(task_id)
+    return bool(task) and task["status"] == "queued"
+
+
+def process_alert_analysis(event, task_id=None):
+    if not task_still_queued(task_id):
+        update_event(event, ai_status="cancelled")
+        return {"event_id": event.get("event_id"), "skipped": True}
+    return asyncio.run(handle_alert_analysis(event, task_id))
+
+
 if __name__ == "__main__":
+    import sys
+
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
     redis = Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
-    Worker([Queue("ai-alerts", connection=redis)], connection=redis).work()
+    # `python -m app.worker analysis` serves manual clicks before automatic analysis.
+    names = (
+        [queues.ALERT_MANUAL, queues.ALERT_ANALYSIS]
+        if sys.argv[1:] == ["analysis"]
+        else [queues.ALERTS]
+    )
+    Worker([Queue(name, connection=redis) for name in names], connection=redis).work()
 
 
-async def analyze_on_demand(event, message_id, chat_id=None):
+async def analyze_on_demand(event, message_id, chat_id=None, task_id=None):
     """Fault and recovery: reply with progress, update it, preserve threaded context."""
     from .feishu_client import reply_card, update_card
     from .conversation_context import remember, mark_pending, clear_pending
@@ -715,7 +826,7 @@ async def analyze_on_demand(event, message_id, chat_id=None):
     except Exception:
         log.exception("ALERT_AI_PROGRESS_FAILED event_id=%s", event_id)
     try:
-        result = await analyze(event)
+        result = await analyze(event, task_id)
         store_alert_usage(event, result.get("_token_usage"))
         detail = analysis_summary(result)
         detail_url = report_url(result)
@@ -808,15 +919,9 @@ async def analyze_on_demand(event, message_id, chat_id=None):
         raise
 
 
-def process_manual_analysis(event, message_id, chat_id=None):
-    try:
-        return asyncio.run(analyze_on_demand(event, message_id, chat_id))
-    finally:
-        from .main import REDIS_URL
-
-        try:
-            Redis.from_url(REDIS_URL, socket_timeout=2).delete(
-                "zabbix-ai:manual-analysis:" + str(event.get("event_id"))
-            )
-        except Exception:
-            log.warning("MANUAL_ANALYSIS_LOCK_CLEANUP_FAILED")
+def process_manual_analysis(event, message_id, chat_id=None, task_id=None):
+    if not task_still_queued(task_id):
+        update_event(event, ai_status="cancelled")
+        return {"event_id": event.get("event_id"), "skipped": True}
+    # Jobs queued before v0.9.9 carry no task_id; the runtime then creates one.
+    return asyncio.run(analyze_on_demand(event, message_id, chat_id, task_id))

@@ -29,7 +29,7 @@
 ## 日志与联调
 
 ```bash
-docker compose logs --since=10m feishu-receiver qa-worker alert-worker
+docker compose logs --since=10m feishu-receiver qa-worker alert-worker alert-analysis-worker
 ```
 
 测试顺序：OAuth 登录 → 低级别原通知 → 高级别自动分析 → 手动/重复分析 → 同链四次回复及第五次拒绝 → 分支和跨群隔离 → 恢复 → 屏蔽与解除 → 卡片更新失败兜底。避免只用媒介“测试”窗口未展开的宏判断结果。

@@ -51,6 +51,12 @@ services:
   alert-worker:
     <<: *worker
     command: [python, -m, app.worker]
+  # Alert AI analysis (manual clicks first); each replica runs one analysis at a time.
+  alert-analysis-worker:
+    <<: *worker
+    command: [python, -m, app.worker, analysis]
+    deploy:
+      replicas: ${AI_ALERT_ANALYSIS_WORKERS:-2}
   qa-worker:
     <<: *worker
     command: [python, -m, app.qa_worker]
