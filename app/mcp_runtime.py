@@ -1033,10 +1033,10 @@ async def run(
                         tools = tools + [ssh_definition]
                     tasks.stage(task_id, "ai_reasoning")
                     response = await traced_response(
+                        client,
                             task_id=task_id,
                             round_number=sum(d["kind"] == "round" for d in telemetry) + 1,
                             secret_values=secret_values,
-                        client,
                         deadline=deadline,
                         timeout_seconds=int(
                             read_setting("ai_request_timeout_seconds") or 90
@@ -1141,10 +1141,10 @@ async def run(
                         < limits["rounds"]
                     ):
                         response = await traced_response(
+                        client,
                             task_id=task_id,
                             round_number=sum(d["kind"] == "round" for d in telemetry) + 1,
                             secret_values=secret_values,
-                            client,
                             deadline=deadline,
                             timeout_seconds=int(
                                 read_setting("ai_request_timeout_seconds") or 90
