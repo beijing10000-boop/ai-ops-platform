@@ -31,7 +31,11 @@ def _strip_internal_reasoning(value):
 
 def _preview(value, secret_values=()):
     if isinstance(value, (dict, list)):
-        value = json.dumps(redact_data(_strip_internal_reasoning(value)), ensure_ascii=False, default=str)
+        value = json.dumps(
+            redact_data(_strip_internal_reasoning(value)),
+            ensure_ascii=False,
+            default=str,
+        )
     else:
         value = str(value if value is not None else "")
     value = redact(value, None)
