@@ -340,3 +340,26 @@ def test_feishu_verification_uses_draft_credentials_and_never_sends_messages(
     assert calls[1][0] == "GET" and "/im/v1/chats/" in calls[1][1]
     assert "tenant-fixture-secret" not in response.text
     assert "draft-app-fixture-secret" not in response.text
+
+
+def test_pages_version_assets_by_content_so_upgrades_never_run_stale_js():
+    # v1.0 dropped playbook "actions"; a browser running cached v0.9 app.js
+    # failed on the connections page with "reading 'join'".
+    import hashlib
+    import re
+
+    client = client_for()
+    for path, names in (
+        ("/", ["apple.css", "experience.js", "skills.js", "app.js"]),
+        ("/setup", ["apple.css", "setup.js"]),
+    ):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-cache"
+        for name in names:
+            digest = hashlib.sha256(
+                (main.WEB / "assets" / name).read_bytes()
+            ).hexdigest()[:12]
+            assert f'"/assets/{name}?v={digest}"' in response.text
+        assert not re.search(r'"/assets/[\w.-]+"', response.text)
+    assert client.get("/assets/app.js?v=stale").status_code == 200
