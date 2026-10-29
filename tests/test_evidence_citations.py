@@ -90,6 +90,38 @@ def test_rendered_section_lists_valid_and_rejected_citations():
     assert evidence_check.render(None) == ""
 
 
+def test_scope_lists_target_collection_time_windows_and_sources():
+    index = {
+        "E1": {"provider": "ssh_mcp", "at": 1793237680, "window": None},
+        "E2": {
+            "provider": "zabbix_mcp",
+            "at": 1793237700,
+            "window": (1793236766, 1793237695),
+        },
+        "E3": {"provider": "zabbix_mcp", "at": 1793237710, "window": None},
+    }
+    text = evidence_check.scope(index, {"host_name": "db-01", "host_id": "11230"})
+    assert text.splitlines() == [
+        "诊断范围（平台生成）",
+        "- 目标：db-01（Zabbix Host ID 11230）",
+        "- 采集时间（北京时间）：2026-10-29 09:34:40 – 2026-10-29 09:35:10",
+        "- Zabbix 历史查询窗口（北京时间）：2026-10-29 09:19:26 – 2026-10-29 09:34:55",
+        "- 证据来源：SSH MCP 1 条、Zabbix MCP 2 条（E1–E3，详见证据与工具执行记录）",
+    ]
+    assert evidence_check.scope({}, {"host_name": "db-01"}) == ""
+
+
+def test_alert_suggestion_lists_become_numbered_text():
+    from app.mcp_runtime import readable_report_answer
+
+    text = readable_report_answer(
+        json.dumps(
+            {"cause": "负载偏高（E2）", "action": ["核对批处理", "", "补查增量"]}
+        )
+    )
+    assert text == "诊断结论\n负载偏高（E2）\n\n处理建议\n1. 核对批处理\n2. 补查增量"
+
+
 def test_signals_surface_ssh_findings_and_zabbix_load_divergence():
     items = {
         "records": [

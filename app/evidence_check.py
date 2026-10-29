@@ -7,9 +7,12 @@ precision), so a value cannot be attributed to evidence that does not contain
 it. Confidence is derived from the valid citations, never from the model.
 """
 
+from datetime import datetime
 import json
 import re
+from zoneinfo import ZoneInfo
 
+BEIJING = ZoneInfo("Asia/Shanghai")
 NUMBER = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?")
 CITED_ID = re.compile(r"\bE(\d{1,3})\b")
 PROVIDER_LABELS = {"ssh_mcp": "SSH MCP", "zabbix_mcp": "Zabbix MCP"}
@@ -114,6 +117,55 @@ def check(answer, index):
         ],
         "confidence": confidence(valid),
     }
+
+
+def scope(index, target):
+    """Target, collection time, queried windows and sources, rendered by the platform
+    so the final model round does not have to restate them."""
+    if not index:
+        return ""
+
+    def clock(stamp):
+        return datetime.fromtimestamp(stamp, BEIJING).strftime("%Y-%m-%d %H:%M:%S")
+
+    lines = ["诊断范围（平台生成）"]
+    ids = [
+        label + str(target[key])
+        for key, label in (
+            ("host_id", "Zabbix Host ID "),
+            ("ssh_host_id", "SSH 资产 "),
+            ("address", "地址 "),
+        )
+        if target.get(key) not in (None, "")
+    ]
+    if target.get("host_name") or ids:
+        lines.append(
+            "- 目标："
+            + str(target.get("host_name") or "")
+            + ("（" + "，".join(ids) + "）" if ids else "")
+        )
+    times = [item["at"] for item in index.values() if item.get("at")]
+    if times:
+        lines.append(
+            f"- 采集时间（北京时间）：{clock(min(times))} – {clock(max(times))}"
+        )
+    windows = [item["window"] for item in index.values() if item.get("window")]
+    if windows:
+        lines.append(
+            "- Zabbix 历史查询窗口（北京时间）："
+            f"{clock(min(w[0] for w in windows))} – {clock(max(w[1] for w in windows))}"
+        )
+    counts = {}
+    for item in index.values():
+        label = PROVIDER_LABELS.get(item["provider"], item["provider"])
+        counts[label] = counts.get(label, 0) + 1
+    first, last = next(iter(index)), next(reversed(index))
+    lines.append(
+        "- 证据来源："
+        + "、".join(f"{label} {count} 条" for label, count in counts.items())
+        + f"（{first}{'–' + last if last != first else ''}，详见证据与工具执行记录）"
+    )
+    return "\n".join(lines)
 
 
 def render(result):

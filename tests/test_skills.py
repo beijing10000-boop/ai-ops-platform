@@ -649,7 +649,14 @@ def test_history_skill_calls_zabbix_only_and_adapts_initmax_arguments(monkeypatc
     query_context = json.loads(create.call_args_list[0].kwargs["input"][0]["content"])
     assert query_context["current_timestamp"] > 0
     assert query_context["current_time"].endswith("+08:00")
-    assert "分析与依据" in tasks.get(usage["task_id"])["report"]["answer"]
+    answer = tasks.get(usage["task_id"])["report"]["answer"]
+    assert "分析与依据" in answer
+    # The model's explicit history window is reported by the platform.
+    assert (
+        "- Zabbix 历史查询窗口（北京时间）：1970-01-01 08:00:01 – 1970-01-01 08:03:20"
+        in answer
+    )
+    assert "- 证据来源：Zabbix MCP 2 条（E1–E2" in answer
 
 
 def test_skill_cancellation_after_model_response_saves_usage_and_stops_tools(rig):
@@ -1340,7 +1347,8 @@ def test_prefetched_evidence_is_numbered_and_alert_citations_are_checked(rig):
     client_for().post(P, json=upload(PREFETCH, enabled=True, providers=["ssh_mcp"]))
     event = {"event_id": "770102", "event_name": "Load high", "host_id": "10913"}
     answer = {
-        "cause": "负载偏高",
+        "cause": "负载偏高（E2）",
+        "action": ["核对告警时段的批处理任务", "补查短时进程增量"],
         "evidence": [
             {"id": "E2", "quote": "load 0.5"},
             {"id": "E2", "quote": "load 9.5"},
@@ -1365,7 +1373,15 @@ def test_prefetched_evidence_is_numbered_and_alert_citations_are_checked(rig):
     assert [item["quote"] for item in citations["valid"]] == ["load 0.5"]
     assert [item["id"] for item in citations["invalid"]] == ["E2", "E7"]
     assert citations["confidence"] == "中"
-    assert "证据核对\n依据可信度：中" in report["answer"]
+    # Structured output: the platform numbers the suggestions and renders the
+    # scope, so the model's final round does not restate target, time or sources.
+    text = report["answer"]
+    assert "处理建议\n1. 核对告警时段的批处理任务\n2. 补查短时进程增量" in text
+    assert "诊断范围（平台生成）\n- 目标：linux-live（Zabbix Host ID 10913" in text
+    assert "SSH 资产 7，地址 198.51.100.21）" in text
+    assert "- 采集时间（北京时间）：" in text and "历史查询窗口" not in text
+    assert "- 证据来源：SSH MCP 2 条（E1–E2，详见证据与工具执行记录）" in text
+    assert text.index("诊断范围") < text.index("证据核对\n依据可信度：中")
     # Evidence ids map to the stored evidence rows shown on the task page.
     rows = {
         str(row["id"]): row["tool"] for row in tasks.evidence_page(usage["task_id"])
