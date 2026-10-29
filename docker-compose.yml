@@ -12,8 +12,12 @@ x-logging: &logging
   options:
     max-size: 10m
     max-file: '3'
+x-build: &build
+  context: .
+  args:
+    PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
 x-worker: &worker
-  build: .
+  build: *build
   restart: unless-stopped
   environment: *app-env
   volumes: [appdata:/app/data]
@@ -34,7 +38,7 @@ services:
       retries: 5
     logging: *logging
   web:
-    build: .
+    build: *build
     restart: unless-stopped
     ports: ['${WEB_BIND_IP:-0.0.0.0}:${WEB_PORT:-8088}:8088']
     environment: *app-env
