@@ -99,6 +99,71 @@ def test_report_links_open_inside_the_feishu_client():
     )
 
 
+def test_full_report_button_is_signed_and_the_worker_replies_with_the_whole_report(
+    monkeypatch, tmp_path
+):
+    from unittest.mock import AsyncMock
+    from app import feishu_client, main
+    from app.orchestrator import tasks
+
+    monkeypatch.setenv("APP_ENCRYPTION_KEY", "unit-test-secret")
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "DB", tmp_path / "app.sqlite3")
+    monkeypatch.setattr(
+        worker,
+        "cfg",
+        lambda key: {"web_protocol": "http", "web_public_host": "ops.example.com"}.get(
+            key, ""
+        ),
+    )
+    task_id = "0123456789abcdef0123456789abcdef"
+    button = worker.report_button({"_task_id": task_id})
+    assert button["value"] == {
+        "op": "full_report",
+        "task_id": task_id,
+        "sig": worker.report_signature(task_id),
+    }
+    assert worker.report_button({"_task_id": "not-a-task"}) is None
+    card = worker.make_card(
+        {"event_id": "1", "severity": "4", "event_value": "1"},
+        {"cause": "负载高", "_task_id": task_id},
+        analysis=True,
+    )
+    buttons = [
+        b for e in card["elements"] if e["tag"] == "action" for b in e["actions"]
+    ]
+    assert [b["value"]["op"] if "value" in b else "url" for b in buttons] == [
+        "full_report",
+        "url",
+    ]
+    # The worker job posts what the Web report page shows, as a reply to the card.
+    task, _ = tasks.create({"question": "q"}, source="qa")
+    tasks.start(task["task_id"])
+    tasks.finish(
+        task["task_id"],
+        {"answer": "完整结论\n\n证据核对\n- E2 SSH MCP", "limitations": ["缺口 A"]},
+        {
+            "input": 10,
+            "output": 5,
+            "total": 15,
+            "available": True,
+            "profile": "standard",
+        },
+        "partial",
+        duration_ms=1234,
+    )
+    sent = AsyncMock(return_value="om_reply")
+    monkeypatch.setattr(feishu_client, "reply_card", sent)
+    assert (
+        asyncio.run(worker.send_full_report(task["task_id"], "om_card")) == "om_reply"
+    )
+    (message_id, title, text), _ = sent.call_args
+    assert message_id == "om_card" and title == "完整诊断报告"
+    assert "完整结论" in text and "E2 SSH MCP" in text and "缺口 A" in text
+    assert "**诊断状态**  部分完成" in text
+    assert "本轮 Token 消耗：15（输入 10 / 输出 5） · 分析模式：标准分析" in text
+
+
 def test_card_keeps_complete_report_without_fixed_character_truncation():
     info = {
         "cause": "根因待确认",
@@ -666,12 +731,12 @@ def test_manual_analysis_progress_updates_and_context_for_both_states(monkeypatc
             "analysis": "CPU趋势连续上升",
         }
 
-    async def reply(message_id, title, detail):
-        events.append(("reply", message_id, title, detail))
+    async def reply(message_id, title, detail, **kwargs):
+        events.append(("reply", message_id, title, detail, kwargs.get("actions")))
         return "om_progress"
 
-    async def update(message_id, title, detail, template="green"):
-        events.append(("update", message_id, title, detail))
+    async def update(message_id, title, detail, template="green", **kwargs):
+        events.append(("update", message_id, title, detail, kwargs.get("actions")))
 
     async def chat(message_id):
         return "oc_group"

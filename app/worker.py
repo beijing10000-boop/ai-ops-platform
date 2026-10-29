@@ -1,6 +1,8 @@
 """Read-only AI diagnostics worker. Never executes Zabbix mutations."""
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -271,6 +273,45 @@ def in_feishu(url):
 
     return "https://applink.feishu.cn/client/web_url/open?mode=window&url=" + quote(
         url, safe=""
+    )
+
+
+def report_signature(task_id):
+    from .main import master_key_bytes
+
+    payload = f"full_report:{task_id}".encode()
+    return hmac.new(master_key_bytes(), payload, hashlib.sha256).hexdigest()
+
+
+def report_button(info):
+    """Card button that has the bot post the complete report into the chat."""
+    task_id = str(
+        info.get("_task_id") or (info.get("_token_usage") or {}).get("task_id") or ""
+    )
+    if not re.fullmatch(r"[0-9a-f]{32}", task_id):
+        return None
+    return {
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": "在飞书查看完整报告"},
+        "type": "primary",
+        "value": {
+            "op": "full_report",
+            "task_id": task_id,
+            "sig": report_signature(task_id),
+        },
+    }
+
+
+def enqueue_full_report(task_id, message_id):
+    from .main import REDIS_URL
+
+    redis = Redis.from_url(REDIS_URL, socket_connect_timeout=2, socket_timeout=3)
+    Queue(queues.ALERT_MANUAL, connection=redis).enqueue(
+        "app.worker.process_full_report",
+        task_id,
+        message_id,
+        job_timeout=120,
+        result_ttl=3600,
     )
 
 
@@ -592,24 +633,19 @@ def make_card(event, info=None, *, analysis=False, mute_info=None):
                 "text": {"tag": "lark_md", "content": card_summary(info)},
             }
         )
+        buttons = [button for button in (report_button(info),) if button]
         detail_url = report_url(info)
         if detail_url:
-            elements.append(
+            buttons.append(
                 {
-                    "tag": "action",
-                    "actions": [
-                        {
-                            "tag": "button",
-                            "text": {
-                                "tag": "plain_text",
-                                "content": "查看完整诊断报告",
-                            },
-                            "type": "default",
-                            "url": in_feishu(detail_url),
-                        }
-                    ],
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "查看完整诊断报告"},
+                    "type": "default",
+                    "url": in_feishu(detail_url),
                 }
             )
+        if buttons:
+            elements.append({"tag": "action", "actions": buttons})
     if analysis:
         from .mcp_runtime import format_usage
 
@@ -1062,14 +1098,18 @@ async def analyze_on_demand(event, message_id, chat_id=None, task_id=None):
         card += "\n\n---\n" + format_usage(
             result.get("_token_usage"), duration_ms=result.get("_duration_ms")
         )
+        button = report_button(result)
+        extras = {"actions": [button]} if button else {}
         if progress_id:
             try:
-                await update_card(progress_id, "AI 分析结果", card)
+                await update_card(progress_id, "AI 分析结果", card, **extras)
             except Exception:
                 log.exception("ALERT_AI_CARD_UPDATE_FAILED event_id=%s", event_id)
-                progress_id = await reply_card(message_id, "AI 分析结果", card)
+                progress_id = await reply_card(
+                    message_id, "AI 分析结果", card, **extras
+                )
         else:
-            progress_id = await reply_card(message_id, "AI 分析结果", card)
+            progress_id = await reply_card(message_id, "AI 分析结果", card, **extras)
         try:
             # A Feishu GET /im/v1/messages/{id} may return 400 even when
             # reply and PATCH succeed. Use the verified delivery link instead.
@@ -1142,6 +1182,45 @@ async def analyze_on_demand(event, message_id, chat_id=None, task_id=None):
                     "ALERT_AI_FAILURE_CARD_UPDATE_FAILED event_id=%s", event_id
                 )
         raise
+
+
+async def send_full_report(task_id, message_id):
+    """Reply to the analysis card with the complete report, split into cards as needed.
+
+    This is what the Web report page shows: the conclusion with scope and
+    citation check, the limitations and the usage footer.
+    """
+    from .feishu_client import reply_card
+    from .mcp_runtime import format_usage
+    from .orchestrator import tasks
+
+    task = tasks.get(task_id)
+    if not task:
+        raise ValueError("task not found")
+    report = task.get("report") if isinstance(task.get("report"), dict) else {}
+    if report.get("answer"):
+        text = analysis_summary(
+            {
+                "_report_answer": report["answer"],
+                "_limitations": report.get("limitations") or [],
+                "_diagnostic_status": task.get("status"),
+            }
+        )
+    else:
+        text = f"该任务尚未生成报告（状态：{task.get('status')}）。"
+    usage = {
+        "input": task.get("token_input"),
+        "output": task.get("token_output"),
+        "total": task.get("token_total"),
+        "available": task.get("token_total") is not None,
+        "profile": task.get("profile"),
+    }
+    text += "\n\n---\n" + format_usage(usage, duration_ms=task.get("duration_ms"))
+    return await reply_card(message_id, "完整诊断报告", text)
+
+
+def process_full_report(task_id, message_id):
+    return asyncio.run(send_full_report(task_id, message_id))
 
 
 def process_manual_analysis(event, message_id, chat_id=None, task_id=None):
