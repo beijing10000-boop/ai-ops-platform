@@ -22,7 +22,7 @@ def test_reply_context_is_scoped_by_chat_and_message(monkeypatch):
         "oc_group1",
         "om_q1",
         "om_a1",
-        "172.20.200.6有什么告警",
+        "198.51.100.6有什么告警",
         "Swap使用率过高，事件6042005",
     )
     stored = ctx.recall("oc_group1", "om_a1")
@@ -33,7 +33,7 @@ def test_reply_context_is_scoped_by_chat_and_message(monkeypatch):
     ctx.remember("oc_group1", "om_q2", "om_a2", "更深入分析", "请核实Swap趋势", stored)
     followup = ctx.recall("oc_group1", "om_a2")
     assert len(followup["turns"]) == 2
-    assert "172.20.200.6" in ctx.format_context(followup)
+    assert "198.51.100.6" in ctx.format_context(followup)
 
 
 def test_context_depth_is_counted_for_worker_limit(monkeypatch):
@@ -62,7 +62,7 @@ def test_thread_context_survives_third_and_fourth_reply(monkeypatch):
         "om_alert",
         "om_analysis",
         "分析事件6202260",
-        "主机172-20-2-113 (172.20.2.113)负载偏高",
+        "主机198-51-100-23 (198.51.100.23)负载偏高",
         root_id="om_alert",
     )
     first = ctx.recall_thread("oc_group1", "om_alert")
@@ -88,7 +88,7 @@ def test_thread_context_survives_third_and_fourth_reply(monkeypatch):
     )
     third = ctx.recall_thread("oc_group1", "om_alert")
     assert len(third["turns"]) == 3
-    assert "172.20.2.113" in ctx.format_context(third)
+    assert "198.51.100.23" in ctx.format_context(third)
     assert ctx.recall_thread("oc_other", "om_alert") is None
     assert ctx.recall_thread("oc_group1", "om_unrelated") is None
 
@@ -112,7 +112,7 @@ def test_reply_to_older_branch_does_not_inherit_newer_answers(monkeypatch):
         "om_A",
         "分析",
         "回答A",
-        {"origin": "告警172.20.2.101", "turns": []},
+        {"origin": "告警198.51.100.21", "turns": []},
     )
     a = ctx.recall("oc", "om_A")
     ctx.remember("oc", "om_qB", "om_B", "问题B", "回答B", a)
@@ -128,7 +128,7 @@ def test_reply_to_older_branch_does_not_inherit_newer_answers(monkeypatch):
     payload = ctx.recall("oc", "om_other_reply")
     assert len(payload["turns"]) == 2
     assert "回答B" not in ctx.format_context(payload)
-    assert "告警172.20.2.101" in ctx.format_context(payload)
+    assert "告警198.51.100.21" in ctx.format_context(payload)
 
 
 def test_reply_to_analysis_in_progress_never_calls_ai(monkeypatch):

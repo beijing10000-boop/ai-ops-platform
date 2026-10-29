@@ -66,7 +66,7 @@ def test_draft_configuration_is_validated_without_save_and_secrets_stay_encrypte
     client = client_for()
     values = {
         "ssh_mcp_enabled": "true",
-        "ssh_mcp_url": "http://172.20.200.95:9099/mcp",
+        "ssh_mcp_url": "http://192.0.2.12:9099/mcp",
         "ssh_mcp_token": "dedicated-client-fixture-token",
         "ssh_mcp_timeout_seconds": "90",
     }

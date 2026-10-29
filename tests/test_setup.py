@@ -16,7 +16,7 @@ def test_setup_requires_bootstrap_secret_and_closes_after_completion(monkeypatch
     payload = {
         "bootstrap_token": "wrong",
         "web_protocol": "http",
-        "web_public_host": "172.20.200.93:8088",
+        "web_public_host": "192.0.2.10:8088",
         "lark_app_id": "cli_12345678",
         "lark_app_secret": "testing-app-secret",
         "feishu_admin_open_ids": "ou_first_admin",
@@ -28,7 +28,7 @@ def test_setup_requires_bootstrap_secret_and_closes_after_completion(monkeypatch
     assert client.post("/api/v1/setup", json=payload).status_code == 409
     from app.feishu_auth import _redirect_uri, _admins
 
-    assert _redirect_uri() == "http://172.20.200.93:8088/api/v1/auth/callback"
+    assert _redirect_uri() == "http://192.0.2.10:8088/api/v1/auth/callback"
     assert _admins() == {"ou_first_admin"}
     from app.main import read_setting
 
@@ -56,7 +56,7 @@ def test_setup_never_overwrites_existing_admins(monkeypatch):
     payload = {
         "bootstrap_token": "test-admin",
         "web_protocol": "http",
-        "web_public_host": "172.20.200.93:8088",
+        "web_public_host": "192.0.2.10:8088",
         "lark_app_id": "cli_12345678",
         "lark_app_secret": "new-secret-value",
         "feishu_admin_open_ids": "ou_attacker",

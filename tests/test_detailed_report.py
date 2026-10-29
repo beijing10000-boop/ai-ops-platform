@@ -19,7 +19,7 @@ def isolated(monkeypatch, tmp_path):
 def test_export_has_all_sections_and_source_evidence_without_ui_toggle():
     task, _ = tasks.create(
         {
-            "question": "诊断172.20.2.135内存",
+            "question": "诊断198.51.100.35内存",
             "event": {
                 "event_id": "6590304",
                 "host_id": "10825",
@@ -48,7 +48,7 @@ def test_export_has_all_sections_and_source_evidence_without_ui_toggle():
         {
             "answer": "Java 进程当前占用较高",
             "limitations": ["JVM 内部堆数据缺失"],
-            "target": {"host_id": "10825", "ip": "172.20.2.135"},
+            "target": {"host_id": "10825", "ip": "198.51.100.35"},
             "budget": {"limits": {"rounds": 4}, "used": {"rounds": 2}},
         },
         {"available": True, "input": 500, "output": 100, "total": 600},

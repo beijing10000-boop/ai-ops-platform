@@ -193,12 +193,12 @@ def test_skill_bridge_uses_native_ssh_schema_over_real_transport():
                 lambda key: settings.get(key, ""),
                 ["ssh_mcp"],
                 deadline=time.monotonic() + 20,
-                target=("ip", "172.20.2.101"),
+                target=("ip", "198.51.100.21"),
             ) as bridge:
                 found = await bridge.definitions("ssh_mcp", "ssh_resolve_target")
                 assert "address" in found[0]["parameters"]["properties"]
                 await bridge.call(
-                    "ssh_mcp", "ssh_resolve_target", {"address": "172.20.2.101"}
+                    "ssh_mcp", "ssh_resolve_target", {"address": "198.51.100.21"}
                 )
                 result = await bridge.call(
                     "ssh_mcp", "ssh_diagnose_cpu", {"host_id": 92}

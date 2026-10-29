@@ -21,7 +21,7 @@ from app.security.redact import redact
         ),
         ("item_get", {"hostids": ["99"]}),
         ("host_get", {"server": "unapproved"}),
-        ("host_get", {"filter": {"ip": "172.20.2.101"}}),
+        ("host_get", {"filter": {"ip": "198.51.100.21"}}),
     ],
 )
 def test_write_secret_and_scope_bypasses_rejected(name, args):

@@ -177,7 +177,7 @@ def test_skill_web_submission_does_not_prequery_zabbix(monkeypatch):
     remote = AsyncMock(side_effect=AssertionError("must not call Zabbix"))
     monkeypatch.setattr("app.platform_api.live_hosts", remote)
     monkeypatch.setattr("app.platform_api.enqueue_task", lambda _: None)
-    body = {"question": "查询 172.20.2.101 现在 CPU", "zabbix_hostid": "10913"}
+    body = {"question": "查询 198.51.100.21 现在 CPU", "zabbix_hostid": "10913"}
     client = client_for()
     assert client.post("/api/v1/platform/tasks/validate", json=body).status_code == 200
     assert client.post("/api/v1/platform/tasks", json=body).status_code == 202
@@ -223,7 +223,7 @@ class Session:
             {
                 "status": "success",
                 "host_id": 7,
-                "address": "172.20.2.101",
+                "address": "198.51.100.21",
                 "revision": 3,
                 "name": "linux-live",
                 "zabbix_hostid": "10913",
@@ -285,7 +285,7 @@ def test_skill_selects_direct_ssh_without_zabbix_and_preserves_actual_usage(rig)
                 {
                     "provider": "ssh_mcp",
                     "name": "ssh_resolve_target",
-                    "arguments": {"address": "172.20.2.101"},
+                    "arguments": {"address": "198.51.100.21"},
                 },
             )
         ),
@@ -305,7 +305,7 @@ def test_skill_selects_direct_ssh_without_zabbix_and_preserves_actual_usage(rig)
     text, usage = asyncio.run(
         mcp_runtime.run(
             "中文报告",
-            "查询 172.20.2.101 现在 CPU",
+            "查询 198.51.100.21 现在 CPU",
             client=SimpleNamespace(responses=SimpleNamespace(create=create)),
             return_usage=True,
         )
@@ -341,7 +341,7 @@ def test_skill_timeout_retains_successful_mcp_evidence(rig):
                     {
                         "provider": "ssh_mcp",
                         "name": "ssh_resolve_target",
-                        "arguments": {"address": "172.20.2.101"},
+                        "arguments": {"address": "198.51.100.21"},
                     },
                 )
             ),
@@ -362,7 +362,7 @@ def test_skill_timeout_retains_successful_mcp_evidence(rig):
     answer, usage = asyncio.run(
         mcp_runtime.run(
             "请分析",
-            "查询 172.20.2.101 现在 CPU",
+            "查询 198.51.100.21 现在 CPU",
             return_usage=True,
             client=SimpleNamespace(responses=SimpleNamespace(create=create)),
         )
@@ -385,16 +385,16 @@ def test_generic_bridge_rejects_unresolved_wrong_target_writes_and_changed_revis
             lambda key: config.get(key, ""),
             ["ssh_mcp"],
             deadline=time.monotonic() + 20,
-            target=("ip", "172.20.2.101"),
+            target=("ip", "198.51.100.21"),
         ) as bridge:
             with pytest.raises(ValueError, match="未核验"):
                 await bridge.call("ssh_mcp", "ssh_diagnose_cpu", {"host_id": 7})
             await bridge.call(
-                "ssh_mcp", "ssh_resolve_target", {"address": "172.20.2.102"}
+                "ssh_mcp", "ssh_resolve_target", {"address": "198.51.100.22"}
             )
             assert not bridge.bindings
             await bridge.call(
-                "ssh_mcp", "ssh_resolve_target", {"address": "172.20.2.101"}
+                "ssh_mcp", "ssh_resolve_target", {"address": "198.51.100.21"}
             )
             with pytest.raises(ValueError, match="revision"):
                 await bridge.call(
@@ -653,7 +653,7 @@ def test_partial_native_evidence_is_a_partial_report(rig, monkeypatch):
                     {
                         "provider": "ssh_mcp",
                         "name": "ssh_resolve_target",
-                        "arguments": {"address": "172.20.2.101"},
+                        "arguments": {"address": "198.51.100.21"},
                     },
                 )
             ),
@@ -673,7 +673,7 @@ def test_partial_native_evidence_is_a_partial_report(rig, monkeypatch):
     _, usage = asyncio.run(
         mcp_runtime.run(
             "report",
-            "172.20.2.101 CPU",
+            "198.51.100.21 CPU",
             client=SimpleNamespace(responses=SimpleNamespace(create=create)),
             return_usage=True,
         )
@@ -759,7 +759,7 @@ def test_incomplete_skill_model_answer_is_retained_but_marked_partial(rig):
     assert any("输出" in gap for gap in task["report"]["limitations"])
 
 
-@pytest.mark.parametrize("target", [("hostid", "10"), ("ip", "172.20.2.101")])
+@pytest.mark.parametrize("target", [("hostid", "10"), ("ip", "198.51.100.21")])
 @pytest.mark.parametrize("duplicate", [False, True])
 def test_skill_zabbix_target_metadata_comes_only_from_unique_returned_host(
     monkeypatch, target, duplicate
@@ -786,7 +786,7 @@ def test_skill_zabbix_target_metadata_comes_only_from_unique_returned_host(
         async def call_tool(self, name, args):
             calls.append(name)
             row = (
-                {"hostid": "10", "ip": "172.20.2.101"}
+                {"hostid": "10", "ip": "198.51.100.21"}
                 if name == "hostinterface_get"
                 else {
                     "hostid": "10",
@@ -933,7 +933,7 @@ def test_alert_is_sent_once_without_unexpanded_macros(rig):
         "event_name": "Linux: Load average is too high (per CPU load over 1.5 for 5m)",
         "severity": "3",
         "host_id": "10913",
-        "host_ip": "172.20.2.101",
+        "host_ip": "198.51.100.21",
         "recovery_date": "{EVENT.RECOVERY.DATE}",
         "recovery_id": "{EVENT.RECOVERY.ID}",
     }
