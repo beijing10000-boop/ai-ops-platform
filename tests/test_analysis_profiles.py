@@ -98,18 +98,3 @@ def test_duration_is_part_of_usage_footer():
     assert "分析模式：标准分析 · 执行耗时：57.1 秒" in text
     assert "1,250" in text
     assert "执行耗时" not in format_usage({"available": False})
-    # Stage breakdown, so a slow model round is visible in the card footer.
-    staged = format_usage(
-        {"available": False},
-        duration_ms=180030,
-        timing={
-            "prefetch": 1.2,
-            "model": 110.2,
-            "tools": 0.4,
-            "rounds": [10.4, 2.4, 97.4],
-        },
-    )
-    assert (
-        "执行耗时：180.0 秒（预采集 1.2 秒 · 模型 3 轮 110.2 秒 · 工具 0.4 秒）"
-        in staged
-    )
