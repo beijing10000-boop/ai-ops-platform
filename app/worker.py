@@ -1,8 +1,6 @@
 """Read-only AI diagnostics worker. Never executes Zabbix mutations."""
 
 import asyncio
-import hashlib
-import hmac
 import json
 import logging
 import os
@@ -21,7 +19,8 @@ ALERT_OUTPUT_CONTRACT = (
     "host_groups,cause,action,analysis,human_required 字段，另加 evidence 数组。"
     "cause 写完整中文结论（100–200 字）：证据充分的直接成因和主要依据，关键数值后注明证据编号（E2）；"
     "action 为处理建议数组，按影响与风险排序，每项一句；"
-    "analysis 只写证据之间的关联、排除项和尚未证实的方向。"
+    "analysis 写证据之间的关联、排除项和尚未证实的方向（200–400 字）。"
+    "证据编号只以括号附在句末或数值后，如（E2），不要把编号当作句子的主语或宾语；"
     "目标、时间范围、告警字段、各证据数值和诊断不足由平台渲染，不要复述。"
     "evidence 每项为 "
     '{"id":"E2","quote":"从该证据原样摘录的关键数值或原文"}；'
@@ -276,45 +275,6 @@ def in_feishu(url):
     )
 
 
-def report_signature(task_id):
-    from .main import master_key_bytes
-
-    payload = f"full_report:{task_id}".encode()
-    return hmac.new(master_key_bytes(), payload, hashlib.sha256).hexdigest()
-
-
-def report_button(info):
-    """Card button that has the bot post the complete report into the chat."""
-    task_id = str(
-        info.get("_task_id") or (info.get("_token_usage") or {}).get("task_id") or ""
-    )
-    if not re.fullmatch(r"[0-9a-f]{32}", task_id):
-        return None
-    return {
-        "tag": "button",
-        "text": {"tag": "plain_text", "content": "在飞书查看完整报告"},
-        "type": "primary",
-        "value": {
-            "op": "full_report",
-            "task_id": task_id,
-            "sig": report_signature(task_id),
-        },
-    }
-
-
-def enqueue_full_report(task_id, message_id):
-    from .main import REDIS_URL
-
-    redis = Redis.from_url(REDIS_URL, socket_connect_timeout=2, socket_timeout=3)
-    Queue(queues.ALERT_MANUAL, connection=redis).enqueue(
-        "app.worker.process_full_report",
-        task_id,
-        message_id,
-        job_timeout=120,
-        result_ttl=3600,
-    )
-
-
 def analysis_summary(info):
     """Use the complete canonical report; transport handles byte-size segmentation."""
     from .mcp_runtime import readable_report_answer
@@ -356,9 +316,10 @@ def without_evidence_ids(text):
 
 
 def card_summary(info):
-    """Feishu card body: the conclusion and what to do, plus status when not clean.
+    """Feishu card body: conclusion, actions and (as room allows) the analysis,
+    plus the status when not clean.
 
-    Analysis, scope, citations and limitations stay on the Web report the card
+    Scope, citation check and limitations stay on the Web report the card
     links to; the conversation context keeps the full analysis_summary().
     """
     from .mcp_runtime import numbered
@@ -392,21 +353,26 @@ def card_summary(info):
         ]
         kept = []
         for index, item in enumerate(actions):
-            if index == 6 or (kept and len(item) > budget):
+            if index == ACTION_ROWS or (kept and len(item) > budget):
                 kept.append("其余建议见完整诊断报告。")
+                budget -= len(kept[-1])
                 break
             kept.append(clipped(item, max(budget, 40)))
             budget -= len(kept[-1])
-        lines += ["**诊断结论**", cause or "未知", ""]
-        lines.append(
-            "**处理建议**" + ("（需人工处理）" if info.get("human_required") else "")
-        )
+        lines += ["**诊断结论**", cause or "未知", "", "**处理建议**"]
         lines += kept or ["无"]
+        analysis = without_evidence_ids(numbered(info.get("analysis")))
+        if analysis and budget >= ANALYSIS_MIN:
+            shown = clipped(analysis, budget)
+            if shown != analysis:
+                shown += "（详见完整报告）"
+            lines += ["", "**分析与依据**", shown]
     return human_metrics("\n".join(lines))
 
 
-# Body text of the card; with its headings the card stays within ~300 characters.
-CARD_CHARS, CAUSE_CHARS = 280, 200
+# Body text of the card: conclusion first, actions next, the analysis takes
+# what is left; with its headings the card stays within ~1000 characters.
+CARD_CHARS, CAUSE_CHARS, ACTION_ROWS, ANALYSIS_MIN = 1000, 400, 8, 80
 
 
 def clipped(text, limit):
@@ -633,19 +599,24 @@ def make_card(event, info=None, *, analysis=False, mute_info=None):
                 "text": {"tag": "lark_md", "content": card_summary(info)},
             }
         )
-        buttons = [button for button in (report_button(info),) if button]
         detail_url = report_url(info)
         if detail_url:
-            buttons.append(
+            elements.append(
                 {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "查看完整诊断报告"},
-                    "type": "default",
-                    "url": in_feishu(detail_url),
+                    "tag": "action",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "text": {
+                                "tag": "plain_text",
+                                "content": "查看完整诊断报告",
+                            },
+                            "type": "default",
+                            "url": in_feishu(detail_url),
+                        }
+                    ],
                 }
             )
-        if buttons:
-            elements.append({"tag": "action", "actions": buttons})
     if analysis:
         from .mcp_runtime import format_usage
 
@@ -1098,18 +1069,14 @@ async def analyze_on_demand(event, message_id, chat_id=None, task_id=None):
         card += "\n\n---\n" + format_usage(
             result.get("_token_usage"), duration_ms=result.get("_duration_ms")
         )
-        button = report_button(result)
-        extras = {"actions": [button]} if button else {}
         if progress_id:
             try:
-                await update_card(progress_id, "AI 分析结果", card, **extras)
+                await update_card(progress_id, "AI 分析结果", card)
             except Exception:
                 log.exception("ALERT_AI_CARD_UPDATE_FAILED event_id=%s", event_id)
-                progress_id = await reply_card(
-                    message_id, "AI 分析结果", card, **extras
-                )
+                progress_id = await reply_card(message_id, "AI 分析结果", card)
         else:
-            progress_id = await reply_card(message_id, "AI 分析结果", card, **extras)
+            progress_id = await reply_card(message_id, "AI 分析结果", card)
         try:
             # A Feishu GET /im/v1/messages/{id} may return 400 even when
             # reply and PATCH succeed. Use the verified delivery link instead.
@@ -1182,45 +1149,6 @@ async def analyze_on_demand(event, message_id, chat_id=None, task_id=None):
                     "ALERT_AI_FAILURE_CARD_UPDATE_FAILED event_id=%s", event_id
                 )
         raise
-
-
-async def send_full_report(task_id, message_id):
-    """Reply to the analysis card with the complete report, split into cards as needed.
-
-    This is what the Web report page shows: the conclusion with scope and
-    citation check, the limitations and the usage footer.
-    """
-    from .feishu_client import reply_card
-    from .mcp_runtime import format_usage
-    from .orchestrator import tasks
-
-    task = tasks.get(task_id)
-    if not task:
-        raise ValueError("task not found")
-    report = task.get("report") if isinstance(task.get("report"), dict) else {}
-    if report.get("answer"):
-        text = analysis_summary(
-            {
-                "_report_answer": report["answer"],
-                "_limitations": report.get("limitations") or [],
-                "_diagnostic_status": task.get("status"),
-            }
-        )
-    else:
-        text = f"该任务尚未生成报告（状态：{task.get('status')}）。"
-    usage = {
-        "input": task.get("token_input"),
-        "output": task.get("token_output"),
-        "total": task.get("token_total"),
-        "available": task.get("token_total") is not None,
-        "profile": task.get("profile"),
-    }
-    text += "\n\n---\n" + format_usage(usage, duration_ms=task.get("duration_ms"))
-    return await reply_card(message_id, "完整诊断报告", text)
-
-
-def process_full_report(task_id, message_id):
-    return asyncio.run(send_full_report(task_id, message_id))
 
 
 def process_manual_analysis(event, message_id, chat_id=None, task_id=None):

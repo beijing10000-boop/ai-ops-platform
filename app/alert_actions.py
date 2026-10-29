@@ -3,7 +3,6 @@
 import hmac
 import json
 import logging
-import re
 from .alert_mute import action_signature
 from .main import connection, read_setting
 
@@ -160,30 +159,6 @@ def handle_analyze_action(value, operator_open_id, message_id=None, chat_id=None
     if not created:
         return True, "正在分析中，请勿重复提交。"
     return True, "已提交 AI 分析，结果将回复原告警消息"
-
-
-def handle_full_report(value, operator_open_id, message_id=None):
-    """Have a worker reply to the clicked analysis card with the complete report.
-
-    The card already sits in the chat that received the summary, so any member
-    may ask for the rest; the signature keeps task ids from being guessed.
-    """
-    from .worker import enqueue_full_report, report_signature
-
-    task_id = str(value.get("task_id") or "")
-    if not re.fullmatch(r"[0-9a-f]{32}", task_id):
-        return False, "报告标识无效"
-    if not hmac.compare_digest(str(value.get("sig") or ""), report_signature(task_id)):
-        return False, "卡片签名无效"
-    if not message_id or not str(message_id).startswith("om_"):
-        return False, "无法定位分析卡片，请使用平台发送的卡片"
-    try:
-        enqueue_full_report(task_id, str(message_id))
-    except Exception:
-        log.exception("FULL_REPORT_ENQUEUE_FAILED")
-        return False, "完整报告发送失败，请稍后再试"
-    log.info("FEISHU_FULL_REPORT_QUEUED task=%s", task_id[:8])
-    return True, "完整报告将回复在这条消息下"
 
 
 def card_after_mute(value, operator_open_id):

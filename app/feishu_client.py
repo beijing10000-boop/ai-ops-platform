@@ -10,11 +10,8 @@ log = logging.getLogger(__name__)
 ROOT = "https://open.feishu.cn/open-apis"
 
 
-def make_card(title, text, template="blue", actions=None):
-    """Render token consumption as a separated muted footer, not body copy.
-
-    `actions` are card buttons shown under the body, above the footer.
-    """
+def make_card(title, text, template="blue"):
+    """Render token consumption as a separated muted footer, not body copy."""
     body = str(text)
     token_line = None
     separator = "\n\n---\n"
@@ -23,8 +20,6 @@ def make_card(title, text, template="blue", actions=None):
         if after.startswith("本轮 Token 消耗：") and "\n" not in after:
             body, token_line = before, after
     elements = [{"tag": "div", "text": {"tag": "lark_md", "content": body}}]
-    if actions:
-        elements.append({"tag": "action", "actions": list(actions)})
     if token_line:
         elements.extend(
             [
@@ -112,7 +107,7 @@ async def send_rendered_card(client, token, card, *, chat_id=None, reply_to=None
     return first
 
 
-async def reply_card(message_id, title, text, template="blue", actions=None):
+async def reply_card(message_id, title, text, template="blue"):
     """Reply to the original Feishu message; return the reply message ID.
 
     The reply stays associated with the user's message. Later progress updates
@@ -123,10 +118,7 @@ async def reply_card(message_id, title, text, template="blue", actions=None):
     async with httpx.AsyncClient(timeout=30) as client:
         token = await get_token(client)
         result = await send_rendered_card(
-            client,
-            token,
-            make_card(title, text, template, actions),
-            reply_to=message_id,
+            client, token, make_card(title, text, template), reply_to=message_id
         )
         reply_id = (result.get("data") or {}).get("message_id")
         if not reply_id:
@@ -134,10 +126,10 @@ async def reply_card(message_id, title, text, template="blue", actions=None):
         return reply_id
 
 
-async def update_card(message_id, title, text, template="green", actions=None):
+async def update_card(message_id, title, text, template="green"):
     async with httpx.AsyncClient(timeout=30) as client:
         token = await get_token(client)
-        parts = split_card(make_card(title, text, template, actions))
+        parts = split_card(make_card(title, text, template))
         response = await request(
             client,
             "PATCH",
