@@ -3,6 +3,7 @@
 Store request/response previews for authorized operators, never raw reasoning,
 credentials, SDK objects, or complete potentially huge multi-round contexts.
 """
+
 import json
 import logging
 import time
@@ -44,7 +45,11 @@ def _preview(value, secret_values=()):
     size = len(value)
     if size > _PREVIEW_LIMIT:
         # Retain the latest conversation entries as well as the beginning.
-        value = value[:8000] + "\n[…中间省略，详情请查看已授权的原始工具证据…]\n" + value[-7500:]
+        value = (
+            value[:8000]
+            + "\n[…中间省略，详情请查看已授权的原始工具证据…]\n"
+            + value[-7500:]
+        )
     return {"text": value, "original_chars": size, "truncated": size > _PREVIEW_LIMIT}
 
 
