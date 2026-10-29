@@ -96,6 +96,20 @@ def migrate(db):
             digest TEXT NOT NULL, bundle TEXT NOT NULL, updated_by TEXT NOT NULL,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
         db.execute("INSERT INTO platform_migrations(version) VALUES (5)")
+    if not db.execute("SELECT 1 FROM platform_migrations WHERE version=6").fetchone():
+        db.execute("""CREATE TABLE IF NOT EXISTS model_interactions(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL REFERENCES diagnostic_tasks(task_id),
+            round_number INTEGER NOT NULL,
+            model TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            duration_ms INTEGER NOT NULL,
+            token_input INTEGER, token_output INTEGER, token_total INTEGER,
+            payload TEXT NOT NULL
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS ix_model_interactions_task ON model_interactions(task_id,id)")
+        db.execute("INSERT INTO platform_migrations(version) VALUES (6)")
 
 
 def row_dict(row, cur):
