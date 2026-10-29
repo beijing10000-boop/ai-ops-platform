@@ -18,9 +18,14 @@ def isolated(monkeypatch, tmp_path):
 
 def test_export_has_all_sections_and_source_evidence_without_ui_toggle():
     task, _ = tasks.create(
-        {"question": "诊断172.20.2.135内存", "event": {
-            "event_id": "6590304", "host_id": "10825", "event_name": "High memory"
-        }},
+        {
+            "question": "诊断172.20.2.135内存",
+            "event": {
+                "event_id": "6590304",
+                "host_id": "10825",
+                "event_name": "High memory",
+            },
+        },
         source="alert",
         event_id="6590304",
     )
@@ -40,9 +45,12 @@ def test_export_has_all_sections_and_source_evidence_without_ui_toggle():
     )
     tasks.finish(
         task["task_id"],
-        {"answer": "Java 进程当前占用较高", "limitations": ["JVM 内部堆数据缺失"],
-         "target": {"host_id": "10825", "ip": "172.20.2.135"},
-         "budget": {"limits": {"rounds": 4}, "used": {"rounds": 2}}},
+        {
+            "answer": "Java 进程当前占用较高",
+            "limitations": ["JVM 内部堆数据缺失"],
+            "target": {"host_id": "10825", "ip": "172.20.2.135"},
+            "budget": {"limits": {"rounds": 4}, "used": {"rounds": 2}},
+        },
         {"available": True, "input": 500, "output": 100, "total": 600},
         duration_ms=57100,
     )
@@ -51,10 +59,25 @@ def test_export_has_all_sections_and_source_evidence_without_ui_toggle():
             "INSERT INTO model_interactions(task_id,round_number,model,status,"
             "duration_ms,token_input,token_output,token_total,payload) "
             "VALUES (?,?,?,?,?,?,?,?,?)",
-            (task["task_id"], 1, "gpt-test", "completed", 1230, 500, 100, 600,
-             tasks.encode({"request": {"instructions": {"text": "已应用只读 Skill"},
-                                      "input": {"text": "查询内存"}},
-                           "response": {"text": {"text": "诊断建议"}}})),
+            (
+                task["task_id"],
+                1,
+                "gpt-test",
+                "completed",
+                1230,
+                500,
+                100,
+                600,
+                tasks.encode(
+                    {
+                        "request": {
+                            "instructions": {"text": "已应用只读 Skill"},
+                            "input": {"text": "查询内存"},
+                        },
+                        "response": {"text": {"text": "诊断建议"}},
+                    }
+                ),
+            ),
         )
     response = client_for("ops_admin").get(
         f"/api/v1/platform/tasks/{task['task_id']}/detailed-report"
@@ -84,9 +107,12 @@ def test_export_has_all_sections_and_source_evidence_without_ui_toggle():
     ):
         assert key in text
     with main.connection() as db:
-        assert db.execute(
-            "SELECT COUNT(*) FROM audit WHERE action='detailed_report_export'"
-        ).fetchone()[0] == 1
+        assert (
+            db.execute(
+                "SELECT COUNT(*) FROM audit WHERE action='detailed_report_export'"
+            ).fetchone()[0]
+            == 1
+        )
 
 
 def test_detailed_export_permissions_and_missing_task():
@@ -99,13 +125,19 @@ def test_detailed_export_permissions_and_missing_task():
     assert client_for("auditor").get(url).status_code == 403
     assert client_for("ops_admin").get(url).status_code == 200
     assert client_for().get(url).status_code == 200
-    assert client_for().get(
-        "/api/v1/platform/tasks/non-existent/detailed-report"
-    ).status_code == 404
+    assert (
+        client_for()
+        .get("/api/v1/platform/tasks/non-existent/detailed-report")
+        .status_code
+        == 404
+    )
     with main.connection() as db:
-        assert db.execute(
-            "SELECT COUNT(*) FROM audit WHERE action='detailed_report_export'"
-        ).fetchone()[0] == 2
+        assert (
+            db.execute(
+                "SELECT COUNT(*) FROM audit WHERE action='detailed_report_export'"
+            ).fetchone()[0]
+            == 2
+        )
 
 
 def test_detailed_export_reads_beyond_paginated_200_evidence_and_100_model_rounds():
@@ -115,8 +147,15 @@ def test_detailed_export_reads_beyond_paginated_200_evidence_and_100_model_round
             "INSERT INTO diagnostic_evidence(task_id,trace_id,provider,tool,"
             "status,duration_ms,payload) VALUES (?,?,?,?,?,?,?)",
             [
-                (task["task_id"], task["trace_id"], "zabbix_mcp", "history_get",
-                 "success", 2, tasks.encode({"sequence": i}))
+                (
+                    task["task_id"],
+                    task["trace_id"],
+                    "zabbix_mcp",
+                    "history_get",
+                    "success",
+                    2,
+                    tasks.encode({"sequence": i}),
+                )
                 for i in range(205)
             ],
         )
@@ -125,15 +164,30 @@ def test_detailed_export_reads_beyond_paginated_200_evidence_and_100_model_round
             "duration_ms,token_input,token_output,token_total,payload) "
             "VALUES (?,?,?,?,?,?,?,?,?)",
             [
-                (task["task_id"], i, "test-model", "completed", 10, 1, 1, 2,
-                 tasks.encode({"request": {"text": f"request-{i}"},
-                               "response": {"text": f"reply-{i}"}}))
+                (
+                    task["task_id"],
+                    i,
+                    "test-model",
+                    "completed",
+                    10,
+                    1,
+                    1,
+                    2,
+                    tasks.encode(
+                        {
+                            "request": {"text": f"request-{i}"},
+                            "response": {"text": f"reply-{i}"},
+                        }
+                    ),
+                )
                 for i in range(1, 105)
             ],
         )
-    text = client_for().get(
-        f"/api/v1/platform/tasks/{task['task_id']}/detailed-report"
-    ).text
+    text = (
+        client_for()
+        .get(f"/api/v1/platform/tasks/{task['task_id']}/detailed-report")
+        .text
+    )
     assert "已保存证据记录：205" in text
     assert "已保存模型交互记录：104" in text
     assert text.count("### zabbix_mcp / history_get") == 205
@@ -150,7 +204,9 @@ def test_export_never_reveals_known_tokens_or_password_fields():
             ("openai_api_key", main.cipher().encrypt(b"ABCDEFG12345").decode()),
         )
     tasks.evidence(
-        task["task_id"], "ssh_mcp", "ssh_diagnose_logs",
+        task["task_id"],
+        "ssh_mcp",
+        "ssh_diagnose_logs",
         {"output": "raw output with ABCDEFG12345", "api_key": "inner-secret"},
     )
     response = client_for().get(
