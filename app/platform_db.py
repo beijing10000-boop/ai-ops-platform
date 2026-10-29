@@ -112,6 +112,16 @@ def migrate(db):
             "CREATE INDEX IF NOT EXISTS ix_model_interactions_task ON model_interactions(task_id,id)"
         )
         db.execute("INSERT INTO platform_migrations(version) VALUES (6)")
+    if not db.execute("SELECT 1 FROM platform_migrations WHERE version=7").fetchone():
+        # Content-addressed, encrypted copies of text repeated across tasks and
+        # rounds (Skill bundles, system instructions); rows reference the digest.
+        db.execute("""CREATE TABLE IF NOT EXISTS shared_blobs(
+            digest TEXT PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS maintenance(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        db.execute("INSERT INTO platform_migrations(version) VALUES (7)")
 
 
 def row_dict(row, cur):

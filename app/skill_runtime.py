@@ -464,11 +464,19 @@ async def run(
                                             )
                                         }
                                     outcome = clean(outcome)
+                                    records = outcome.get("records")
                                     tasks.evidence(
                                         task_id,
                                         str(provider)[:40],
                                         str(native)[:100],
-                                        outcome,
+                                        # Zabbix `data` is the same rows as text.
+                                        {
+                                            k: v
+                                            for k, v in outcome.items()
+                                            if k != "data"
+                                        }
+                                        if isinstance(records, list) and records
+                                        else outcome,
                                         int((time.monotonic() - started) * 1000),
                                     )
                                     cache[signature] = outcome

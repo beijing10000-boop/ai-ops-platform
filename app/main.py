@@ -59,8 +59,11 @@ ALLOWED |= {
     "ssh_mcp_timeout_seconds",
     "disabled_tools",
     "zabbix_frontend_url",
+    "data_retention_days",
 }
 DEFAULTS = {
+    # 0 keeps every evidence and model-round detail; opt in to deletion.
+    "data_retention_days": "0",
     "ai_min_severity": "4",
     "feishu_enabled": "false",
     "web_protocol": "http",

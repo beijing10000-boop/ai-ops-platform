@@ -121,14 +121,23 @@ def build_detailed_report(task_id, *, task=None):
                 (task_id,),
             ).fetchall()
         ]
-    for row in evidence:
-        row["payload"] = decode(row["payload"])
-    for row in interactions:
-        row["payload"] = decode(row["payload"])
+        for row in evidence:
+            row["payload"] = decode(row["payload"])
+        # Rounds reference shared system instructions; print each text once.
+        instructions = {}
+        for row in interactions:
+            row["payload"] = decode(row["payload"])
+            shared = ((row["payload"] or {}).get("request") or {}).get("instructions")
+            if isinstance(shared, dict) and shared.get("blob") not in (
+                None,
+                *instructions,
+            ):
+                instructions[shared["blob"]] = tasks.load_blob(db, shared["blob"])
 
     task = _scrub(task, secrets)
     evidence = _scrub(evidence, secrets)
     interactions = _scrub(interactions, secrets)
+    instructions = _scrub(instructions, secrets)
 
     report = task.get("report") or {}
     request = task.get("request") or {}
@@ -194,22 +203,43 @@ def build_detailed_report(task_id, *, task=None):
     ]
     if skills:
         for index, skill in enumerate(skills, start=1):
+            # `instructions` is the SKILL.md body already present under `files`.
+            shown = (
+                {k: v for k, v in skill.items() if k != "instructions"}
+                if isinstance(skill, dict) and "SKILL.md" in (skill.get("files") or {})
+                else skill
+            )
             parts.extend(
                 [
                     f"### Skill {index}",
                     "",
-                    _json_block(skill),
+                    _json_block(shown),
                     "",
                 ]
             )
     else:
         parts.extend(["本任务未保存 Skill 快照，可能使用兼容诊断流程。", ""])
+    snapshot = {
+        **task,
+        "request": {
+            **request,
+            "skills": [
+                {
+                    key: skill.get(key)
+                    for key in ("name", "revision", "digest")
+                    if isinstance(skill, dict)
+                }
+                | {"note": "完整内容见第 5 节"}
+                for skill in skills
+            ],
+        },
+    }
 
     parts.extend(
         [
             "## 6. 原始任务元数据和请求快照",
             "",
-            _json_block(task),
+            _json_block(snapshot),
             "",
             "## 7. 诊断时间线",
             "",
@@ -235,7 +265,17 @@ def build_detailed_report(task_id, *, task=None):
     if not interactions:
         parts.extend(
             [
-                "未保存交互记录。v0.9.6 以前的任务不会补录，或本任务未发起模型请求。",
+                "未保存交互记录。v0.9.6 以前的任务不会补录，本任务未发起模型请求，"
+                "或交互明细已按保留天数清理。",
+                "",
+            ]
+        )
+    for number, (digest, text) in enumerate(instructions.items(), start=1):
+        parts.extend(
+            [
+                f"### 系统指令 {number}（各轮引用 blob {digest[:12]}，只列一次）",
+                "",
+                _json_block({"blob": digest, "text": text}),
                 "",
             ]
         )
@@ -254,7 +294,14 @@ def build_detailed_report(task_id, *, task=None):
         )
     parts.extend(["## 9. MCP 工具执行记录和完整已保存证据", ""])
     if not evidence:
-        parts.extend(["未采集到 MCP 证据。", ""])
+        parts.extend(
+            [
+                "证据明细已按保留天数清理；任务结论与统计仍保留。"
+                if task.get("tools")
+                else "未采集到 MCP 证据。",
+                "",
+            ]
+        )
     for item in evidence:
         parts.extend(
             [

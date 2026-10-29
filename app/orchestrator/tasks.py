@@ -1,9 +1,13 @@
 """Durable task state and encrypted reports. RQ is the execution transport."""
 
+import hashlib
 import json
+import logging
 import sqlite3
 import uuid
 from ..platform_db import row_dict
+
+log = logging.getLogger(__name__)
 
 
 class Cancelled(RuntimeError):
@@ -56,6 +60,55 @@ def decode(value):
     return json.loads(cipher().decrypt(value.encode()).decode()) if value else None
 
 
+def store_blob(db, kind, value):
+    """Keep one encrypted copy of repeated content; rows store the digest."""
+    text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    db.execute(
+        "INSERT OR IGNORE INTO shared_blobs(digest,kind,payload) VALUES (?,?,?)",
+        (digest, kind, encode(value)),
+    )
+    return digest
+
+
+def load_blob(db, digest):
+    row = db.execute(
+        "SELECT payload FROM shared_blobs WHERE digest=?", (digest,)
+    ).fetchone()
+    return decode(row[0]) if row else None
+
+
+def _hydrate_request(db, request):
+    """Expand Skill references; requests saved before v1.0 are inline already."""
+    skills = (request or {}).get("skills")
+    if not isinstance(skills, list):
+        return request
+    return {
+        **request,
+        "skills": [
+            (load_blob(db, row["blob"]) or row)
+            if isinstance(row, dict) and "blob" in row
+            else row
+            for row in skills
+        ],
+    }
+
+
+def hydrate_interaction(db, payload):
+    """Expand the shared system instructions of one stored model round."""
+    instructions = ((payload or {}).get("request") or {}).get("instructions")
+    if not isinstance(instructions, dict) or "blob" not in instructions:
+        return payload
+    text = load_blob(db, instructions["blob"])
+    return {
+        **payload,
+        "request": {
+            **payload["request"],
+            "instructions": {**instructions, "text": text if text is not None else ""},
+        },
+    }
+
+
 def create(
     request,
     *,
@@ -73,13 +126,16 @@ def create(
 
     task_id = uuid.uuid4().hex
     trace_id = uuid.uuid4().hex
-    request = {
-        **request,
-        "limits": profile_limits(profile, read_setting),
-        "skills": snapshot(request, source),
-    }
+    limits = profile_limits(profile, read_setting)
+    skills = snapshot(request, source)
     duplicate_id = None
     with connection() as db:
+        # Every task keeps its exact Skill versions, stored once per content.
+        request = {
+            **request,
+            "limits": limits,
+            "skills": [{"blob": store_blob(db, "skill", row)} for row in skills],
+        }
         try:
             db.execute(
                 "INSERT INTO diagnostic_tasks(task_id,trace_id,kind,source,actor,event_id,asset_id,diagnostic_type,profile,request) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -118,11 +174,11 @@ def get(task_id, private=False):
         recover_stalled(db)
         cur = db.execute("SELECT * FROM diagnostic_tasks WHERE task_id=?", (task_id,))
         result = row_dict(cur.fetchone(), cur)
-    if result:
-        result["report"] = decode(result["report"])
-        raw = result.pop("request")
-        if private:
-            result["request"] = decode(raw)
+        if result:
+            result["report"] = decode(result["report"])
+            raw = result.pop("request")
+            if private:
+                result["request"] = _hydrate_request(db, decode(raw))
     return result
 
 
@@ -243,10 +299,10 @@ def model_interaction_page(task_id, *, include_content=False):
             (task_id,),
         )
         rows = [row_dict(row, cur) for row in cur.fetchall()]
-    for row in rows:
-        encrypted = row.pop("payload")
-        if include_content:
-            row["payload"] = decode(encrypted)
+        for row in rows:
+            encrypted = row.pop("payload")
+            if include_content:
+                row["payload"] = hydrate_interaction(db, decode(encrypted))
     return rows
 
 
@@ -271,6 +327,56 @@ def finish(
                 task_id,
             ),
         )
+    try:
+        purge_expired()
+    except Exception:
+        # Retention is housekeeping; it must never fail the task being finished.
+        log.exception("DATA_RETENTION_PURGE_FAILED")
+
+
+def purge_expired():
+    """Delete evidence and model-round details of tasks finished more than
+    `data_retention_days` ago. Task rows, conclusions and Token totals stay.
+    Runs at most once a day across all workers; 0 days keeps everything."""
+    from ..main import connection, read_setting
+
+    try:
+        days = int(read_setting("data_retention_days") or "0")
+    except ValueError:
+        return None
+    if days <= 0:
+        return None
+    with connection() as db:
+        claimed = db.execute(
+            "INSERT INTO maintenance(key,value) VALUES ('retention_last_run',datetime('now')) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value "
+            "WHERE maintenance.value <= datetime('now','-1 day')"
+        ).rowcount
+        if not claimed:
+            return None
+        expired = (
+            "SELECT task_id FROM diagnostic_tasks WHERE status NOT IN ('queued','running') "
+            "AND completed_at < datetime('now', ?)"
+        )
+        cutoff = "-" + str(days) + " days"
+        counts = {
+            "evidence": db.execute(
+                "DELETE FROM diagnostic_evidence WHERE task_id IN (" + expired + ")",
+                (cutoff,),
+            ).rowcount,
+            "interactions": db.execute(
+                "DELETE FROM model_interactions WHERE task_id IN (" + expired + ")",
+                (cutoff,),
+            ).rowcount,
+        }
+        db.execute(
+            "INSERT INTO audit(action,key) VALUES (?,?)",
+            (
+                "data_retention_purge",
+                f"days={days} evidence={counts['evidence']} interactions={counts['interactions']}",
+            ),
+        )
+    return counts
 
 
 def page(page=1, page_size=25, status="all", query=""):
