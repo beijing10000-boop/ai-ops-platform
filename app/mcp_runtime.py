@@ -15,7 +15,6 @@ from .ai_reliability import (
     evidence_fallback,
     model_failure_code,
     model_failure_message,
-    request_response,
 )
 from .main import read_setting
 from .integrations import zabbix, ssh_mcp
