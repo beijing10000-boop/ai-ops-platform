@@ -288,6 +288,12 @@ async def run(
     conversation = []
     cached_tokens = 0
     totals, telemetry = {"input": 0, "output": 0, "total": 0}, []
+
+    def billed():
+        """Tokens that count against the budget: prompt-cache hits are nearly
+        free and only mean the same context was sent again."""
+        return totals["total"] - cached_tokens
+
     complete, calls, rounds = True, 0, 0
     gaps, reasons = [], []
     # Budget limits that shaped the run; reported, but not diagnostic gaps.
@@ -622,9 +628,9 @@ async def run(
 
     def budget():
         hit = list(limits_hit)
-        if complete and totals["total"] > limits["tokens"]:
+        if complete and billed() > limits["tokens"]:
             hit.append(
-                f"Token 用量 {totals['total']} 超过预算 {limits['tokens']}"
+                f"Token 用量 {billed()} 超过预算 {limits['tokens']}"
                 "（总结轮仍需发送完整上下文）"
             )
         return {
@@ -705,7 +711,7 @@ async def run(
                 )
                 for number in range(limits["rounds"]):
                     check()
-                    if totals["total"] >= limits["tokens"]:
+                    if billed() >= limits["tokens"]:
                         reasons.append("模型实际 Token 达到停止阈值，停止后续请求")
                         break
                     # One more collection round plus the summary must both fit.
@@ -737,8 +743,8 @@ async def run(
                                     f"采集次数 {calls}/{limits['calls']} 接近上限，本轮只总结",
                                 ),
                                 (
-                                    totals["total"] >= int(limits["tokens"] * 0.8),
-                                    f"Token 用量 {totals['total']} 达到预算 80%，本轮只总结",
+                                    billed() >= int(limits["tokens"] * 0.8),
+                                    f"Token 用量 {billed()} 达到预算 80%，本轮只总结",
                                 ),
                                 (
                                     remaining < max(30.0, 2 * longest),
@@ -781,7 +787,7 @@ async def run(
                         tools=tools,
                         **({"tool_choice": "none"} if final else {}),
                         max_output_tokens=min(
-                            6000, max(1, limits["tokens"] - totals["total"])
+                            6000, max(1, limits["tokens"] - billed())
                         ),
                     )
                     rounds += 1
@@ -811,7 +817,10 @@ async def run(
                     requested = [
                         item for item in output if item.type == "function_call"
                     ]
-                    if not requested:
+                    # The summary round asked for no tools; a gateway that lets
+                    # the model try anyway (and answers "tool does not exist")
+                    # still ends with the message, which is the answer.
+                    if final or not requested:
                         answer = safe((response.output_text or "").strip())
                         break
                     for index, call in enumerate(requested):
@@ -824,7 +833,7 @@ async def run(
                             if (
                                 final
                                 or index >= limits["per_round"]
-                                or totals["total"] >= limits["tokens"]
+                                or billed() >= limits["tokens"]
                             ):
                                 raise ValueError("本轮预算不足，未调用工具")
                             if call.name == "read_skill_resource":

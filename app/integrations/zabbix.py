@@ -100,7 +100,16 @@ PARAMS = {
     "history_get": {"itemids", "hostids", "history", "time_from", "time_till"},
     "trend_get": {"itemids", "time_from", "time_till"},
 }
-SORT_FIELDS = {"problem_get": ["eventid"]}
+# Only what each Zabbix *.get accepts as sortfield; a field we return is not
+# necessarily sortable (item.get: no lastclock/lastvalue, event.get: no value).
+SORT_FIELDS = {
+    "hostinterface_get": ["interfaceid", "dns", "ip"],
+    "event_get": ["eventid", "objectid", "clock"],
+    "problem_get": ["eventid"],
+    "trigger_get": ["triggerid", "description", "priority", "lastchange"],
+    "item_get": ["itemid", "name", "key_"],
+    "history_get": ["itemid", "clock"],
+}
 # Zabbix trend.get takes no sort parameters; initMAX rejects them instead of ignoring.
 UNSORTED = frozenset({"trend_get"})
 HISTORY_WINDOW, TREND_WINDOW = 86400, 31 * 86400
