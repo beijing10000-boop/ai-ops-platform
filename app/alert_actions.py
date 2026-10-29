@@ -143,12 +143,15 @@ def handle_analyze_action(value, operator_open_id, message_id=None, chat_id=None
     # The queued task is created before the job; the active-task index then
     # refuses repeated clicks for as long as the job waits or runs.
     try:
+        # The clicking user is the actor, so manual runs stay outside the
+        # daily budget for automatic analysis.
         _, created = enqueue_analysis(
             queues.ALERT_MANUAL,
             "app.worker.process_manual_analysis",
             event,
             message_id,
             chat_id,
+            actor=operator_open_id,
         )
     except Exception:
         log.exception("MANUAL_ANALYSIS_ENQUEUE_FAILED")

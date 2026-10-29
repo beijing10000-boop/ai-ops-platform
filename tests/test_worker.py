@@ -59,7 +59,7 @@ def test_alert_notifies_then_queues_analysis_without_running_the_model(monkeypat
     async def analyze(event, task_id=None):
         raise AssertionError("the notification job must not wait for the model")
 
-    def enqueue(queue_name, func, event, *args):
+    def enqueue(queue_name, func, event, *args, **kwargs):
         queued.append((queue_name, func, event["event_id"]))
         return {"task_id": "task-" + event["event_id"]}, True
 
@@ -99,7 +99,7 @@ def test_queue_failure_does_not_block_initial_alert(monkeypatch):
     async def notify(card, event=None, **kwargs):
         sent.append(card)
 
-    def down(*args):
+    def down(*args, **kwargs):
         raise ConnectionError("redis offline")
 
     monkeypatch.setattr(

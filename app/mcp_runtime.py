@@ -116,7 +116,7 @@ def format_usage(usage, *, duration_ms=None):
     )
 
 
-def create_task(question, event=None, profile_name=None):
+def create_task(question, event=None, profile_name=None, actor="system"):
     """Create the queued task run() would create, so a queue can hold it first."""
     event = event or {}
     try:
@@ -126,6 +126,7 @@ def create_task(question, event=None, profile_name=None):
     return tasks.create(
         {"event": event, "question": question[:4000]},
         source="alert" if event else "qa",
+        actor=actor,
         event_id=str(event["event_id"]) if event.get("event_id") else None,
         diagnostic_type="disk"
         if directory

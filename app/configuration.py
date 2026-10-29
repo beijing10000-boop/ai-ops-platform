@@ -10,6 +10,12 @@ INTEGER_SETTINGS = {
         3650,
         "诊断明细保留天数须为 0–3650 的整数，0 表示永久保留",
     ),
+    "ai_alert_reuse_hours": (0, 72, "复用近期分析的时长须为 0–72 小时，0 表示关闭"),
+    "ai_daily_token_limit": (
+        0,
+        1_000_000_000,
+        "自动分析每日 Token 上限须为非负整数，0 表示不限",
+    ),
 }
 
 
@@ -77,6 +83,14 @@ def validate_form(values, read):
         str(i) for i in range(6)
     }:
         raise HTTPException(422, "告警最低级别必须为 0–5")
+    if values.get("ai_quick_severity_max") not in (None, "", "1", "2", "3", "4"):
+        raise HTTPException(422, "快速分析的告警级别上限无效")
+    if values.get("ai_quick_host_groups"):
+        words = [w.strip() for w in values["ai_quick_host_groups"].split(",")]
+        if len(words) > 20 or any(not w or len(w) > 64 for w in words):
+            raise HTTPException(
+                422, "主机组关键字最多 20 个，每个 1–64 字，以英文逗号分隔"
+            )
     for key, (low, high, message) in INTEGER_SETTINGS.items():
         raw = values.get(key)
         if raw is not None and not (
