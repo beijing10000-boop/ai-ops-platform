@@ -40,6 +40,8 @@ RANGES = {
 
 
 def validate_settings(values):
+    if values.get("ai_thinking", "") not in ("", "off", "low", "high"):
+        raise HTTPException(422, "深度思考设置只能是 模型默认、关闭、低 或 高")
     try:
         if "ai_request_timeout_seconds" in values:
             raw = values["ai_request_timeout_seconds"]

@@ -104,7 +104,6 @@ async def analyze(event, task_id=None):
         data["_report_answer"] = (task.get("report") or {}).get("answer")
         data["_limitations"] = (task.get("report") or {}).get("limitations", [])
         data["_duration_ms"] = task.get("duration_ms")
-        data["_timing"] = (task.get("report") or {}).get("timing")
     return data
 
 
@@ -632,7 +631,6 @@ def make_card(event, info=None, *, analysis=False, mute_info=None):
                         + format_usage(
                             info.get("_token_usage"),
                             duration_ms=info.get("_duration_ms"),
-                            timing=info.get("_timing"),
                         ),
                     }
                 ],
@@ -1069,9 +1067,7 @@ async def analyze_on_demand(event, message_id, chat_id=None, task_id=None):
         from .mcp_runtime import format_usage
 
         card += "\n\n---\n" + format_usage(
-            result.get("_token_usage"),
-            duration_ms=result.get("_duration_ms"),
-            timing=result.get("_timing"),
+            result.get("_token_usage"), duration_ms=result.get("_duration_ms")
         )
         if progress_id:
             try:

@@ -1,10 +1,9 @@
 # 更新记录
 
-## 1.0.9 — 2026-10-29
+## 1.1.0 — 2026-10-29
 
-- 各阶段耗时：报告新增 `timing`（预采集、模型各轮、模型自行发起的工具调用），飞书卡片页脚的“执行耗时”后面附上“（预采集 x 秒 · 模型 n 轮 y 秒 · 工具 z 秒）”，网页任务页的分析预算表新增“阶段耗时”一行（含最长一轮）。模型某一轮异常慢时一眼能看出来。
-- 磁盘读写延迟类告警（“Disk read/write request responses are too high”“Disk I/O is overloaded”等）此前被归为 bottleneck、按 CPU 预采集；分类词补充 disk read / disk write / read/write / i/o / await / iops / queue length / vfs.dev / 磁盘读写 / 响应时间，现在归为 io，预采集 vfs.dev 监控项与 iowait。
-- platform-base 的 CPU、内存、磁盘、IO、网络规则预载 item_get 参数结构，模型想补查监控项时不必先取工具目录（版本号 +1）。
+- AI 配置新增“深度思考”：模型默认 / 关闭 / 低 / 高。百炼上的 DeepSeek V4.1、Qwen3 等混合思考模型默认开启思考，每轮要先“想”十几到几十秒，输出 Token 大半是思考内容；选“关闭”后平台在每次模型请求里发送 `reasoning.effort=none`（并附 `enable_thinking=false`），“低 / 高”发送对应档位。“验证模型连接”使用同样的参数，可先确认网关和模型接受。只对新任务生效；不支持该参数的模型或网关请保持“模型默认”。
+- 撤回 v1.0.9（阶段耗时显示、磁盘延迟告警归为 io、预载 item_get 结构），这些改动未发布。
 
 ## 1.0.8 — 2026-10-29
 

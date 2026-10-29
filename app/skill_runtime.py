@@ -13,6 +13,7 @@ from .ai_reliability import (
     evidence_fallback,
     model_failure_code,
     model_failure_message,
+    thinking_params,
 )
 from .orchestrator import tasks
 from .skill_mcp import SkillMCP
@@ -288,8 +289,6 @@ async def run(
     conversation = []
     cached_tokens = 0
     totals, telemetry = {"input": 0, "output": 0, "total": 0}, []
-    # Wall time of the prefetch stage, and of every MCP call (prefetch included).
-    prefetch_seconds, prefetch_tool_seconds, tool_seconds = 0.0, 0.0, 0.0
 
     def billed():
         """Tokens that count against the budget: prompt-cache hits are nearly
@@ -386,7 +385,7 @@ async def run(
 
     async def execute(provider, native, arguments, rows=None):
         """One MCP tool call: counted, recorded as evidence, errors kept as data."""
-        nonlocal calls, tool_seconds
+        nonlocal calls
         calls += 1
         started = time.monotonic()
         try:
@@ -402,7 +401,6 @@ async def run(
                     else type(exc).__name__
                 )
             }
-        tool_seconds += time.monotonic() - started
         outcome = clean(outcome)
         return outcome, record(provider, native, outcome, started, arguments)
 
@@ -656,17 +654,6 @@ async def run(
             "limits_hit": hit,
         }
 
-    def timing():
-        """Where the seconds went: the prefetch stage, each model round, the
-        MCP calls the model itself made."""
-        per_round = [item["seconds"] for item in telemetry if item["kind"] == "round"]
-        return {
-            "prefetch": round(prefetch_seconds, 1),
-            "model": round(sum(per_round), 1),
-            "tools": round(tool_seconds - prefetch_tool_seconds, 1),
-            "rounds": per_round,
-        }
-
     def report():
         spent = budget()
         citations = check_citations(answer, evidence_index)
@@ -698,7 +685,6 @@ async def run(
             "limitations": list(dict.fromkeys(gaps + reasons)),
             "budget": spent,
             "budget_exhausted": spent["exhausted"],
-            "timing": timing(),
             "model_error": failure_code,
         }
 
@@ -723,10 +709,7 @@ async def run(
                 )
             async with asyncio.timeout(max(0.1, deadline - time.monotonic())):
                 tasks.stage(task_id, "skill_prefetch")
-                fetching = time.monotonic()
                 opening.update(await prefetch())
-                prefetch_seconds = time.monotonic() - fetching
-                prefetch_tool_seconds = tool_seconds
                 conversation.append(
                     {
                         "role": "user",
@@ -810,6 +793,7 @@ async def run(
                         input=conversation,
                         tools=tools,
                         **({"tool_choice": "none"} if final else {}),
+                        **thinking_params(read_setting),
                         max_output_tokens=min(
                             6000, max(1, limits["tokens"] - billed())
                         ),
