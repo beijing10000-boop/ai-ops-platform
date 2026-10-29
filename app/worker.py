@@ -86,6 +86,7 @@ async def analyze(event, task_id=None):
             "analysis": raw,
             "human_required": True,
             "host_groups": "未查到",
+            "_unstructured": True,
         }
     from .mcp_runtime import numbered
 
@@ -288,6 +289,62 @@ def analysis_summary(info):
     from .report_presentation import human_metrics
 
     return human_metrics(body)
+
+
+EVIDENCE_REF = re.compile(
+    r"\s*[（(]\s*E\d{1,3}(?:\s*[、,，/–\-和及与]\s*E\d{1,3})*\s*[)）]"
+    r"|(?<![A-Za-z0-9])E\d{1,3}(?![A-Za-z0-9\-])"
+)
+
+
+def without_evidence_ids(text):
+    """Evidence numbers only mean something next to the Web report's evidence list."""
+    text = EVIDENCE_REF.sub("", str(text or ""))
+    text = re.sub(r"[ \t]+(?=[，。；：、）)])", "", text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
+def card_summary(info):
+    """Feishu card body: the conclusion and what to do, plus status when not clean.
+
+    Analysis, scope, citations and limitations stay on the Web report the card
+    links to; the conversation context keeps the full analysis_summary().
+    """
+    from .mcp_runtime import numbered
+    from .report_presentation import human_metrics
+
+    status = info.get("_diagnostic_status")
+    lines = []
+    if status in ("partial", "failed"):
+        lines.append("**诊断状态**  " + ("部分完成" if status == "partial" else "失败"))
+    if info.get("_unstructured"):
+        # No structured answer (model error fallback, plain text): its first
+        # line carries the reason; the collected evidence is on the Web report.
+        first = str(info.get("analysis") or "").strip().split("\n", 1)[0]
+        lines += [
+            "**诊断结论**",
+            first or "模型未给出结论。",
+            "",
+            "**处理建议**",
+            "请打开完整诊断报告核验已采集的证据，必要时重新发起分析。",
+        ]
+    else:
+        cause = without_evidence_ids(numbered(info.get("cause")))
+        if len(cause) > 600:
+            cause = cause[:600].rstrip() + "……（全文见完整诊断报告）"
+        actions = [
+            line.strip()
+            for line in without_evidence_ids(numbered(info.get("action"))).split("\n")
+            if line.strip()
+        ]
+        if len(actions) > 6:
+            actions = actions[:6] + ["其余建议见完整诊断报告。"]
+        lines += ["**诊断结论**", cause or "未知", ""]
+        lines.append(
+            "**处理建议**" + ("（需人工处理）" if info.get("human_required") else "")
+        )
+        lines += actions or ["无"]
+    return human_metrics("\n".join(lines))
 
 
 def valid_macro(value):
@@ -503,7 +560,7 @@ def make_card(event, info=None, *, analysis=False, mute_info=None):
         elements.append(
             {
                 "tag": "div",
-                "text": {"tag": "lark_md", "content": analysis_summary(info)},
+                "text": {"tag": "lark_md", "content": card_summary(info)},
             }
         )
         detail_url = report_url(info)
@@ -964,23 +1021,26 @@ async def analyze_on_demand(event, message_id, chat_id=None, task_id=None):
     try:
         result = await analyze(event, task_id)
         store_alert_usage(event, result.get("_token_usage"))
+        # The card shows the conclusion and actions; the full summary is kept
+        # as conversation context so follow-up questions see the analysis.
         detail = analysis_summary(result)
+        card = card_summary(result)
         detail_url = report_url(result)
         if detail_url:
-            detail += "\n\n[查看完整诊断报告](" + detail_url + ")"
+            card += "\n\n[查看完整诊断报告](" + detail_url + ")"
         from .mcp_runtime import format_usage
 
-        detail += "\n\n---\n" + format_usage(
+        card += "\n\n---\n" + format_usage(
             result.get("_token_usage"), duration_ms=result.get("_duration_ms")
         )
         if progress_id:
             try:
-                await update_card(progress_id, "AI 分析结果", detail)
+                await update_card(progress_id, "AI 分析结果", card)
             except Exception:
                 log.exception("ALERT_AI_CARD_UPDATE_FAILED event_id=%s", event_id)
-                progress_id = await reply_card(message_id, "AI 分析结果", detail)
+                progress_id = await reply_card(message_id, "AI 分析结果", card)
         else:
-            progress_id = await reply_card(message_id, "AI 分析结果", detail)
+            progress_id = await reply_card(message_id, "AI 分析结果", card)
         try:
             # A Feishu GET /im/v1/messages/{id} may return 400 even when
             # reply and PATCH succeed. Use the verified delivery link instead.
