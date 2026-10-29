@@ -44,7 +44,7 @@ else:
         assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert (
             db.execute("SELECT MAX(version) FROM platform_migrations").fetchone()[0]
-            == 5
+            == 6
         )
         db.execute("DELETE FROM settings WHERE key=?", (key,))
         db.execute("DELETE FROM platform_skills WHERE id=?", (row["id"],))
