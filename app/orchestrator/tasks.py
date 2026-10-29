@@ -225,7 +225,7 @@ def evidence(task_id, provider, tool, payload, duration_ms=0):
         else payload.get("status", "success")
     )
     with connection() as db:
-        db.execute(
+        row = db.execute(
             "INSERT INTO diagnostic_evidence(task_id,trace_id,provider,tool,status,duration_ms,payload) VALUES (?,?,?,?,?,?,?)",
             (
                 task_id,
@@ -240,6 +240,7 @@ def evidence(task_id, provider, tool, payload, duration_ms=0):
         db.execute(
             "UPDATE diagnostic_tasks SET tools=tools+1 WHERE task_id=?", (task_id,)
         )
+    return row.lastrowid
 
 
 def evidence_page(task_id, include_logs=False):

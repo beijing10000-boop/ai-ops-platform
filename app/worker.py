@@ -19,6 +19,9 @@ ALERT_OUTPUT_CONTRACT = (
     "host_groups,cause,action,analysis,human_required 字段。"
     "将完整中文结论、建议和证据分别填入 cause、action、analysis；"
     "无证据时明确写未知，不能编造事实。"
+    "另加 evidence 数组列出支撑结论的证据，每项为 "
+    '{"id":"E2","quote":"从该证据原样摘录的关键数值或原文"}；'
+    "平台会核对 quote 是否真的出现在对应证据中，并据此评定可信度。"
 )
 COLORS = {
     "0": "grey",

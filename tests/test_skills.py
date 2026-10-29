@@ -1312,6 +1312,120 @@ def test_prefetch_notes_unresolved_ssh_target_without_marking_a_gap(rig):
     assert tasks.get(usage["task_id"])["status"] == "success"
 
 
+def test_prefetched_evidence_is_numbered_and_alert_citations_are_checked(rig):
+    session, _ = rig
+    session.tools.append(
+        remote_tool("ssh_resolve_host", {"zabbix_hostid": {"type": "string"}})
+    )
+    original = session.call_tool
+
+    async def call_tool(name, args):
+        if name == "ssh_resolve_host":
+            session.calls.append((name, args))
+            return SimpleNamespace(
+                structuredContent={
+                    "status": "success",
+                    "host_id": 7,
+                    "address": "198.51.100.21",
+                    "revision": 3,
+                    "name": "linux-live",
+                    "zabbix_hostid": "10913",
+                },
+                content=[],
+                isError=False,
+            )
+        return await original(name, args)
+
+    session.call_tool = call_tool
+    client_for().post(P, json=upload(PREFETCH, enabled=True, providers=["ssh_mcp"]))
+    event = {"event_id": "770102", "event_name": "Load high", "host_id": "10913"}
+    answer = {
+        "cause": "负载偏高",
+        "evidence": [
+            {"id": "E2", "quote": "load 0.5"},
+            {"id": "E2", "quote": "load 9.5"},
+            {"id": "E7", "quote": "不存在"},
+        ],
+    }
+    create = AsyncMock(return_value=response(text=json.dumps(answer)))
+    _, usage = asyncio.run(
+        mcp_runtime.run(
+            "JSON",
+            json.dumps({"alert": event}, ensure_ascii=False),
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            event=event,
+            return_usage=True,
+        )
+    )
+    sent = json.loads(create.call_args_list[0].kwargs["input"][0]["content"])
+    assert sent["verified_ssh_target"]["evidence_id"] == "E1"
+    assert sent["prefetched"][0]["result"]["evidence_id"] == "E2"
+    report = tasks.get(usage["task_id"])["report"]
+    citations = report["citations"]
+    assert [item["quote"] for item in citations["valid"]] == ["load 0.5"]
+    assert [item["id"] for item in citations["invalid"]] == ["E2", "E7"]
+    assert citations["confidence"] == "中"
+    assert "证据核对\n依据可信度：中" in report["answer"]
+    # Evidence ids map to the stored evidence rows shown on the task page.
+    rows = {
+        str(row["id"]): row["tool"] for row in tasks.evidence_page(usage["task_id"])
+    }
+    assert {rows[row]: ident for row, ident in report["evidence_ids"].items()} == {
+        "ssh_resolve_host": "E1",
+        "ssh_diagnose_cpu": "E2",
+    }
+
+
+def test_model_calls_get_evidence_ids_and_cache_hits_keep_theirs(rig):
+    install(providers=["ssh_mcp"])
+    cpu = Call(
+        "call_mcp_tool",
+        {
+            "provider": "ssh_mcp",
+            "name": "ssh_diagnose_cpu",
+            "arguments": {"host_id": 7},
+        },
+    )
+    create = AsyncMock(
+        side_effect=[
+            response(Call("list_mcp_tools", {"provider": "ssh_mcp"})),
+            response(
+                Call(
+                    "call_mcp_tool",
+                    {
+                        "provider": "ssh_mcp",
+                        "name": "ssh_resolve_target",
+                        "arguments": {"address": "198.51.100.21"},
+                    },
+                )
+            ),
+            response(cpu, cpu),
+            response(text="CPU 负载 0.5（E2），目标见 E1，另见 E9。"),
+        ]
+    )
+    _, usage = asyncio.run(
+        mcp_runtime.run(
+            "中文报告",
+            "查询 198.51.100.21 现在 CPU",
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            return_usage=True,
+        )
+    )
+    conversation = create.call_args_list[-1].kwargs["input"]
+    ids = [
+        json.loads(item["output"]).get("evidence_id")
+        for item in conversation
+        if item.get("type") == "function_call_output"
+    ]
+    # Catalogs are not evidence; the repeated call reuses E2.
+    assert ids == [None, "E1", "E2", "E2"]
+    report = tasks.get(usage["task_id"])["report"]
+    assert report["citations"]["method"] == "reference"
+    assert [item["id"] for item in report["citations"]["valid"]] == ["E2", "E1"]
+    assert report["citations"]["invalid"][0]["id"] == "E9"
+    assert "- E2 SSH MCP / ssh_diagnose_cpu" in report["answer"]
+
+
 def test_zabbix_schemas_are_compact_but_validation_is_unchanged():
     schema = zabbix.input_schema("item_get")
     assert len(json.dumps(schema, ensure_ascii=False)) < 2000

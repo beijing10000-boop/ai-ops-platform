@@ -146,6 +146,77 @@ def model_view(provider, tool, outcome, max_chars=None):
     return result
 
 
+def derive_signals(collected):
+    """Deterministic cross-checks over prefetched evidence for the model.
+
+    `collected` holds (provider, tool, raw outcome, evidence id). Uses the raw
+    outcome, not the size-limited view, so trimmed rows still count.
+    """
+    signals, latest = [], {}
+    for provider, tool, outcome, evidence_id in collected:
+        if not isinstance(outcome, dict):
+            continue
+        if tool == "item_get":
+            for row in outcome.get("records") or []:
+                if isinstance(row, dict) and row.get("key_"):
+                    latest[row["key_"]] = (row.get("lastvalue"), evidence_id)
+        elif provider == "ssh_mcp" and isinstance(outcome.get("data"), dict):
+            for finding in outcome["data"].get("findings") or []:
+                if isinstance(finding, dict) and finding.get("level") in {
+                    "warning",
+                    "critical",
+                }:
+                    signals.append(
+                        {
+                            "source": "ssh_mcp",
+                            "evidence_id": evidence_id,
+                            **{
+                                key: finding.get(key)
+                                for key in (
+                                    "level",
+                                    "metric",
+                                    "value",
+                                    "threshold",
+                                    "hint",
+                                )
+                            },
+                        }
+                    )
+
+    def number(key):
+        try:
+            return float(latest[key][0])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    load5, cores, util = (
+        number("system.cpu.load[all,avg5]"),
+        number("system.cpu.num"),
+        number("system.cpu.util"),
+    )
+    if (
+        load5 is not None
+        and cores
+        and util is not None
+        and load5 / cores >= 1.5
+        and util < 50
+    ):
+        signals.append(
+            {
+                "source": "zabbix_mcp",
+                "evidence_id": latest["system.cpu.util"][1],
+                "level": "warning",
+                "metric": "load_cpu_divergence",
+                "value": {
+                    "load_per_core_5m": round(load5 / cores, 2),
+                    "cpu_util_percent": round(util, 2),
+                },
+                "hint": "Zabbix 最新值：每核 5 分钟负载偏高但 CPU 利用率不高，负载可能来自 D 状态任务或宿主机 CPU 争抢，而不是计算繁忙",
+            }
+        )
+    return signals[:10]
+
+
 def model_alert(event):
     """Alert fields for the model without unexpanded Zabbix macros.
 
