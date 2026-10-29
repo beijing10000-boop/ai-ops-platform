@@ -39,7 +39,9 @@ def _response():
 
 def test_model_exchange_saved_encrypted_with_secret_redaction():
     task, _ = tasks.create({"question": "CPU"}, source="qa")
-    client = SimpleNamespace(responses=SimpleNamespace(create=AsyncMock(return_value=_response())))
+    client = SimpleNamespace(
+        responses=SimpleNamespace(create=AsyncMock(return_value=_response()))
+    )
     asyncio.run(
         traced_response(
             client,
@@ -80,7 +82,12 @@ def test_model_history_roles_and_no_context_reveal():
     assert client_for("auditor").get(url + "?include_content=true").status_code == 403
     assert client_for("ops_admin").get(url + "?include_content=true").status_code == 200
     assert client_for().get(url + "?include_content=true").status_code == 200
-    assert client_for().get("/api/v1/platform/tasks/no-such-task/model-interactions").status_code == 404
+    assert (
+        client_for()
+        .get("/api/v1/platform/tasks/no-such-task/model-interactions")
+        .status_code
+        == 404
+    )
 
 
 def test_large_preview_is_explicitly_truncated():
@@ -101,8 +108,12 @@ def test_failed_model_request_keeps_safe_error_category():
 
     task, _ = tasks.create({"question": "Check"}, source="qa")
     req = httpx.Request("POST", "https://example.invalid")
-    error = APIStatusError("sensitive service error", response=httpx.Response(400, request=req), body={})
-    client = SimpleNamespace(responses=SimpleNamespace(create=AsyncMock(side_effect=error)))
+    error = APIStatusError(
+        "sensitive service error", response=httpx.Response(400, request=req), body={}
+    )
+    client = SimpleNamespace(
+        responses=SimpleNamespace(create=AsyncMock(side_effect=error))
+    )
     with pytest.raises(APIStatusError):
         asyncio.run(
             traced_response(
