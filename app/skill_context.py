@@ -14,7 +14,50 @@ import re
 SCHEMA_CHARS = 16000
 SAMPLE_SIZES = (8, 4, 2, 0)
 RECORD_LIMITS = (20, 10, 5)
+PROCESS_ROWS = 15
 UNRESOLVED_MACRO = re.compile(r"\{[$#]?[A-Z][A-Z0-9_.]*\}")
+
+
+def _positive(value):
+    try:
+        return not isinstance(value, bool) and float(value) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def trimmed_processes(outcome):
+    """Keep the first busy process rows; idle kernel threads at 0 % are noise.
+
+    The SSH service already orders rows by the metric in question, and the
+    full list stays in the stored evidence.
+    """
+    data = outcome.get("data") if isinstance(outcome, dict) else None
+    summary = data.get("summary") if isinstance(data, dict) else None
+    rows = summary.get("processes") if isinstance(summary, dict) else None
+    if not isinstance(rows, list) or len(rows) <= PROCESS_ROWS:
+        return outcome
+    busy = [
+        row
+        for row in rows
+        if not isinstance(row, dict)
+        or any(
+            _positive(row.get(key))
+            for key in ("cpu_interval", "cpu_percent", "memory_percent")
+        )
+    ][:PROCESS_ROWS]
+    return {
+        **outcome,
+        "data": {
+            **data,
+            "summary": {
+                **summary,
+                "processes": busy,
+                "processes_shown": len(busy),
+                "processes_total": len(rows),
+                "processes_note": f"仅展示前 {len(busy)} 个有占用的进程（共 {len(rows)} 个）；完整列表在任务证据中",
+            },
+        },
+    }
 
 
 def _fits(value, max_chars):
@@ -99,6 +142,8 @@ def model_view(provider, tool, outcome, max_chars=None):
     """
     if tool == "list_mcp_tools":
         return fit_definitions(outcome, max_chars or SCHEMA_CHARS)
+    if provider == "ssh_mcp":
+        return trimmed_processes(outcome)
     if (
         provider != "zabbix_mcp"
         or not isinstance(outcome, dict)

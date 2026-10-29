@@ -46,11 +46,13 @@ prefetch:
   types: [cpu]                    # 诊断类型，或 * 表示全部
   ssh: [ssh_diagnose_cpu, ssh_diagnose_processes]   # 只需 host_id 的 SSH 诊断，最多 4 个
   zabbix_items: [system.cpu.load, system.cpu.util]  # 对任务主机按 key 片段执行 item_get
+  history: ["system.cpu.load[all,avg5]", system.cpu.util]  # 在 item_get 结果里按精确 key 或 * 模式选项，预采集历史与趋势
   schemas: [history_get, trend_get]                 # 提前给模型的工具参数结构，最多 4 个
 ```
 
 - 有 ssh 项时，平台先按任务目标解析 SSH 资产（告警 Host ID 用 ssh_resolve_host，问题里的 IP 用 ssh_resolve_target），解析失败只记为说明，不视为诊断缺口；之后的 SSH 诊断固定使用解析出的 host_id 与 revision。
 - zabbix_items 只在任务有 Zabbix Host ID 时执行。预采集计入采集次数，并为模型的后续补查保留至少 2 次。
+- history 按声明顺序在 item_get 返回的数值型监控项里匹配（`*` 为通配，`[`、`,` 按原文匹配），最多取 8 项：平台用 history_get 取告警时间前后各 30 分钟的完整序列（手动分析也以告警时间为准），再用 trend_get 取前 4 项近 7 天的小时趋势。两者整窗口一次取完，发给模型的是统计值加样本。
 - 规则只在匹配的场景与诊断类型生效；platform-base 只为告警声明预采集，飞书问答和 Web 诊断仍按问题选择数据源（例如历史问题不会连接 SSH）。
 
 名称用 1–64 位小写字母、数字、连字符，platform-base 由平台保留。可创建多个 Skill，同一场景按优先级从高到低提供给模型；各 Skill 应说明自己的适用范围，减少冲突。启停、修改适用范围或正文都会产生新版本；修改参考资料时重新导入 ZIP。

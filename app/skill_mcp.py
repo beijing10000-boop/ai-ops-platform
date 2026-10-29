@@ -283,7 +283,7 @@ class SkillMCP:
             else device_type,
         }
 
-    async def call(self, provider, name, arguments):
+    async def call(self, provider, name, arguments, *, rows=None):
         self.check(provider)
         tools = await self.catalog(provider)
         if (
@@ -311,6 +311,7 @@ class SkillMCP:
                     host_id=self.target[1]
                     if self.target and self.target[0] == "hostid"
                     else None,
+                    rows=rows,
                 )
                 result = zabbix.safe_result(response, 100000)
                 if not result["is_error"]:

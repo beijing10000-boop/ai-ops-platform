@@ -169,3 +169,29 @@ def test_problem_get_rejects_clock_sort_and_advertises_only_eventid():
             "enum"
         ]
     )
+
+
+def test_trend_get_allows_a_month_without_sort_parameters_and_history_stays_one_day():
+    assert "sortfield" not in zabbix.input_schema("trend_get")["properties"]
+    assert "sortfield" in zabbix.input_schema("history_get")["properties"]
+    week = {
+        "itemids": ["1"],
+        "time_from": 1_000_000,
+        "time_till": 1_000_000 + 7 * 86400,
+    }
+    # Zabbix trend.get has no sort parameters; the remote rejects them outright.
+    args = zabbix.validate_args(
+        "trend_get", {**week, "sortfield": "clock", "sortorder": "DESC", "limit": 1000}
+    )
+    assert "sortfield" not in args and "sortorder" not in args
+    assert args["limit"] == 120  # the model's page size
+    assert (
+        zabbix.validate_args("trend_get", {**week, "limit": 1000}, rows=1000)["limit"]
+        == 1000
+    )
+    with pytest.raises(ValueError, match="trend window must be 1–2678400"):
+        zabbix.validate_args(
+            "trend_get", {**week, "time_till": week["time_from"] + 32 * 86400}
+        )
+    with pytest.raises(ValueError, match="history window must be 1–86400"):
+        zabbix.validate_args("history_get", {**week, "history": 0})

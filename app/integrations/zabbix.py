@@ -101,6 +101,9 @@ PARAMS = {
     "trend_get": {"itemids", "time_from", "time_till"},
 }
 SORT_FIELDS = {"problem_get": ["eventid"]}
+# Zabbix trend.get takes no sort parameters; initMAX rejects them instead of ignoring.
+UNSORTED = frozenset({"trend_get"})
+HISTORY_WINDOW, TREND_WINDOW = 86400, 31 * 86400
 
 SELECTS = {
     "selectInterfaces": ["interfaceid", "type", "ip", "dns", "main", "useip", "port"],
@@ -120,7 +123,9 @@ def search_fields(name):
 def input_schema(name):
     """Curated schemas describe only arguments accepted by our local policy."""
     properties = {}
-    for key in COMMON | PARAMS[name]:
+    for key in (COMMON | PARAMS[name]) - (
+        {"sortfield", "sortorder"} if name in UNSORTED else set()
+    ):
         if key.endswith("ids"):
             value = {
                 "type": "array",
@@ -228,7 +233,8 @@ def enabled_names(read_setting):
     return READ_TOOLS - disabled
 
 
-def validate_args(name, arguments, *, host_id=None):
+def validate_args(name, arguments, *, host_id=None, rows=None):
+    """`rows` lifts the per-call row cap for platform-issued prefetch queries."""
     if name not in READ_TOOLS or not isinstance(arguments, dict):
         raise ValueError("tool not authorized")
     if set(arguments) - (COMMON | PARAMS[name]):
@@ -236,6 +242,9 @@ def validate_args(name, arguments, *, host_id=None):
     if len(json.dumps(arguments)) > 12000:
         raise ValueError("arguments too large")
     args = dict(arguments)
+    if name in UNSORTED:
+        for key in ("sortfield", "sortorder"):
+            args.pop(key, None)
     if "sortfield" in args:
         value = args["sortfield"]
         fields = [value] if isinstance(value, str) else value
@@ -284,11 +293,14 @@ def validate_args(name, arguments, *, host_id=None):
         raise ValueError("invalid result limit")
     args["limit"] = min(
         args.get("limit", 100),
-        120
-        if name in {"history_get", "trend_get"}
-        else 1000
-        if name == "host_get"
-        else 100,
+        rows
+        or (
+            120
+            if name in {"history_get", "trend_get"}
+            else 1000
+            if name == "host_get"
+            else 100
+        ),
     )
     if host_id and name in {
         "host_get",
@@ -307,12 +319,16 @@ def validate_args(name, arguments, *, host_id=None):
             raise ValueError("bounded item IDs required")
         end = args.get("time_till", int(time.time()))
         start = args.get("time_from", end - 1800 if type(end) is int else None)
+        span = TREND_WINDOW if name == "trend_get" else HISTORY_WINDOW
         if (
             type(start) is not int
             or type(end) is not int
-            or not 0 < end - start <= 86400
+            or not 0 < end - start <= span
         ):
-            raise ValueError("history window must be 1–86400 seconds")
+            raise ValueError(
+                ("trend" if name == "trend_get" else "history")
+                + f" window must be 1–{span} seconds"
+            )
         args.update(time_from=start, time_till=end)
         if name == "history_get" and (
             type(args.get("history")) is not int
@@ -478,10 +494,10 @@ def validate_remote_schema(name, args, schema):
         ) from None
 
 
-async def call(session, name, args, *, schema=None, host_id=None):
+async def call(session, name, args, *, schema=None, host_id=None, rows=None):
     import asyncio
 
-    checked = validate_args(name, args, host_id=host_id)
+    checked = validate_args(name, args, host_id=host_id, rows=rows)
     if schema is not None:
         checked = adapt_read_args(name, checked, schema)
         validate_remote_schema(name, checked, schema)

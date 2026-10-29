@@ -1216,6 +1216,7 @@ def test_prefetch_rules_survive_web_edits_and_only_match_their_scope():
         assert skills.prefetch_plan(base, scope, "cpu") == {
             "ssh": [],
             "zabbix_items": [],
+            "history": [],
             "schemas": [],
         }
 
@@ -1470,3 +1471,248 @@ def test_long_answer_is_kept_whole_in_web_and_feishu(rig):
     report = tasks.get(usage["task_id"])["report"]
     assert answer == long_answer and report["answer"] == long_answer
     assert long_answer in analysis_summary({"_report_answer": report["answer"]})
+
+
+HISTORY_PREFETCH = (
+    "---\nname: alert-history\ndescription: 告警历史预采集\nprefetch:\n"
+    "- scopes: [alert]\n  types: [cpu]\n  zabbix_items: [system.cpu]\n"
+    "  history: ['system.cpu.load[all,avg5]', system.cpu.util, 'system.cpu.util[,*]', system.cpu.num]\n"
+    "---\n按预采集的历史与趋势分析 CPU 告警。"
+)
+
+
+def zabbix_rig(monkeypatch, rows_for):
+    """A Zabbix-only MCP whose remote schema routes our arguments via extra_params."""
+    log = []
+    config = {"openai_model": "fixture", "mcp_url": "http://zabbix.invalid/mcp"}
+    monkeypatch.setattr(mcp_runtime, "read_setting", lambda key: config.get(key, ""))
+    monkeypatch.setattr(
+        ssh_mcp,
+        "configured",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not connect SSH")),
+    )
+
+    class ZabbixSession:
+        async def list_tools(self):
+            return SimpleNamespace(
+                tools=[
+                    remote_tool(
+                        name,
+                        {
+                            "output": {"type": "string"},
+                            "extra_params": {"type": "object"},
+                        },
+                    )
+                    for name in ("item_get", "history_get", "trend_get")
+                ],
+                nextCursor=None,
+            )
+
+        async def call_tool(self, name, args):
+            log.append((name, args))
+            return SimpleNamespace(
+                structuredContent={"result": rows_for(name, args)},
+                content=[],
+                isError=False,
+            )
+
+    @asynccontextmanager
+    async def connect(*args):
+        yield ZabbixSession()
+
+    monkeypatch.setattr(zabbix, "connect", connect)
+    return log
+
+
+def test_alert_prefetch_collects_alert_window_history_and_weekly_trend(monkeypatch):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    items = [
+        {"itemid": "1", "key_": "system.cpu.load[all,avg5]", "value_type": "0"},
+        {"itemid": "2", "key_": "system.cpu.util", "value_type": "0"},
+        {"itemid": "3", "key_": "system.cpu.util[,iowait]", "value_type": "0"},
+        {"itemid": "4", "key_": "system.cpu.num", "value_type": "3"},
+        {"itemid": "5", "key_": "system.cpu.util[,guest]", "value_type": "0"},
+        # A text item with a matching key is never queried for history.
+        {"itemid": "6", "key_": "system.cpu.load[all,avg5]", "value_type": "1"},
+    ]
+
+    def rows_for(name, args):
+        if name == "item_get":
+            return items
+        ids = args["extra_params"]["itemids"]
+        if name == "history_get":
+            return [
+                {
+                    "itemid": i,
+                    "clock": str(1793262534 + n * 60),
+                    "value": str(3 + n / 10),
+                }
+                for i in ids
+                for n in range(3)
+            ]
+        return [
+            {
+                "itemid": i,
+                "clock": "1793185200",
+                "num": "60",
+                "value_min": "3.19",
+                "value_avg": "3.38",
+                "value_max": "3.73",
+            }
+            for i in ids
+        ]
+
+    log = zabbix_rig(monkeypatch, rows_for)
+    client_for().post(
+        P, json=upload(HISTORY_PREFETCH, enabled=True, providers=["zabbix_mcp"])
+    )
+    event = {
+        "event_id": "770200",
+        "event_name": "Linux: Load average is too high",
+        "host_id": "10913",
+        "event_date": "2026.10.01",
+        "event_time": "16:28:54",
+    }
+    create = AsyncMock(return_value=response(text='{"cause": "负载周期性偏高（E2）"}'))
+    _, usage = asyncio.run(
+        mcp_runtime.run(
+            "JSON",
+            json.dumps({"alert": event}, ensure_ascii=False),
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            event=event,
+            return_usage=True,
+        )
+    )
+    assert log[0][0] == "item_get"
+    assert sorted(name for name, _ in log) == [
+        "history_get",
+        "history_get",
+        "item_get",
+        "trend_get",
+    ]
+    queries = [(name, args["extra_params"]) for name, args in log[1:]]
+    # Alert time anchors the window, so a manual analysis hours later still
+    # looks at the alert, not at "now".
+    clock = int(
+        datetime(2026, 10, 1, 16, 28, 54, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+    )
+    history = sorted(
+        (q for name, q in queries if name == "history_get"), key=lambda q: q["history"]
+    )
+    assert history[0]["itemids"] == ["1", "2", "3", "5"] and history[0]["history"] == 0
+    assert history[1]["itemids"] == ["4"] and history[1]["history"] == 3
+    assert all(
+        q["time_from"] == clock - 1800 and q["time_till"] == clock + 1800
+        for q in history
+    )
+    # Whole windows in one call: the platform cap, not the model's 120-row page.
+    assert all(q["limit"] == 1000 for _, q in queries)
+    [trend] = [q for name, q in queries if name == "trend_get"]
+    assert trend["itemids"] == ["1", "2", "3", "5"] and "sortfield" not in trend
+    assert trend["time_till"] - trend["time_from"] == 7 * 86400
+    sent = json.loads(create.call_args_list[0].kwargs["input"][0]["content"])
+    assert [p["tool"] for p in sent["prefetched"]] == [
+        "item_get",
+        "history_get",
+        "history_get",
+        "trend_get",
+    ]
+    assert all(p["result"]["evidence_id"] for p in sent["prefetched"])
+    series = sent["prefetched"][1]["result"]["series"]
+    assert series[0]["numeric_summary"]["value"]["max"] == 3.2
+    task = tasks.get(usage["task_id"])
+    assert create.call_count == 1 and task["status"] == "success"
+    assert task["report"]["budget"]["used"]["calls"] == 4
+    assert "- Zabbix 历史查询窗口（北京时间）：" in task["report"]["answer"]
+
+
+def test_errors_wrapped_by_anyio_while_ssh_is_connected_still_give_partial_reports(
+    rig, monkeypatch
+):
+    import anyio
+    import httpx
+    from openai import APITimeoutError
+
+    session, _ = rig
+
+    @asynccontextmanager
+    async def connect(*args, **kwargs):
+        # Like mcp's Streamable HTTP client: an exception leaving the session
+        # surfaces wrapped in an ExceptionGroup raised by the task group.
+        async with anyio.create_task_group():
+            yield SimpleNamespace(session=session)
+
+    monkeypatch.setattr(ssh_mcp, "configured", connect)
+    install(providers=["ssh_mcp"])
+    request = httpx.Request("POST", "https://example.invalid")
+    create = AsyncMock(
+        side_effect=[
+            response(Call("list_mcp_tools", {"provider": "ssh_mcp"})),
+            response(
+                Call(
+                    "call_mcp_tool",
+                    {
+                        "provider": "ssh_mcp",
+                        "name": "ssh_resolve_target",
+                        "arguments": {"address": "198.51.100.21"},
+                    },
+                )
+            ),
+            APITimeoutError(request=request),
+            APITimeoutError(request=request),
+        ]
+    )
+    answer, usage = asyncio.run(
+        mcp_runtime.run(
+            "请分析",
+            "查询 198.51.100.21 现在 CPU",
+            return_usage=True,
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+        )
+    )
+    task = tasks.get(usage["task_id"])
+    assert task["status"] == "partial"
+    assert task["report"]["model_error"] == "ModelTimeout"
+    assert "ssh_resolve_target" in answer
+    assert any("超时" in gap for gap in task["report"]["limitations"])
+
+
+def test_remaining_time_that_cannot_fit_another_round_forces_the_summary(
+    rig, monkeypatch
+):
+    from app import skill_runtime
+
+    install(providers=["ssh_mcp"])
+    clock = {"now": time.monotonic()}
+    monkeypatch.setattr(
+        skill_runtime,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock["now"], time=time.time),
+    )
+    replies = [
+        response(Call("list_mcp_tools", {"provider": "ssh_mcp"})),
+        response(text="只列出了工具目录。"),
+    ]
+    requests = []
+
+    async def create(**kwargs):
+        requests.append(kwargs)
+        clock["now"] += 40  # a thinking model: 40 s per round of a 110 s budget
+        return replies[len(requests) - 1]
+
+    _, usage = asyncio.run(
+        mcp_runtime.run(
+            "report",
+            "CPU",
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            return_usage=True,
+        )
+    )
+    # 70 s cannot hold another 40 s round and a summary: summarize now.
+    assert len(requests) == 2 and requests[1]["tool_choice"] == "none"
+    spent = tasks.get(usage["task_id"])["report"]["budget"]
+    assert spent["limits_hit"] == [
+        "剩余 70 秒不足以再采集一轮并总结（最长一轮 40 秒），本轮只总结"
+    ]
