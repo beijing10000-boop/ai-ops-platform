@@ -336,6 +336,26 @@ def task_detail(
     return task
 
 
+@router.get("/tasks/{task_id}/model-interactions")
+def model_interactions(
+    task_id: str,
+    include_content: bool = False,
+    who=Depends(require("reports.read")),
+):
+    task = tasks.get(task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    if include_content:
+        enforce(who["open_id"], "logs.read")
+        audit(who["open_id"], "model_interactions_content_read", task_id)
+    return {
+        "task_id": task_id,
+        "items": tasks.model_interaction_page(task_id, include_content=include_content),
+        "content_visible": include_content,
+        "note": "按模型请求记录；内容为脱敏、限长预览，不包含模型内部推理。仅升级后的新任务留存。",
+    }
+
+
 @router.post("/tasks/{task_id}/cancel")
 def cancel_task(task_id: str, who=Depends(require("diagnostics.run"))):
     with connection() as db:
