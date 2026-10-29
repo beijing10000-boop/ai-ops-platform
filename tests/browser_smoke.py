@@ -614,7 +614,10 @@ try:
         row = page.locator("tbody tr").filter(has_text="ops-custom")
         row.wait_for()
         # The platform-maintained base Skill is listed alongside the import.
-        assert "平台维护" in page.locator("tbody tr").filter(has_text="platform-base").inner_text()
+        assert (
+            "平台维护"
+            in page.locator("tbody tr").filter(has_text="platform-base").inner_text()
+        )
         assert "已启用" in row.inner_text()
         row.locator('[data-action="skill-open"]').click()
         page.locator("#skill-edit").wait_for()
