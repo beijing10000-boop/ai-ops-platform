@@ -65,6 +65,14 @@ def incomplete_output_reason(response):
     }.get(reason, "模型未完整返回本轮输出；已保留返回内容，不能视为完整报告")
 
 
+def numbered(value):
+    """Structured outputs give suggestions as a list; cards and reports show text."""
+    if not isinstance(value, list):
+        return value
+    items = [str(item).strip() for item in value if str(item or "").strip()]
+    return "\n".join(f"{index}. {item}" for index, item in enumerate(items, 1))
+
+
 def readable_report_answer(raw):
     """Format JSON model output for the Web report without changing card payload.
 
@@ -83,7 +91,8 @@ def readable_report_answer(raw):
     except (TypeError, ValueError):
         return human_metrics(raw)
     if not isinstance(result, dict) or not any(
-        isinstance(result.get(key), str) for key in ("cause", "action", "analysis")
+        isinstance(result.get(key), (str, list))
+        for key in ("cause", "action", "analysis")
     ):
         return human_metrics(raw)
     parts = []
@@ -92,7 +101,7 @@ def readable_report_answer(raw):
         ("处理建议", "action"),
         ("分析与依据", "analysis"),
     ):
-        content = result.get(key)
+        content = numbered(result.get(key))
         if isinstance(content, str) and content.strip():
             parts.append(name + "\n" + human_metrics(content.strip()))
     return "\n\n".join(parts) if parts else human_metrics(raw)

@@ -16,8 +16,14 @@ log = logging.getLogger(__name__)
 # Immutable Feishu card output contract; diagnostic policy lives in enabled Skills.
 ALERT_OUTPUT_CONTRACT = (
     "告警卡片要求只输出 JSON 对象，必须包含 "
-    "host_groups,cause,action,analysis,human_required 字段。"
-    "将完整中文结论、建议和证据分别填入 cause、action、analysis；"
+    "host_groups,cause,action,analysis,human_required 字段，另加 evidence 数组。"
+    "cause 写完整中文结论：证据充分的直接成因，关键数值后注明证据编号（E2）；"
+    "action 为处理建议数组，按影响与风险排序，每项一句；"
+    "analysis 只写证据之间的关联、排除项和尚未证实的方向。"
+    "目标、时间范围、告警字段、各证据数值和诊断不足由平台渲染，不要复述。"
+    "evidence 每项为 "
+    '{"id":"E2","quote":"从该证据原样摘录的关键数值或原文"}；'
+    "平台会核对 quote 是否真的出现在对应证据中，并据此评定可信度。"
     "无证据时明确写未知，不能编造事实。"
 )
 COLORS = {
@@ -81,6 +87,11 @@ async def analyze(event, task_id=None):
             "human_required": True,
             "host_groups": "未查到",
         }
+    from .mcp_runtime import numbered
+
+    for key in ("cause", "action", "analysis"):
+        if key in data:
+            data[key] = numbered(data[key])
     data["_token_usage"] = token_usage
     data["_task_id"] = token_usage.get("task_id")
     if data["_task_id"]:

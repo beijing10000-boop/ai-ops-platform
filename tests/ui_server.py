@@ -108,7 +108,7 @@ task, _ = tasks.create(
     diagnostic_type="cpu",
 )
 tasks.start(task["task_id"])
-tasks.evidence(
+history_row = tasks.evidence(
     task["task_id"],
     "zabbix_mcp",
     "history_get",
@@ -131,7 +131,8 @@ tasks.evidence(
 tasks.finish(
     task["task_id"],
     {
-        "answer": "## 结论\n隔离界面测试记录，**已有监控证据**。\n\n## 建议\n- 核验主机与时间窗口。\n- 结合实时证据检查原因。\n\n## 依据\n此处展示报告结构，不代表生产观测。",
+        "answer": "## 结论\n隔离界面测试记录，**已有监控证据**。\n\n## 建议\n- 核验主机与时间窗口。\n- 结合实时证据检查原因。\n\n## 依据\n此处展示报告结构，不代表生产观测（E1）。\n\n证据核对\n依据可信度：中（平台核对引用后评定：两类数据源各有有效引用为高，有有效引用为中，没有为低）\n- E1 Zabbix MCP / history_get",
+        "evidence_ids": {str(history_row): "E1"},
         "device_type": "linux",
         "limitations": ["尚未连接生产 Zabbix、飞书或 SSH 主机"],
     },
