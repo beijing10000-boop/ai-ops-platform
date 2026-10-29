@@ -1143,7 +1143,8 @@ async def run(
                         response = await traced_response(
                             client,
                             task_id=task_id,
-                            round_number=sum(d["kind"] == "round" for d in telemetry) + 1,
+                            round_number=sum(d["kind"] == "round" for d in telemetry)
+                            + 1,
                             secret_values=secret_values,
                             deadline=deadline,
                             timeout_seconds=int(
