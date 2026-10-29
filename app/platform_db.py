@@ -122,6 +122,19 @@ def migrate(db):
             "CREATE TABLE IF NOT EXISTS maintenance(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
         )
         db.execute("INSERT INTO platform_migrations(version) VALUES (7)")
+    if not db.execute("SELECT 1 FROM platform_migrations WHERE version=8").fetchone():
+        # managed=1 marks the platform-maintained base Skill. Existing Skills keep
+        # mode 'standalone' (they replace the base), so nothing loads twice.
+        columns = {r[1] for r in db.execute("PRAGMA table_info(platform_skills)")}
+        if "managed" not in columns:
+            db.execute(
+                "ALTER TABLE platform_skills ADD COLUMN managed INTEGER NOT NULL DEFAULT 0"
+            )
+        if "mode" not in columns:
+            db.execute(
+                "ALTER TABLE platform_skills ADD COLUMN mode TEXT NOT NULL DEFAULT 'standalone'"
+            )
+        db.execute("INSERT INTO platform_migrations(version) VALUES (8)")
 
 
 def row_dict(row, cur):

@@ -75,12 +75,9 @@ def test_manual_diagnosis_binds_remote_host_without_writing_assets(remote, monke
         assert db.execute("SELECT COUNT(*) FROM assets").fetchone()[0] == 0
 
 
-def test_host_id_unavailable_and_old_asset_fields_are_rejected(remote):
+def test_malformed_host_ids_and_old_asset_fields_are_rejected(remote):
+    # Which sources to query is the Skill's job; submission only validates input.
     client = client_for()
-    assert (
-        client.post("/api/v1/platform/tasks", json={"zabbix_hostid": "999"}).status_code
-        == 502
-    )
     for bad in (
         {"asset_id": 1},
         {"zabbix_hostid": "10;id"},

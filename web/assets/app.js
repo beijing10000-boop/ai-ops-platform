@@ -315,17 +315,17 @@ async function diagnosticTools() {
           )
           .join(""),
       ) +
-      "<h3 class=\"subsection-heading\">标准诊断流程</h3>" +
+      "<h3 class=\"subsection-heading\">诊断类型</h3>" +
       table(
-        ["问题类型", "监控数据", "固定动作", "诊断边界"],
+        ["问题类型", "相关监控数据", "诊断边界"],
         Object.entries(data.playbooks)
           .map(
             ([key, p]) =>
-              `<tr><td>${E(p.label)}</td><td class="mono">${E(p.metrics.join(", "))}</td><td>${E(p.actions.join(", "))}</td><td class="muted small">${E(p.limitation)}</td></tr>`,
+              `<tr><td>${E(p.label)}</td><td class="mono">${E(p.metrics.join(", "))}</td><td class="muted small">${E(p.limitation)}</td></tr>`,
           )
           .join(""),
       ),
-    "此表为未启用 Skill 时的兼容流程；启用后按 Skill 查询指引选择原生工具，可在 Skill 管理验证实际目录。",
+    "诊断类型用于任务分类；查询哪些工具、按什么顺序由已启用的 Skill 决定（默认为平台基础 Skill），可在 Skill 管理验证实际目录。",
     "connection-tools",
   );
 }
@@ -513,7 +513,6 @@ const configGroups = {
         ["deep", "深度分析"],
       ],
     ],
-    ["ai_tool_loading", "监控工具加载方式", "select", [["dynamic", "按需加载（推荐）"], ["full", "加载全部授权工具"]]],
     ["data_retention_days", "诊断明细保留天数（0 为永久）", "number"],
   ],
   feishu: [
