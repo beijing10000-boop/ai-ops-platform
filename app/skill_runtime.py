@@ -16,7 +16,8 @@ from .ai_reliability import (
 from .orchestrator import tasks
 from .skill_mcp import SkillMCP
 from .skill_store import summary
-from .skill_context import SCHEMA_CHARS, model_alert, model_view
+from .skill_context import SCHEMA_CHARS, fit_definitions, model_alert, model_view
+from .skill_store import prefetch_plan, scope_of
 from .model_interactions import traced_response
 from .security.redact import redact, redact_data
 from .integrations.ssh_mcp import IntegrationError
@@ -138,29 +139,19 @@ async def run(
         alert_only = bool(event) and json.loads(question) == {"alert": event}
     except (TypeError, ValueError):
         alert_only = False
-    conversation = [
-        {
-            "role": "user",
-            "content": safe(
-                json.dumps(
-                    {
-                        **({} if alert_only else {"question": question}),
-                        "context": context,
-                        "alert": model_alert(event),
-                        "service": request.get("service"),
-                        "time_window": request.get("time_window"),
-                        "diagnostic_type": task["diagnostic_type"],
-                        "current_time": datetime.now(
-                            ZoneInfo("Asia/Shanghai")
-                        ).isoformat(),
-                        "current_timestamp": int(time.time()),
-                        "budget": limits,
-                    },
-                    ensure_ascii=False,
-                )
-            ),
-        }
-    ]
+    opening = {
+        **({} if alert_only else {"question": question}),
+        "context": context,
+        "alert": model_alert(event),
+        "service": request.get("service"),
+        "time_window": request.get("time_window"),
+        "diagnostic_type": task["diagnostic_type"],
+        "current_time": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
+        "current_timestamp": int(time.time()),
+        "budget": limits,
+    }
+    conversation = []
+    cached_tokens = 0
     totals, telemetry = {"input": 0, "output": 0, "total": 0}, []
     complete, calls, rounds = True, 0, 0
     gaps, reasons = [], []
@@ -179,9 +170,217 @@ async def run(
         if time.monotonic() >= deadline:
             raise TimeoutError("任务达到时间预算")
 
+    def record(provider, native, outcome, started):
+        records = outcome.get("records")
+        tasks.evidence(
+            task_id,
+            str(provider)[:40],
+            str(native)[:100],
+            # Zabbix `data` is the same rows as text.
+            {k: v for k, v in outcome.items() if k != "data"}
+            if isinstance(records, list) and records
+            else outcome,
+            int((time.monotonic() - started) * 1000),
+        )
+        telemetry.append(
+            {
+                "kind": "tool",
+                "provider": provider,
+                "tool": native,
+                "chars": len(json.dumps(outcome)),
+            }
+        )
+
+    def note_gap(label, outcome):
+        if (
+            outcome.get("error")
+            or outcome.get("is_error")
+            or outcome.get("status") in {"partial", "failed", "cancelled"}
+        ):
+            gaps.append(
+                "工具 "
+                + str(label)
+                + " 未取得完整证据："
+                + str(
+                    outcome.get("error")
+                    or (
+                        "MCP 仅返回部分采集数据"
+                        if outcome.get("status") == "partial"
+                        else "MCP 返回失败"
+                    )
+                )
+            )
+
+    async def execute(provider, native, arguments):
+        """One MCP tool call: counted, recorded as evidence, errors kept as data."""
+        nonlocal calls
+        calls += 1
+        started = time.monotonic()
+        try:
+            tasks.stage(task_id, "skill_" + str(provider))
+            outcome = await bridge.call(provider, native, arguments)
+        except (tasks.Cancelled, asyncio.CancelledError):
+            raise
+        except Exception as exc:
+            outcome = {
+                "error": safe(
+                    str(exc)
+                    if isinstance(exc, (ValueError, IntegrationError))
+                    else type(exc).__name__
+                )
+            }
+        outcome = clean(outcome)
+        record(provider, native, outcome, started)
+        return outcome
+
+    async def catalog(provider):
+        try:
+            return await bridge.catalog(provider)
+        except (tasks.Cancelled, asyncio.CancelledError, TimeoutError):
+            raise
+        except Exception:
+            return {}  # The model can still try; its call records the real failure.
+
+    async def prefetch():
+        """Collect the evidence the loaded Skills declare for this scope and type.
+
+        Runs before the first model round so a typical alert needs no tool
+        discovery or target-resolution rounds. Leaves two calls for follow-ups.
+        """
+        plan = prefetch_plan(
+            skills, scope_of(request, task["source"]), task["diagnostic_type"]
+        )
+        found = {}
+        room = limits["calls"] - 2
+        jobs = []
+        if target and plan["ssh"] and "ssh_mcp" in providers:
+            tools = await catalog("ssh_mcp")
+            kind, value = target
+            resolver = (
+                ("ssh_resolve_host", {"zabbix_hostid": value})
+                if kind == "hostid"
+                else ("ssh_resolve_target", {"address": value})
+            )
+            if resolver[0] in tools and calls < room:
+                outcome = await execute("ssh_mcp", *resolver)
+                binding = next(iter(bridge.bindings.values()), None)
+                if binding:
+                    found["verified_ssh_target"] = {
+                        key: binding.get(key)
+                        for key in (
+                            "host_id",
+                            "revision",
+                            "name",
+                            "address",
+                            "zabbix_hostid",
+                        )
+                    }
+                    jobs.extend(
+                        (
+                            "ssh_mcp",
+                            tool,
+                            {
+                                "host_id": binding["host_id"],
+                                "expected_revision": binding["revision"],
+                            },
+                        )
+                        for tool in plan["ssh"]
+                        if tool in tools
+                    )
+                else:
+                    # Not a gap: non-Linux or unregistered hosts have no SSH asset.
+                    data = (
+                        outcome.get("data")
+                        if isinstance(outcome.get("data"), dict)
+                        else {}
+                    )
+                    found["ssh_target"] = {
+                        "status": "unavailable",
+                        "reason": outcome.get("error")
+                        or data.get("error")
+                        or "未解析到已登记的 SSH 资产",
+                        "error_code": data.get("error_code"),
+                    }
+        if (
+            target
+            and target[0] == "hostid"
+            and plan["zabbix_items"]
+            and "zabbix_mcp" in providers
+            and "item_get" in await catalog("zabbix_mcp")
+        ):
+            jobs.append(
+                (
+                    "zabbix_mcp",
+                    "item_get",
+                    {
+                        "hostids": [target[1]],
+                        "search": {"key_": plan["zabbix_items"]},
+                        "searchByAny": True,
+                        "output": [
+                            "itemid",
+                            "name",
+                            "key_",
+                            "value_type",
+                            "units",
+                            "lastvalue",
+                            "lastclock",
+                        ],
+                        "limit": 60,
+                    },
+                )
+            )
+        jobs = jobs[: max(0, room - calls)]
+        results = await asyncio.gather(*(execute(*job) for job in jobs))
+        prefetched = []
+        for (provider, native, arguments), outcome in zip(jobs, results):
+            note_gap(native, outcome)
+            cache[
+                json.dumps(
+                    [
+                        "call_mcp_tool",
+                        {"provider": provider, "name": native, "arguments": arguments},
+                    ],
+                    sort_keys=True,
+                )
+            ] = outcome
+            prefetched.append(
+                {
+                    "provider": provider,
+                    "tool": native,
+                    "arguments": arguments,
+                    "result": model_view(
+                        provider,
+                        native,
+                        outcome,
+                        max_chars=min(limits["result_chars"], 4000),
+                    ),
+                }
+            )
+        if prefetched:
+            found["prefetched"] = prefetched
+        definitions = []
+        for name in plan["schemas"]:
+            provider = "ssh_mcp" if name.startswith("ssh_") else "zabbix_mcp"
+            if provider in providers and name in await catalog(provider):
+                definitions.extend(
+                    {**tool, "provider": provider}
+                    for tool in await bridge.definitions(provider, name)
+                    if tool["name"] == name
+                )
+        if definitions:
+            shown = fit_definitions({"tools": definitions})["tools"]
+            delivered.update(
+                (tool["provider"], tool["name"])
+                for tool in shown
+                if "parameters" in tool
+            )
+            found["preloaded_tool_schemas"] = shown
+        return found
+
     def usage():
         return {
             **totals,
+            "cached": cached_tokens,
             "available": complete and rounds > 0,
             "task_id": task_id,
             "trace_id": task["trace_id"],
@@ -201,6 +400,7 @@ async def run(
                 "calls": calls,
                 "rounds": rounds,
                 "tokens": totals["total"] if complete else None,
+                "cached_tokens": cached_tokens if complete else None,
                 "seconds": round(time.monotonic() - began, 1),
             },
             "exhausted": bool(reasons or hit),
@@ -245,6 +445,14 @@ async def run(
                     )
                 )
             async with asyncio.timeout(max(0.1, deadline - time.monotonic())):
+                tasks.stage(task_id, "skill_prefetch")
+                opening.update(await prefetch())
+                conversation.append(
+                    {
+                        "role": "user",
+                        "content": safe(json.dumps(opening, ensure_ascii=False)),
+                    }
+                )
                 for number in range(limits["rounds"]):
                     check()
                     if totals["total"] >= limits["tokens"]:
@@ -318,6 +526,7 @@ async def run(
                         complete = False
                     for key in totals:
                         totals[key] += (counts or {}).get(key) or 0
+                    cached_tokens += (counts or {}).get("cached") or 0
                     telemetry.append(
                         {"kind": "round", "round": rounds, **(counts or {})}
                     )
@@ -464,58 +673,18 @@ async def run(
                                             )
                                         }
                                     outcome = clean(outcome)
-                                    records = outcome.get("records")
-                                    tasks.evidence(
-                                        task_id,
-                                        str(provider)[:40],
-                                        str(native)[:100],
-                                        # Zabbix `data` is the same rows as text.
-                                        {
-                                            k: v
-                                            for k, v in outcome.items()
-                                            if k != "data"
-                                        }
-                                        if isinstance(records, list) and records
-                                        else outcome,
-                                        int((time.monotonic() - started) * 1000),
-                                    )
+                                    record(provider, native, outcome, started)
                                     cache[signature] = outcome
-                                    telemetry.append(
-                                        {
-                                            "kind": "tool",
-                                            "provider": provider,
-                                            "tool": native,
-                                            "chars": len(json.dumps(outcome)),
-                                        }
-                                    )
                             else:
                                 raise ValueError("工具未授权")
                         except (ValueError, TypeError, KeyError) as exc:
                             outcome = {"error": safe(str(exc))}
-                        label = (
+                        note_gap(
                             args.get("name", call.name)
                             if isinstance(args, dict) and call.name == "call_mcp_tool"
-                            else call.name
+                            else call.name,
+                            outcome,
                         )
-                        if (
-                            outcome.get("error")
-                            or outcome.get("is_error")
-                            or outcome.get("status")
-                            in {"partial", "failed", "cancelled"}
-                        ):
-                            gaps.append(
-                                "工具 "
-                                + str(label)
-                                + " 未取得完整证据："
-                                + str(
-                                    outcome.get("error")
-                                    or (
-                                        "MCP 仅返回部分采集数据"
-                                        if outcome.get("status") == "partial"
-                                        else "MCP 返回失败"
-                                    )
-                                )
-                            )
                         provider = (
                             str(args.get("provider")) if isinstance(args, dict) else ""
                         )

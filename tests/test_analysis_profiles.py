@@ -33,11 +33,29 @@ def test_token_usage_aggregation_helpers():
     second = SimpleNamespace(
         usage={"input_tokens": 80, "output_tokens": 20, "total_tokens": 100}
     )
-    assert mcp_runtime.usage_counts(first) == {"input": 120, "output": 30, "total": 150}
-    assert mcp_runtime.usage_counts(second) == {"input": 80, "output": 20, "total": 100}
+    assert mcp_runtime.usage_counts(first) == {
+        "input": 120,
+        "output": 30,
+        "total": 150,
+        "cached": None,
+    }
+    cached = SimpleNamespace(
+        usage={
+            "input_tokens": 80,
+            "output_tokens": 20,
+            "total_tokens": 100,
+            "input_tokens_details": {"cached_tokens": 64},
+        }
+    )
+    assert mcp_runtime.usage_counts(cached)["cached"] == 64
+    assert mcp_runtime.usage_counts(second)["cached"] is None
     assert mcp_runtime.usage_counts(SimpleNamespace(usage=None)) is None
-    assert "250" in mcp_runtime.format_usage(
+    plain = mcp_runtime.format_usage(
         {"input": 200, "output": 50, "total": 250, "available": True}
+    )
+    assert "250" in plain and "缓存" not in plain
+    assert "其中缓存命中 1,536" in mcp_runtime.format_usage(
+        {"input": 2000, "output": 50, "total": 2050, "cached": 1536, "available": True}
     )
     assert "未返回用量" in mcp_runtime.format_usage({"available": False})
 

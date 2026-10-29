@@ -1,6 +1,36 @@
 ---
 name: platform-base
 description: 平台维护的基础运维诊断规则：按问题在 SSH MCP（实时）与 Zabbix MCP（历史）之间选择数据源，只读取证，输出有依据、有时间范围、写明不足的中文报告。
+prefetch:
+- scopes: [alert]
+  types: [cpu, bottleneck]
+  ssh: [ssh_diagnose_cpu, ssh_diagnose_processes]
+  zabbix_items: [system.cpu.load, system.cpu.util, system.cpu.num]
+  schemas: [history_get, trend_get]
+- scopes: [alert]
+  types: [memory]
+  ssh: [ssh_diagnose_memory, ssh_diagnose_memory_processes]
+  zabbix_items: [vm.memory, system.swap]
+  schemas: [history_get, trend_get]
+- scopes: [alert]
+  types: [disk]
+  ssh: [ssh_diagnose_disk]
+  zabbix_items: [vfs.fs]
+  schemas: [history_get, trend_get]
+- scopes: [alert]
+  types: [io]
+  ssh: [ssh_diagnose_io, ssh_diagnose_cpu]
+  zabbix_items: [vfs.dev, system.cpu.util]
+  schemas: [history_get, trend_get]
+- scopes: [alert]
+  types: [network]
+  ssh: [ssh_diagnose_network, ssh_diagnose_sockets]
+  zabbix_items: [net.if]
+  schemas: [history_get, trend_get]
+- scopes: [alert]
+  types: [system, service, logs, unreachable]
+  ssh: [ssh_diagnose_system]
+  schemas: [history_get, event_get]
 ---
 
 # 平台基础诊断规则
@@ -9,6 +39,7 @@ description: 平台维护的基础运维诊断规则：按问题在 SSH MCP（�
 
 ## 工具使用
 
+- 告警诊断开始前，平台按本 Skill 的 prefetch 规则已完成：解析 SSH 目标（`verified_ssh_target`）、执行对应的 SSH 诊断与监控项查询（`prefetched`），并给出常用工具的参数结构（`preloaded_tool_schemas`）。这些结果直接使用，不再重复查询；ssh_target 字段 写明未能解析的原因时，说明未取得 SSH 实时证据。
 - 任务上下文已经给出的目标、工具参数结构和预采集结果直接使用，不再重复获取。
 - 需要新工具时，用 `list_mcp_tools` 的 `names` 一次获取最多 4 个确切工具的参数结构；同一工具的结构在本任务内只取一次。
 - 通过 `call_mcp_tool` 按实际参数结构调用；不编造工具或参数，不执行任意 Shell。相互独立的只读查询放在同一轮发出。
@@ -33,7 +64,7 @@ description: 平台维护的基础运维诊断规则：按问题在 SSH MCP（�
    - CPU / 负载：`ssh_diagnose_cpu`、`ssh_diagnose_processes`；
    - 内存：`ssh_diagnose_memory`、`ssh_diagnose_memory_processes`，持续偏高时补 `ssh_diagnose_pressure`、`ssh_diagnose_oom`；
    - 磁盘：`ssh_diagnose_disk`、`ssh_diagnose_io`；服务：`ssh_diagnose_service`、`ssh_diagnose_logs`；网络：`ssh_diagnose_network`、`ssh_diagnose_sockets`。
-3. 告警时段：用 `item_get` 找到相关监控项，再用 `history_get` 查告警前后约 30 分钟。
+3. 告警时段：从预采集的 `item_get` 结果（没有时再查询）选出相关监控项，用 `history_get` 查告警前后约 30 分钟。
 4. **基线**：再用一次 `trend_get` 查同一监控项近 7 天的小时趋势，判断是突发还是常态。常态性偏高时，结论应指向容量或阈值是否合理，而不是临时故障。
 5. CPU 负载告警：
    - 对比“负载 / 核数”与触发器阈值，同时看 CPU 利用率和 `cpu_idle_percent`；负载高不等于 CPU 打满。

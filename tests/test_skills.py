@@ -1167,6 +1167,162 @@ def test_secrets_never_reach_the_model_or_the_report(rig):
         assert secret not in report and secret not in answer
 
 
+PREFETCH = (
+    "---\nname: alert-prefetch\ndescription: 告警预采集\nprefetch:\n"
+    "- scopes: [alert]\n  types: [cpu]\n  ssh: [ssh_diagnose_cpu]\n"
+    "  schemas: [ssh_diagnose_cpu]\n---\n按预采集结果分析 CPU 告警。"
+)
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "- scopes: [alert]\n  types: [cpu]\n  ssh: [ssh_diagnose_logs]",
+        "- scopes: [alert]\n  types: [cpu]\n  shell: [id]",
+        "- scopes: [everywhere]\n  types: [cpu]",
+        "- scopes: [alert]\n  types: [made-up]",
+        "- scopes: [alert]\n  types: [cpu]\n  zabbix_items: ['key; rm -rf']",
+        "- scopes: [alert]\n  types: [cpu]\n  schemas: [raw_api_call]",
+    ],
+)
+def test_invalid_prefetch_rules_are_rejected(rule):
+    text = TEXT.replace("---\n直接", "prefetch:\n" + rule + "\n---\n直接")
+    assert client_for().post(P + "/validate", json=upload(text)).status_code == 422
+
+
+def test_prefetch_rules_survive_web_edits_and_only_match_their_scope():
+    row = client_for().post(P, json=upload(PREFETCH, enabled=True)).json()
+    edited = client_for().put(
+        P + "/" + row["id"], json={"instructions": "改写后的说明。"}
+    )
+    assert edited.status_code == 200
+    saved = skills.get(row["id"])
+    assert saved["instructions"] == "改写后的说明。"
+    assert saved["prefetch"][0]["ssh"] == ["ssh_diagnose_cpu"]
+    base = [skills.base_package()]
+    assert skills.prefetch_plan(base, "alert", "cpu")["ssh"] == [
+        "ssh_diagnose_cpu",
+        "ssh_diagnose_processes",
+    ]
+    # The base Skill's alert rules never reach SSH for Q&A or Web questions.
+    for scope in ("qa", "web"):
+        assert skills.prefetch_plan(base, scope, "cpu") == {
+            "ssh": [],
+            "zabbix_items": [],
+            "schemas": [],
+        }
+
+
+def test_alert_prefetch_resolves_target_and_collects_before_the_first_round(rig):
+    session, _ = rig
+    session.tools.append(
+        remote_tool("ssh_resolve_host", {"zabbix_hostid": {"type": "string"}})
+    )
+    original = session.call_tool
+
+    async def call_tool(name, args):
+        if name == "ssh_resolve_host":
+            session.calls.append((name, args))
+            return SimpleNamespace(
+                structuredContent={
+                    "status": "success",
+                    "host_id": 7,
+                    "address": "198.51.100.21",
+                    "revision": 3,
+                    "name": "linux-live",
+                    "zabbix_hostid": "10913",
+                },
+                content=[],
+                isError=False,
+            )
+        return await original(name, args)
+
+    session.call_tool = call_tool
+    client_for().post(P, json=upload(PREFETCH, enabled=True, providers=["ssh_mcp"]))
+    event = {
+        "event_id": "770100",
+        "event_value": "1",
+        "event_name": "Linux: Load average is too high",
+        "severity": "4",
+        "host_id": "10913",
+    }
+    create = AsyncMock(return_value=response(text='{"cause": "负载偏高"}'))
+    _, usage = asyncio.run(
+        mcp_runtime.run(
+            "JSON",
+            json.dumps({"alert": event}, ensure_ascii=False),
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            event=event,
+            return_usage=True,
+        )
+    )
+    assert [name for name, _ in session.calls] == [
+        "ssh_resolve_host",
+        "ssh_diagnose_cpu",
+    ]
+    assert session.calls[1][1] == {"host_id": 7, "expected_revision": 3}
+    sent = json.loads(create.call_args_list[0].kwargs["input"][0]["content"])
+    assert sent["verified_ssh_target"]["host_id"] == 7
+    assert sent["verified_ssh_target"]["revision"] == 3
+    assert sent["prefetched"][0]["tool"] == "ssh_diagnose_cpu"
+    assert sent["prefetched"][0]["result"]["data"]["action"] == "cpu"
+    assert sent["preloaded_tool_schemas"][0]["name"] == "ssh_diagnose_cpu"
+    task = tasks.get(usage["task_id"])
+    # One model round answered directly; both MCP calls are evidence.
+    assert create.call_count == 1 and task["status"] == "success"
+    assert task["tools"] == 2 and task["report"]["budget"]["used"]["calls"] == 2
+
+
+def test_prefetch_notes_unresolved_ssh_target_without_marking_a_gap(rig):
+    session, _ = rig
+    session.tools.append(
+        remote_tool("ssh_resolve_host", {"zabbix_hostid": {"type": "string"}})
+    )
+
+    async def call_tool(name, args):
+        session.calls.append((name, args))
+        return SimpleNamespace(
+            structuredContent={
+                "status": "failed",
+                "error": "映射不存在或存在重复关联，请由管理员修正",
+                "error_code": "mapping_unresolved",
+            },
+            content=[],
+            isError=False,
+        )
+
+    session.call_tool = call_tool
+    client_for().post(P, json=upload(PREFETCH, enabled=True, providers=["ssh_mcp"]))
+    event = {"event_id": "770101", "event_name": "CPU load high", "host_id": "20001"}
+    create = AsyncMock(return_value=response(text='{"cause": "无 SSH 证据"}'))
+    _, usage = asyncio.run(
+        mcp_runtime.run(
+            "JSON",
+            json.dumps({"alert": event}, ensure_ascii=False),
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            event=event,
+            return_usage=True,
+        )
+    )
+    assert [name for name, _ in session.calls] == ["ssh_resolve_host"]
+    sent = json.loads(create.call_args_list[0].kwargs["input"][0]["content"])
+    assert sent["ssh_target"]["error_code"] == "mapping_unresolved"
+    assert "prefetched" not in sent
+    # Windows/network/unregistered hosts have no SSH asset: a note, not a gap.
+    assert tasks.get(usage["task_id"])["status"] == "success"
+
+
+def test_zabbix_schemas_are_compact_but_validation_is_unchanged():
+    schema = zabbix.input_schema("item_get")
+    assert len(json.dumps(schema, ensure_ascii=False)) < 2000
+    assert "key_" in schema["properties"]["search"]["propertyNames"]["enum"]
+    with pytest.raises(ValueError, match="search"):
+        zabbix.validate_args("item_get", {"search": {"password": "x"}})
+    assert zabbix.validate_args(
+        "item_get", {"search": {"key_": ["system.cpu.load"]}, "hostids": ["10"]}
+    )["search"] == {"key_": ["system.cpu.load"]}
+
+
 def test_long_answer_is_kept_whole_in_web_and_feishu(rig):
     from app.worker import analysis_summary
 
