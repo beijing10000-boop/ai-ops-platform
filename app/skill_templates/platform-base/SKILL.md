@@ -44,7 +44,7 @@ prefetch:
 
 ## 工具使用
 
-- 告警诊断开始前，平台按本 Skill 的 prefetch 规则已完成：解析 SSH 目标（`verified_ssh_target`）、执行对应的 SSH 诊断、监控项查询以及告警前后 30 分钟历史与近 7 天趋势（`prefetched`），并给出常用工具的参数结构（`preloaded_tool_schemas`）。这些结果直接使用，不再重复查询；ssh_target 字段 写明未能解析的原因时，说明未取得 SSH 实时证据。
+- 告警诊断开始前，平台已完成预采集（`prefetched`）：解析 SSH 目标（`verified_ssh_target`）并执行本 Skill 声明的 SSH 诊断；查询告警触发器对应的监控项（`item_get` triggerids）和该触发器近 24 小时的事件（`event_get`，用于判断是否反复触发）；对这些监控项及本 Skill 声明的 key 采集告警前后 30 分钟历史与近 7 天趋势；并给出常用工具的参数结构（`preloaded_tool_schemas`）。网络设备、Windows 等没有 SSH 资产的对象同样有触发器监控项、事件与历史，直接据此分析。这些结果直接使用，不再重复查询；ssh_target 字段 写明未能解析的原因时，说明未取得 SSH 实时证据。
 - 任务上下文已经给出的目标、工具参数结构和预采集结果直接使用，不再重复获取。
 - 需要新工具时，用 `list_mcp_tools` 的 `names` 一次获取最多 4 个确切工具的参数结构；同一工具的结构在本任务内只取一次。
 - 通过 `call_mcp_tool` 按实际参数结构调用；不编造工具或参数，不执行任意 Shell。相互独立的只读查询放在同一轮发出。

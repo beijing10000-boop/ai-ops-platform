@@ -1503,7 +1503,7 @@ def zabbix_rig(monkeypatch, rows_for):
                             "extra_params": {"type": "object"},
                         },
                     )
-                    for name in ("item_get", "history_get", "trend_get")
+                    for name in ("item_get", "event_get", "history_get", "trend_get")
                 ],
                 nextCursor=None,
             )
@@ -1539,9 +1539,17 @@ def test_alert_prefetch_collects_alert_window_history_and_weekly_trend(monkeypat
     ]
 
     def rows_for(name, args):
+        extra = args["extra_params"]
         if name == "item_get":
-            return items
-        ids = args["extra_params"]["itemids"]
+            # The trigger's own item is a network-device metric no Skill names.
+            return (
+                [{"itemid": "9", "key_": "huawei.radio.util[1]", "value_type": "3"}]
+                if "triggerids" in extra
+                else items
+            )
+        if name == "event_get":
+            return [{"eventid": "770200", "clock": "1793262534", "value": "1"}]
+        ids = extra["itemids"]
         if name == "history_get":
             return [
                 {
@@ -1572,6 +1580,7 @@ def test_alert_prefetch_collects_alert_window_history_and_weekly_trend(monkeypat
         "event_id": "770200",
         "event_name": "Linux: Load average is too high",
         "host_id": "10913",
+        "trigger_id": "81883",
         "event_date": "2026.10.01",
         "event_time": "16:28:54",
     }
@@ -1585,14 +1594,23 @@ def test_alert_prefetch_collects_alert_window_history_and_weekly_trend(monkeypat
             return_usage=True,
         )
     )
-    assert log[0][0] == "item_get"
     assert sorted(name for name, _ in log) == [
+        "event_get",
         "history_get",
         "history_get",
         "item_get",
+        "item_get",
         "trend_get",
     ]
-    queries = [(name, args["extra_params"]) for name, args in log[1:]]
+    queries = [(name, args["extra_params"]) for name, args in log]
+    # The trigger anchors the first stage: its items and its last day of events.
+    [by_trigger] = [
+        q for name, q in queries if name == "item_get" and "triggerids" in q
+    ]
+    assert by_trigger["triggerids"] == ["81883"] and by_trigger["hostids"] == ["10913"]
+    [events] = [q for name, q in queries if name == "event_get"]
+    assert events["objectids"] == ["81883"] and events["limit"] == 50
+    assert events["time_till"] - events["time_from"] == 86400
     # Alert time anchors the window, so a manual analysis hours later still
     # looks at the alert, not at "now".
     clock = int(
@@ -1602,29 +1620,36 @@ def test_alert_prefetch_collects_alert_window_history_and_weekly_trend(monkeypat
         (q for name, q in queries if name == "history_get"), key=lambda q: q["history"]
     )
     assert history[0]["itemids"] == ["1", "2", "3", "5"] and history[0]["history"] == 0
-    assert history[1]["itemids"] == ["4"] and history[1]["history"] == 3
+    # The trigger's own item comes before the Skill's key matches.
+    assert history[1]["itemids"] == ["9", "4"] and history[1]["history"] == 3
     assert all(
         q["time_from"] == clock - 1800 and q["time_till"] == clock + 1800
         for q in history
     )
     # Whole windows in one call: the platform cap, not the model's 120-row page.
-    assert all(q["limit"] == 1000 for _, q in queries)
+    assert all(
+        q["limit"] == 1000
+        for name, q in queries
+        if name in ("history_get", "trend_get")
+    )
     [trend] = [q for name, q in queries if name == "trend_get"]
-    assert trend["itemids"] == ["1", "2", "3", "5"] and "sortfield" not in trend
+    assert trend["itemids"] == ["9", "1", "2", "3"] and "sortfield" not in trend
     assert trend["time_till"] - trend["time_from"] == 7 * 86400
     sent = json.loads(create.call_args_list[0].kwargs["input"][0]["content"])
     assert [p["tool"] for p in sent["prefetched"]] == [
+        "item_get",
+        "event_get",
         "item_get",
         "history_get",
         "history_get",
         "trend_get",
     ]
     assert all(p["result"]["evidence_id"] for p in sent["prefetched"])
-    series = sent["prefetched"][1]["result"]["series"]
+    series = sent["prefetched"][3]["result"]["series"]
     assert series[0]["numeric_summary"]["value"]["max"] == 3.2
     task = tasks.get(usage["task_id"])
     assert create.call_count == 1 and task["status"] == "success"
-    assert task["report"]["budget"]["used"]["calls"] == 4
+    assert task["report"]["budget"]["used"]["calls"] == 6
     assert "- Zabbix 历史查询窗口（北京时间）：" in task["report"]["answer"]
 
 
@@ -1685,6 +1710,11 @@ def test_remaining_time_that_cannot_fit_another_round_forces_the_summary(
     from app import skill_runtime
 
     install(providers=["ssh_mcp"])
+    with main.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO settings VALUES ('ai_profile_budgets',?,0)",
+            (json.dumps({"standard": {"seconds": 110}}),),
+        )
     clock = {"now": time.monotonic()}
     monkeypatch.setattr(
         skill_runtime,

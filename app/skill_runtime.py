@@ -100,12 +100,13 @@ def key_matches(pattern, key):
     return re.fullmatch(parts, key) is not None
 
 
-def history_jobs(patterns, item_results, *, event, now):
+def history_jobs(patterns, item_results, *, event, now, first=()):
     """history_get around the alert and trend_get over 7 days for matched items.
 
-    Patterns are tried in Skill order over the prefetched item_get rows;
-    numeric items only, at most 8 for the history and the first 4 for the
-    baseline. Returns (provider, tool, arguments, row cap) jobs.
+    `first` item ids (the alert trigger's own items) lead; then patterns are
+    tried in Skill order over the prefetched item_get rows. Numeric items
+    only, at most 8 for the history and the first 4 for the baseline.
+    Returns (provider, tool, arguments, row cap) jobs.
     """
     rows = [
         row
@@ -117,6 +118,11 @@ def history_jobs(patterns, item_results, *, event, now):
         and str(row.get("value_type")) in {"0", "3"}
     ]
     chosen, seen = [], set()
+    for ident in first:
+        row = next((row for row in rows if str(row["itemid"]) == ident), None)
+        if row is not None and ident not in seen:
+            seen.add(ident)
+            chosen.append(row)
     for pattern in patterns:
         for row in rows:
             ident = str(row["itemid"])
@@ -462,42 +468,78 @@ async def run(
                         or "未解析到已登记的 SSH 资产",
                         "error_code": data.get("error_code"),
                     }
-        if (
-            target
-            and target[0] == "hostid"
-            and plan["zabbix_items"]
-            and "zabbix_mcp" in providers
-            and "item_get" in await catalog("zabbix_mcp")
-        ):
-            jobs.append(
-                (
-                    "zabbix_mcp",
-                    "item_get",
-                    {
-                        "hostids": [target[1]],
-                        "search": {"key_": plan["zabbix_items"]},
-                        "searchByAny": True,
-                        "output": [
-                            "itemid",
-                            "name",
-                            "key_",
-                            "value_type",
-                            "units",
-                            "lastvalue",
-                            "lastclock",
-                        ],
-                        "limit": 60,
-                    },
+        now = int(time.time())
+        trigger = str(event.get("trigger_id") or "")
+        if target and target[0] == "hostid" and "zabbix_mcp" in providers:
+            tools = await catalog("zabbix_mcp")
+            fields = [
+                "itemid",
+                "name",
+                "key_",
+                "value_type",
+                "units",
+                "lastvalue",
+                "lastclock",
+            ]
+            if trigger.isdigit() and "item_get" in tools:
+                # The items behind the alert's own trigger, whatever the template
+                # or device type; Skill key lists only add to them.
+                jobs.append(
+                    (
+                        "zabbix_mcp",
+                        "item_get",
+                        {
+                            "hostids": [target[1]],
+                            "triggerids": [trigger],
+                            "output": fields,
+                            "limit": 20,
+                        },
+                    )
                 )
-            )
+            if trigger.isdigit() and "event_get" in tools:
+                # Whether this trigger has been flapping over the last day.
+                jobs.append(
+                    (
+                        "zabbix_mcp",
+                        "event_get",
+                        {
+                            "hostids": [target[1]],
+                            "objectids": [trigger],
+                            "source": 0,
+                            "object": 0,
+                            "time_from": now - 86400,
+                            "time_till": now,
+                            "output": ["eventid", "clock", "value", "name"],
+                            "sortfield": "clock",
+                            "sortorder": "DESC",
+                            "limit": 50,
+                        },
+                    )
+                )
+            if plan["zabbix_items"] and "item_get" in tools:
+                jobs.append(
+                    (
+                        "zabbix_mcp",
+                        "item_get",
+                        {
+                            "hostids": [target[1]],
+                            "search": {"key_": plan["zabbix_items"]},
+                            "searchByAny": True,
+                            "output": fields,
+                            "limit": 60,
+                        },
+                    )
+                )
         prefetched, collected = [], []
 
         async def collect(jobs):
             jobs = jobs[: max(0, room - calls)]
             results = await asyncio.gather(*(execute(*job) for job in jobs))
+            stage = []
             for (provider, native, arguments, *_), (outcome, ident) in zip(
                 jobs, results
             ):
+                stage.append((native, arguments, outcome))
                 note_gap(native, outcome)
                 signature = json.dumps(
                     [
@@ -524,16 +566,24 @@ async def run(
                         ),
                     }
                 )
+            return stage
 
-        await collect(jobs)
-        # Alert window and 7-day baseline for the item keys the Skills name, so
-        # a typical alert needs no history round at all.
+        stage = await collect(jobs)
+        # Alert window and 7-day baseline: the trigger's own items first, then
+        # the item keys the Skills name, so a typical alert needs no history round.
         await collect(
             history_jobs(
                 plan["history"],
-                [outcome for _, tool, outcome, _ in collected if tool == "item_get"],
+                [outcome for native, _, outcome in stage if native == "item_get"],
                 event=event,
-                now=int(time.time()),
+                now=now,
+                first=[
+                    str(row["itemid"])
+                    for native, arguments, outcome in stage
+                    if native == "item_get" and "triggerids" in arguments
+                    for row in outcome.get("records") or []
+                    if isinstance(row, dict) and str(row.get("itemid", "")).isdigit()
+                ],
             )
         )
         if prefetched:
