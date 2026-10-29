@@ -40,9 +40,11 @@ def test_short_and_long_unicode_reports_preserve_every_character_and_footer():
     assert body_text([original]) == text  # Splitting never mutates the source.
 
 
-def test_alert_card_contains_same_complete_answer_and_limitations_as_web():
+def test_conversation_context_keeps_the_complete_answer_while_the_card_is_short():
     answer = "故障原因（AI 推断）\n" + "证据与建议。" * 300
     info = {
+        "cause": "磁盘将满（E1）",
+        "action": ["清理日志"],
         "_report_answer": answer,
         "_limitations": ["需要补查历史"],
         "_diagnostic_status": "partial",
@@ -52,6 +54,9 @@ def test_alert_card_contains_same_complete_answer_and_limitations_as_web():
     assert answer in result and "需要补查历史" in result
     assert "执行耗时" not in result
     assert "摘要已省略" not in result
+    card = worker.card_summary(info)
+    assert "证据与建议。" not in card and "E1" not in card
+    assert "磁盘将满" in card and "1. 清理日志" in card
 
 
 def test_update_long_report_patches_first_card_and_replies_with_all_remaining_segments(

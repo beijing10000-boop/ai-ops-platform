@@ -23,6 +23,58 @@ def test_alert_output_contract_remains_program_controlled():
     assert "先查询 Zabbix" not in value
 
 
+def test_feishu_card_shows_conclusion_and_actions_without_evidence_ids():
+    info = {
+        "cause": "每核 5 分钟负载 1.65（E2）超过阈值 1.5，CPU 利用率 33.57%（E5、E6）；负载来自 postgres 周期性任务 (E4)。",
+        "action": "1. 核对 postgres 定时任务（E4）\n2. 评估是否扩容 CPU，参考 E3",
+        "analysis": "证据之间的关联：E2 与 E4 时间吻合。",
+        "human_required": True,
+        "_report_answer": "完整报告……\n\n证据核对\n- E2 SSH MCP",
+        "_limitations": ["工具 trend_get 未取得完整证据"],
+        "_diagnostic_status": "partial",
+    }
+    assert worker.card_summary(info) == (
+        "**诊断状态**  部分完成\n**诊断结论**\n"
+        "每核 5 分钟负载 1.65超过阈值 1.5，CPU 利用率 33.57%；负载来自 postgres 周期性任务。\n\n"
+        "**处理建议**（需人工处理）\n1. 核对 postgres 定时任务\n2. 评估是否扩容 CPU，参考"
+    )
+    # Hardware model numbers are not evidence references.
+    assert (
+        worker.without_evidence_ids("Xeon E5-2680 上 E2 的值") == "Xeon E5-2680 上 的值"
+    )
+    clean = {
+        "cause": "磁盘将满",
+        "action": ["清理日志"],
+        "_diagnostic_status": "success",
+    }
+    assert (
+        worker.card_summary(clean)
+        == "**诊断结论**\n磁盘将满\n\n**处理建议**\n1. 清理日志"
+    )
+    long = {
+        "cause": "结论" * 400,
+        "action": [f"建议 {n}" for n in range(1, 9)],
+        "_diagnostic_status": "success",
+    }
+    text = worker.card_summary(long)
+    assert "……（全文见完整诊断报告）" in text and len(text) < 800
+    assert "6. 建议 6\n其余建议见完整诊断报告。" in text and "建议 7" not in text
+    # Model-error fallbacks are plain text: the first line says why.
+    partial = {
+        "cause": "分析结果需要人工复核",
+        "action": "请检查告警相关指标及服务日志",
+        "analysis": "AI 模型请求超时；模型未完成最终诊断。\n下列仅为已执行的工具及采集状态…",
+        "human_required": True,
+        "_unstructured": True,
+        "_diagnostic_status": "partial",
+    }
+    text = worker.card_summary(partial)
+    assert text.startswith(
+        "**诊断状态**  部分完成\n**诊断结论**\nAI 模型请求超时；模型未完成最终诊断。\n"
+    )
+    assert "下列仅为" not in text and "分析结果需要人工复核" not in text
+
+
 def test_card_keeps_complete_report_without_fixed_character_truncation():
     info = {
         "cause": "根因待确认",
@@ -630,8 +682,12 @@ def test_manual_analysis_progress_updates_and_context_for_both_states(monkeypatc
         assert len(events) == 2
         assert events[0][0:3] == ("reply", "om_original", "AI 分析中")
         assert events[1][0:3] == ("update", "om_progress", "AI 分析结果")
-        assert "CPU趋势连续上升" in events[1][3]
+        # The card carries the conclusion and actions; the analysis stays in
+        # the conversation context for follow-up questions and on the Web.
+        assert "负载较高" in events[1][3] and "检查进程" in events[1][3]
+        assert "CPU趋势连续上升" not in events[1][3]
         assert saved[-1][0:3] == ("oc_group", "om_original", "om_progress")
+        assert "CPU趋势连续上升" in saved[-1][4]
 
 
 def test_recovery_replies_to_matching_chat_messages(monkeypatch):
