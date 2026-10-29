@@ -132,11 +132,16 @@ def test_failed_model_request_keeps_safe_error_category():
     assert "sensitive service error" not in str(row)
     assert row["payload"]["error"] == "ModelRequestError"
 
+
 def test_hidden_model_reasoning_not_saved_in_input_snapshot():
     from app.model_interactions import _preview
 
     payload = [
-        {"type": "reasoning", "encrypted_content": "secret-reasoning", "summary": "not for operators"},
+        {
+            "type": "reasoning",
+            "encrypted_content": "secret-reasoning",
+            "summary": "not for operators",
+        },
         {"type": "function_call_output", "output": "genuine collected metric"},
     ]
     preview = _preview(payload)
