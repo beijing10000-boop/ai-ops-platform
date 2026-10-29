@@ -433,7 +433,8 @@ async function report(id) {
               ? btn("retry-task", "重试", id)
               : ""
           : "") +
-        btn("copy-report", "复制结论") + btn("download-report", "下载报告") + btn("refresh", "刷新"),
+        btn("copy-report", "复制结论") + btn("download-report", "下载报告") +
+        (can("logs.read") ? btn("download-detailed-report", "下载详细报告", id) : "") + btn("refresh", "刷新"),
     ) +
     reportProgress(t) +
     `<div class="stats"><div class="stat"><div class="label">诊断状态</div><div class="value">${badge(t.status)}</div><div class="hint">${E(stageLabel(t.stage))}</div></div><div class="stat"><div class="label">主机 / 事件 ID</div><div class="value">${E(t.alert?.host_id || t.asset?.zabbix_hostid || "—")}</div><div class="hint">事件 ${E(t.event_id || "未关联")}</div></div><div class="stat"><div class="label">实际 Token / 工具调用</div><div class="value">${fmt(t.token_total)}</div><div class="hint">${fmt(t.tools)} 次采集 · 输入 ${fmt(t.token_input)} / 输出 ${fmt(t.token_output)}</div></div><div class="stat"><div class="label">执行耗时</div><div class="value">${t.duration_ms == null ? "—" : (t.duration_ms / 1000).toFixed(1) + " s"}</div><div class="hint">${date(t.created_at)}</div></div></div>` +
@@ -850,6 +851,23 @@ document.addEventListener("click", async (event) => {
       const link = document.createElement("a"); link.href = url;
       link.download = "诊断报告-" + state.currentTask.task_id.slice(0, 12) + ".md";
       link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+    else if (action === "download-detailed-report") {
+      const taskId = id || state.currentTask?.task_id;
+      if (!taskId || !can("logs.read")) throw new Error("无权下载详细报告");
+      const response = await fetch(P + "/tasks/" + encodeURIComponent(taskId) + "/detailed-report", {
+        method: "GET", credentials: "same-origin", cache: "no-store"
+      });
+      if (!response.ok) {
+        let message = "下载详细报告失败（HTTP " + response.status + "）";
+        try { const err = await response.json(); message = err.detail || message; } catch {}
+        throw new Error(message);
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a"); link.href = url;
+      link.download = "诊断详细报告-" + taskId.slice(0, 12) + ".md";
+      link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast("已生成详细报告，请妥善保管内部日志和诊断证据");
     }
     else if (action === "reset-alert-filter") {
       state.alertQuery = ""; state.alertSeverity = ""; state.alertStatus = "all"; state.alertPage = 1; await navigate();

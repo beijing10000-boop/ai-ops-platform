@@ -535,6 +535,13 @@ try:
         exported = Path(downloaded.value.path()).read_text()
         assert "AI 运维诊断报告" in exported and "诊断不足" in exported
         assert "Trace ID" in exported
+        with page.expect_download() as detailed:
+            page.locator('[data-action="download-detailed-report"]').click()
+        full_export = Path(detailed.value.path()).read_text()
+        assert "AI 运维详细诊断报告" in full_export
+        assert "MCP 工具执行记录和完整已保存证据" in full_export
+        assert "逐轮与大模型交互记录" in full_export
+        assert "诊断时间线" in full_export
         unsafe = page.evaluate(
             "OpsUI.answer('## 结论\\n<img src=x onerror=window.bad=1> **证据**\\n```html\\n<script>window.bad=1</script>\\n```')"
         )
