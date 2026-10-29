@@ -106,6 +106,20 @@ def test_feishu_card_shows_conclusion_and_actions_without_evidence_ids():
     assert "下列仅为" not in text and "分析结果需要人工复核" not in text
 
 
+def test_disk_latency_alerts_are_classified_as_io_not_bottleneck():
+    from app.diagnostics.playbooks import classify
+
+    assert (
+        classify(
+            "Linux: vdb: Disk read/write request responses are too high (read > 20 ms for 15m)"
+        )
+        == "io"
+    )
+    assert classify("Disk I/O is overloaded (in 15m)") == "io"
+    assert classify("Linux: Load average is too high") == "cpu"
+    assert classify("AP 11F-AP04 射频 1: 信道利用率持续偏高") == "bottleneck"
+
+
 def test_report_links_open_inside_the_feishu_client():
     url = "http://192.0.2.10:8088/#report/0123456789abcdef0123456789abcdef"
     assert worker.in_feishu(url) == (

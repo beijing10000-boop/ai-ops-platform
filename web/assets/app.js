@@ -476,6 +476,11 @@ function reportBudget(task) {
     ["实际 Token / 停止阈值", `${fmt(task.token_total)} / ${fmt(limits.tokens)}`],
     ["耗时 / 时间上限", `${used.seconds ?? (task.duration_ms == null ? "—" : (task.duration_ms / 1000).toFixed(1))} / ${limits.seconds} 秒`],
   ];
+  const timing = task.report?.timing;
+  if (Array.isArray(timing?.rounds)) {
+    const longest = timing.rounds.length ? Math.max(...timing.rounds) : 0;
+    usage.push(["阶段耗时", `预采集 ${timing.prefetch} 秒 · 模型 ${timing.rounds.length} 轮 ${timing.model} 秒（最长一轮 ${longest} 秒） · 工具 ${timing.tools} 秒`]);
+  }
   return panel("分析预算", `<p>${E(labels[task.profile] || task.profile)} · 使用任务创建时的配置</p>` + table(["预算项", "已使用 / 上限"], usage.map(([label, value]) => `<tr><td>${E(label)}</td><td>${E(value)}</td></tr>`).join("")) + (budget.reasons || []).map(reason => `<p class="notice">${E(reason)}</p>`).join("") + `<p class="muted small">包含 Zabbix 查询、SSH 主机解析及每个诊断动作。预算耗尽时跳过后续采集；Token 阈值用于停止后续请求。</p>` + (can("settings.manage") ? btn("go-page", "配置分析预算", "settings/ai") : ""));
 }
 function reportAnswer(task) {

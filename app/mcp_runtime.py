@@ -107,7 +107,7 @@ def readable_report_answer(raw):
     return "\n\n".join(parts) if parts else human_metrics(raw)
 
 
-def format_usage(usage, *, duration_ms=None):
+def format_usage(usage, *, duration_ms=None, timing=None):
     profile_labels = {"quick": "快速分析", "standard": "标准分析", "deep": "深度分析"}
     profile = (usage or {}).get("profile")
     suffix = (
@@ -116,6 +116,13 @@ def format_usage(usage, *, duration_ms=None):
     duration = ""
     if type(duration_ms) in (float, int) and duration_ms >= 0:
         duration = f" · 执行耗时：{duration_ms / 1000:.1f} 秒"
+        if isinstance(timing, dict) and isinstance(timing.get("rounds"), list):
+            # Where the time went, so a slow model round is visible at a glance.
+            duration += (
+                f"（预采集 {timing.get('prefetch', 0)} 秒 · "
+                f"模型 {len(timing['rounds'])} 轮 {timing.get('model', 0)} 秒 · "
+                f"工具 {timing.get('tools', 0)} 秒）"
+            )
     if not usage or usage.get("available") is not True:
         return "本轮 Token 消耗：模型未返回用量" + suffix + duration
     cached = usage.get("cached")

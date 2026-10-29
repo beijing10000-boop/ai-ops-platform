@@ -1724,6 +1724,11 @@ def test_alert_prefetch_collects_alert_window_history_and_weekly_trend(monkeypat
     assert create.call_count == 1 and task["status"] == "success"
     assert task["report"]["budget"]["used"]["calls"] == 6
     assert "- Zabbix 历史查询窗口（北京时间）：" in task["report"]["answer"]
+    # Stage timing: one model round, the model made no MCP calls of its own.
+    timing = task["report"]["timing"]
+    assert set(timing) == {"prefetch", "model", "tools", "rounds"}
+    assert len(timing["rounds"]) == 1 and timing["prefetch"] >= 0
+    assert timing["tools"] == 0.0
 
 
 def test_prefetch_star_collects_the_hosts_items_without_a_key_filter(monkeypatch):
