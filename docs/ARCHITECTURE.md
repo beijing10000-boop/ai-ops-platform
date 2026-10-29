@@ -1,6 +1,6 @@
 # 双 MCP 架构
 
-AI Ops Platform 运行 Web、alert-worker、qa-worker、diagnostic-worker、Redis 与可选飞书接收器。diagnostic-worker 负责 AI 分析编排，不是 SSH 执行器。SQLite 保存加密业务配置、报告与证据；所有应用服务共享同一数据卷。
+AI Ops Platform 运行 Web、alert-worker、alert-analysis-worker、qa-worker、diagnostic-worker、Redis 与可选飞书接收器。alert-worker 只发送告警与恢复卡片，不等待模型；告警的 AI 分析由 alert-analysis-worker 执行（默认 2 个副本，手动“AI分析”优先于自动分析），diagnostic-worker 负责 Web 诊断。这些 Worker 只编排 AI 分析，都不是 SSH 执行器。告警分析在入队时就创建排队中的任务，同一事件排队或执行期间不会重复提交。SQLite 保存加密业务配置、报告与证据；所有应用服务共享同一数据卷。
 
 ```mermaid
 flowchart TD

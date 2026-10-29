@@ -3,10 +3,8 @@
 import hmac
 import json
 import logging
-from redis import Redis
-from rq import Queue
 from .alert_mute import action_signature
-from .main import connection, REDIS_URL, read_setting
+from .main import connection, read_setting
 
 log = logging.getLogger(__name__)
 
@@ -139,28 +137,24 @@ def handle_analyze_action(value, operator_open_id, message_id=None, chat_id=None
     ):
         return False, "无法验证消息与告警所属群，请使用平台发送的原始卡片"
     chat_id = row[0]
-    with connection() as db:
-        if db.execute(
-            "SELECT 1 FROM diagnostic_tasks WHERE event_id=? AND kind='analysis' AND status IN ('queued','running')",
-            (str(event["event_id"]),),
-        ).fetchone():
-            return True, "正在分析中，请勿重复提交。"
-    redis = Redis.from_url(REDIS_URL)
-    key = "zabbix-ai:manual-analysis:" + event["event_id"]
-    if not redis.set(key, "queued", ex=300, nx=True):
-        return True, "此告警的 AI 分析已提交，请勿重复点击"
+    from .orchestrator import queues
+    from .worker import enqueue_analysis
+
+    # The queued task is created before the job; the active-task index then
+    # refuses repeated clicks for as long as the job waits or runs.
     try:
-        Queue("ai-alerts", connection=redis).enqueue(
+        _, created = enqueue_analysis(
+            queues.ALERT_MANUAL,
             "app.worker.process_manual_analysis",
             event,
             message_id,
             chat_id,
-            job_timeout=-1,
         )
     except Exception:
-        redis.delete(key)
         log.exception("MANUAL_ANALYSIS_ENQUEUE_FAILED")
         return False, "AI 分析任务提交失败"
+    if not created:
+        return True, "正在分析中，请勿重复提交。"
     return True, "已提交 AI 分析，结果将回复原告警消息"
 
 

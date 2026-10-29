@@ -16,13 +16,14 @@ from pydantic import BaseModel, Field
 from cryptography.fernet import Fernet
 from redis import Redis
 from rq import Queue
+from .orchestrator import queues
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DB = DATA_DIR / "app.sqlite3"
 MASTER_KEY = os.getenv("APP_ENCRYPTION_KEY", "")
 ADMIN_TOKEN = os.getenv("ADMIN_API_TOKEN", "")
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
-app = FastAPI(title="Zabbix AI Ops · Unified Platform", version="0.9.8")
+app = FastAPI(title="Zabbix AI Ops · Unified Platform", version="0.9.9")
 app.mount(
     "/assets",
     StaticFiles(directory=Path(__file__).parent.parent / "web" / "assets"),
@@ -948,7 +949,7 @@ def logs_overview():
     }
     try:
         redis = Redis.from_url(REDIS_URL, socket_connect_timeout=3, socket_timeout=5)
-        for name in ("ai-alerts", "ai-questions", "ai-diagnostics"):
+        for name in queues.ALL:
             queue = Queue(name, connection=redis)
             result["queues"][name] = {
                 "queued": len(queue),
@@ -985,7 +986,7 @@ def runtime_status():
         client = Redis.from_url(REDIS_URL, socket_connect_timeout=2, socket_timeout=3)
         result["redis"] = "ok" if client.ping() else "unavailable"
         workers = Worker.all(connection=client)
-        for q in ("ai-alerts", "ai-questions", "ai-diagnostics"):
+        for q in queues.ALL:
             result["queues"][q] = len(Queue(q, connection=client))
             result["workers"][q] = sum(q in w.queue_names() for w in workers)
     except Exception:

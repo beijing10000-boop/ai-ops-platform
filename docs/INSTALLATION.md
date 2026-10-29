@@ -56,7 +56,7 @@ AI 诊断页点击“验证诊断参数与关联”核验监控主机及 SSH MCP
 
 ```bash
 docker compose --profile feishu up -d feishu-receiver
-docker compose logs --tail=80 feishu-receiver web alert-worker qa-worker diagnostic-worker
+docker compose logs --tail=80 feishu-receiver web alert-worker alert-analysis-worker qa-worker diagnostic-worker
 ```
 
 更换飞书 App ID/Secret 后，执行 `docker compose --profile feishu restart feishu-receiver` 让长连接重新认证；其余业务配置由各任务实时读取。

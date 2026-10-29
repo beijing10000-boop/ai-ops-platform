@@ -210,6 +210,24 @@ def event_clock(event):
     return int(time.time())
 
 
+def create_task(question, event=None, profile_name=None):
+    """Create the queued task run() would create, so a queue can hold it first."""
+    event = event or {}
+    try:
+        directory = directory_request(question)
+    except ValueError:
+        directory = None
+    return tasks.create(
+        {"event": event, "question": question[:4000]},
+        source="alert" if event else "qa",
+        event_id=str(event["event_id"]) if event.get("event_id") else None,
+        diagnostic_type="disk"
+        if directory
+        else classify(event.get("event_name") or question),
+        profile=profile_name or read_setting("ai_analysis_profile") or "standard",
+    )
+
+
 async def run(
     prompt,
     question,
@@ -246,13 +264,7 @@ async def run(
         event = task["request"].get("event") or event
         limits = task["request"]["limits"]
     else:
-        task, created = tasks.create(
-            {"event": event, "question": question[:4000]},
-            source="alert" if event else "qa",
-            event_id=str(event["event_id"]) if event.get("event_id") else None,
-            diagnostic_type=kind,
-            profile=profile_name,
-        )
+        task, created = create_task(question, event, profile_name)
         if not created:
             raise tasks.AlreadyRunning("此事件已有分析任务，请查看现有任务")
         task_id = task["task_id"]

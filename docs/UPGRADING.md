@@ -1,5 +1,35 @@
 # 升级说明
 
+## v0.9.8 → v0.9.9：告警通知与 AI 分析拆分队列
+
+本次没有数据库迁移，无需更新 Skill、独立 SSH MCP 或 Zabbix MCP，飞书卡片签名也不变。变化如下：
+
+- `alert-worker` 只负责发送告警和恢复卡片。
+- 新服务 `alert-analysis-worker` 执行告警 AI 分析：先处理手动点击的“AI分析”，再处理自动分析。默认 2 个副本，即最多同时进行 2 次告警分析。
+
+升级前先备份数据库与配套主密钥（命令见下方“已部署 ai-ops-platform”一节）。然后在原部署目录执行：
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://127.0.0.1:8088/healthz
+docker compose ps alert-worker alert-analysis-worker
+```
+
+healthz 应返回 version 0.9.9；`docker compose ps` 应看到 1 个 `alert-worker` 和 2 个 `alert-analysis-worker`。未启用飞书接收器时去掉 `--profile feishu`；不要执行 `down -v`。
+
+在 Web 中打开“系统配置 → 服务与维护 → 查看服务与队列状态”，应看到 5 个队列；“手动告警分析”和“自动告警分析”各显示 2 个已注册 Worker。
+
+**调整并发数**：每次分析都会同时调用模型和两个 MCP。如果模型网关或 SSH MCP 有并发或频率限制，在部署目录的 `.env` 中设置 `AI_ALERT_ANALYSIS_WORKERS=1`（或其他正整数），然后重新执行上面的 `docker compose ... up -d`。设为 1 时分析会依次进行，但告警通知仍然不会等待分析。
+
+**升级前已在队列中的任务**：照常执行。旧格式的手动分析任务仍在 `ai-alerts` 队列里，由 `alert-worker` 按旧方式执行。
+
+**回滚**：本次没有数据库变更。回滚前先在服务状态页确认“手动告警分析”和“自动告警分析”的排队数都为 0，然后在部署目录执行 `git switch --detach 627a54a`，再执行同一条 `docker compose ... up -d --build --remove-orphans`（会移除 `alert-analysis-worker`）。如果回滚时这两个队列里还有任务，它们不会再被执行，对应事件会一直停在“排队中”，旧版本也无法再次分析这些事件。
+
+
 ## v0.9.7 → v0.9.8：Skill 工具结果完整送达模型、预算如实记录
 
 本次无数据库迁移，不改变飞书卡片签名，无需更新 Skill、独立 SSH MCP 或 Zabbix MCP，也不用重新导入 Skill。升级前先备份数据库与配套主密钥（命令见下方“已部署 ai-ops-platform”一节），然后在原部署目录更新 main 并重建全部容器：

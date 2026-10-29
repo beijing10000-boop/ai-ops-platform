@@ -62,6 +62,65 @@ def test_analyze_requires_admin_and_valid_event(monkeypatch):
     assert handle_analyze_action({**value, "sig": "wrong"}, "ou_admin")[0] is False
 
 
+def test_manual_analysis_uses_priority_queue_and_refuses_repeat_clicks(monkeypatch):
+    from types import SimpleNamespace
+    from app import worker
+
+    jobs = []
+
+    class Queue:
+        def __init__(self, name, connection=None):
+            self.name = name
+
+        def enqueue(self, func, *args, **kwargs):
+            jobs.append((self.name, func, args, kwargs["job_id"]))
+
+    monkeypatch.setattr(worker, "Queue", Queue)
+    monkeypatch.setattr(
+        worker, "Job", SimpleNamespace(exists=lambda job_id, connection=None: True)
+    )
+    event = {
+        "event_id": "884450",
+        "trigger_id": "202",
+        "host_id": "101",
+        "event_value": "1",
+        "severity": "4",
+        "event_name": "CPU high",
+    }
+    with connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO settings(key,value,secret) VALUES ('feishu_admin_open_ids','ou_admin',0)"
+        )
+        db.execute(
+            """INSERT OR REPLACE INTO alert_events
+            (event_id,event_value,event_name,host_name,severity,event_json)
+            VALUES (?, '1', 'CPU high', 'server', 4, ?)""",
+            (event["event_id"], json.dumps(event)),
+        )
+        db.execute(
+            "INSERT OR REPLACE INTO feishu_event_messages VALUES ('om_card_884450','884450','1','oc_group','problem')"
+        )
+    value = {
+        "op": "analyze_alert",
+        "event_id": "884450",
+        "trigger_id": "202",
+        "sig": action_signature("884450", "202", 0),
+    }
+    ok, message = handle_analyze_action(value, "ou_admin", "om_card_884450")
+    assert ok and "已提交" in message
+    [(queue, func, args, job_id)] = jobs
+    assert (queue, func) == ("ai-alert-manual", "app.worker.process_manual_analysis")
+    assert args == (event, "om_card_884450", "oc_group", job_id)
+    with connection() as db:
+        status = db.execute(
+            "SELECT status FROM diagnostic_tasks WHERE task_id=?", (job_id,)
+        ).fetchone()[0]
+    assert status == "queued"
+    # Still waiting in the queue: the queued task refuses a second click.
+    ok, message = handle_analyze_action(value, "ou_admin", "om_card_884450")
+    assert ok and "正在分析中" in message and len(jobs) == 1
+
+
 def test_close_mute_checks_permissions_and_removes_only_target(monkeypatch):
     from app.alert_actions import handle_unmute_action
     from app.main import connection
