@@ -13,9 +13,24 @@ log = logging.getLogger(__name__)
 _PREVIEW_LIMIT = 16000
 
 
+def _strip_internal_reasoning(value):
+    """Never persist model reasoning or opaque encrypted reasoning from prior rounds."""
+    if isinstance(value, list):
+        return [_strip_internal_reasoning(item) for item in value]
+    if isinstance(value, dict):
+        if value.get("type") == "reasoning":
+            return {"type": "reasoning", "omitted": True}
+        return {
+            key: _strip_internal_reasoning(item)
+            for key, item in value.items()
+            if key not in ("encrypted_content", "reasoning")
+        }
+    return value
+
+
 def _preview(value, secret_values=()):
     if isinstance(value, (dict, list)):
-        value = json.dumps(redact_data(value), ensure_ascii=False, default=str)
+        value = json.dumps(redact_data(_strip_internal_reasoning(value)), ensure_ascii=False, default=str)
     else:
         value = str(value if value is not None else "")
     value = redact(value, None)
