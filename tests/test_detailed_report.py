@@ -1,7 +1,5 @@
 """Detailed diagnostic export includes every saved record, under logs.read authorization."""
 
-import json
-
 import pytest
 from app import main
 from app.orchestrator import tasks
