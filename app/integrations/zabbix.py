@@ -143,23 +143,18 @@ def input_schema(name):
         elif key == "history":
             value = {"type": "integer", "enum": [0, 1, 2, 3, 4, 5, 6]}
         elif key in {"search", "filter"}:
+            # The model sees this schema in every later round; name the fields
+            # once instead of repeating the same value schema per field.
+            # validate_args() still enforces fields and sizes.
             value = {
                 "type": "object",
-                "properties": {
-                    field: {
-                        "anyOf": [
-                            {"type": "string", "maxLength": 160},
-                            {"type": "integer"},
-                            {
-                                "type": "array",
-                                "maxItems": 8,
-                                "items": {"type": "string", "maxLength": 80},
-                            },
-                        ]
-                    }
-                    for field in sorted(search_fields(name))
+                "propertyNames": {"enum": sorted(search_fields(name))},
+                "additionalProperties": {
+                    "type": ["string", "integer", "array"],
+                    "maxLength": 160,
+                    "maxItems": 8,
+                    "items": {"type": "string", "maxLength": 80},
                 },
-                "additionalProperties": False,
             }
         elif key in {"searchByAny", "searchWildcardsEnabled", "countOutput", "recent"}:
             value = {"type": "boolean"}

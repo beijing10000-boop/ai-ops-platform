@@ -57,8 +57,10 @@ def parse_document(text):
         meta = yaml.load(match[1], Loader=SkillLoader)
     except (yaml.YAMLError, ValueError) as exc:
         raise ValueError("Skill 元数据格式无效") from exc
-    if not isinstance(meta, dict) or set(meta) != {"name", "description"}:
-        raise ValueError("Skill 元数据只需 name 和 description")
+    if not isinstance(meta, dict) or not (
+        {"name", "description"} <= set(meta) <= {"name", "description", "prefetch"}
+    ):
+        raise ValueError("Skill 元数据只支持 name、description 和可选的 prefetch")
     name, description = meta["name"], meta["description"]
     if (
         not isinstance(name, str)
@@ -74,21 +76,115 @@ def parse_document(text):
         "name": name,
         "description": description.strip(),
         "instructions": match[2].strip(),
+        "prefetch": validate_prefetch(meta.get("prefetch", [])),
     }
 
 
-def document(name, description, instructions):
+# SSH tools that need more than host_id/revision cannot be pre-collected.
+PARAMETRIZED_SSH = {
+    "ssh_diagnose_service",
+    "ssh_diagnose_logs",
+    "ssh_diagnose_directory_usage",
+}
+ITEM_KEY = re.compile(r"[A-Za-z0-9_.,\[\]*/-]{1,80}")
+
+
+def validate_prefetch(rules):
+    """Skill-declared evidence the platform collects before the first model round.
+
+    Each rule: scopes, types (diagnostic types or "*"), and any of ssh (fixed
+    read-only SSH diagnostics), zabbix_items (item key search terms for the task
+    host) and schemas (tool schemas handed to the model up front).
+    """
+    from .diagnostics.playbooks import PLAYBOOKS
+    from .integrations.zabbix import READ_TOOLS
+
+    if not isinstance(rules, list) or len(rules) > 20:
+        raise ValueError("prefetch 须为最多 20 条规则的列表")
+    result = []
+    for rule in rules:
+        if not isinstance(rule, dict) or not {"scopes", "types"} <= set(rule) <= {
+            "scopes",
+            "types",
+            "ssh",
+            "zabbix_items",
+            "schemas",
+        }:
+            raise ValueError(
+                "prefetch 规则须包含 scopes、types，可选 ssh、zabbix_items、schemas"
+            )
+        lists = {
+            key: rule.get(key, [])
+            for key in ("scopes", "types", "ssh", "zabbix_items", "schemas")
+        }
+        if any(
+            not isinstance(value, list)
+            or len(value) > 8
+            or any(not isinstance(item, str) for item in value)
+            for value in lists.values()
+        ):
+            raise ValueError("prefetch 各字段须为最多 8 项的字符串列表")
+        if not lists["scopes"] or set(lists["scopes"]) - SCOPES:
+            raise ValueError("prefetch scopes 须为 alert、qa、web")
+        if not lists["types"] or set(lists["types"]) - set(PLAYBOOKS) - {"*"}:
+            raise ValueError("prefetch types 须为诊断类型或 *")
+        if len(lists["ssh"]) > 4 or any(
+            not re.fullmatch(r"ssh_diagnose_[a-z_]{1,40}", tool)
+            or tool in PARAMETRIZED_SSH
+            for tool in lists["ssh"]
+        ):
+            raise ValueError(
+                "prefetch ssh 只能是无需额外参数的 ssh_diagnose_* 工具（最多 4 个）"
+            )
+        if any(not ITEM_KEY.fullmatch(key) for key in lists["zabbix_items"]):
+            raise ValueError("prefetch zabbix_items 须为监控项 key 片段")
+        if len(lists["schemas"]) > 4 or any(
+            tool not in READ_TOOLS
+            and not re.fullmatch(r"ssh_diagnose_[a-z_]{1,40}", tool)
+            for tool in lists["schemas"]
+        ):
+            raise ValueError("prefetch schemas 须为已开放的工具名（最多 4 个）")
+        result.append(lists)
+    return result
+
+
+def document(name, description, instructions, prefetch=None):
+    meta = {"name": name, "description": description}
+    if prefetch:
+        meta["prefetch"] = prefetch
     return (
         "---\n"
-        + yaml.safe_dump(
-            {"name": name, "description": description},
-            allow_unicode=True,
-            sort_keys=False,
-        ).strip()
+        + yaml.safe_dump(meta, allow_unicode=True, sort_keys=False).strip()
         + "\n---\n\n"
         + instructions.strip()
         + "\n"
     )
+
+
+def scope_of(request, source):
+    return (
+        "alert"
+        if (request.get("event") or {}).get("event_id")
+        else "qa"
+        if source in {"qa", "feishu"}
+        else "web"
+    )
+
+
+def prefetch_plan(skills, scope, diagnostic_type):
+    """Merge the loaded Skills' matching rules, higher priority first, no repeats."""
+    plan = {"ssh": [], "zabbix_items": [], "schemas": []}
+    for skill in skills:
+        for rule in skill.get("prefetch") or []:
+            if scope in rule["scopes"] and (
+                diagnostic_type in rule["types"] or "*" in rule["types"]
+            ):
+                for key in plan:
+                    plan[key].extend(x for x in rule[key] if x not in plan[key])
+    plan["ssh"] = plan["ssh"][:4]
+    plan["schemas"] = plan["schemas"][:4]
+    plan["zabbix_items"] = plan["zabbix_items"][:8]
+    return plan
 
 
 def parse_package(filename, encoded):
@@ -345,13 +441,7 @@ def configure_base(ident, *, scopes, providers, enabled, priority, actor):
 
 
 def snapshot(request, source):
-    scope = (
-        "alert"
-        if (request.get("event") or {}).get("event_id")
-        else "qa"
-        if source in {"qa", "feishu"}
-        else "web"
-    )
+    scope = scope_of(request, source)
     selected = [row for row in rows(True) if row["enabled"] and scope in row["scopes"]]
     # A custom Skill in "standalone" mode replaces the base Skill for this scope;
     # "supplement" Skills load alongside it (higher priority first).

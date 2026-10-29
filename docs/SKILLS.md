@@ -36,6 +36,23 @@ description: 描述能力及适用问题，例如查询实时 Linux 内存与进
 先核验已登记目标，使用实际返回的 host_id 和 revision；完整说明结果及不足。
 ```
 
+### 预采集（prefetch，可选）
+
+元数据可以声明“开始分析前由平台先采集什么”，平台在第一轮模型请求之前并行执行，结果直接放进首条消息，省掉工具发现、目标解析和首轮采集的往返：
+
+```yaml
+prefetch:
+- scopes: [alert]                 # alert / qa / web
+  types: [cpu]                    # 诊断类型，或 * 表示全部
+  ssh: [ssh_diagnose_cpu, ssh_diagnose_processes]   # 只需 host_id 的 SSH 诊断，最多 4 个
+  zabbix_items: [system.cpu.load, system.cpu.util]  # 对任务主机按 key 片段执行 item_get
+  schemas: [history_get, trend_get]                 # 提前给模型的工具参数结构，最多 4 个
+```
+
+- 有 ssh 项时，平台先按任务目标解析 SSH 资产（告警 Host ID 用 ssh_resolve_host，问题里的 IP 用 ssh_resolve_target），解析失败只记为说明，不视为诊断缺口；之后的 SSH 诊断固定使用解析出的 host_id 与 revision。
+- zabbix_items 只在任务有 Zabbix Host ID 时执行。预采集计入采集次数，并为模型的后续补查保留至少 2 次。
+- 规则只在匹配的场景与诊断类型生效；platform-base 只为告警声明预采集，飞书问答和 Web 诊断仍按问题选择数据源（例如历史问题不会连接 SSH）。
+
 名称用 1–64 位小写字母、数字、连字符，platform-base 由平台保留。可创建多个 Skill，同一场景按优先级从高到低提供给模型；各 Skill 应说明自己的适用范围，减少冲突。启停、修改适用范围或正文都会产生新版本；修改参考资料时重新导入 ZIP。
 
 ## 平台如何执行

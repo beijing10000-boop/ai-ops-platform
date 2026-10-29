@@ -142,8 +142,9 @@ def update(ident: str, body: UpdateSkill, who=Depends(require("settings.manage")
         audit(who["open_id"], "skill_updated", row["name"])
         return public(saved)
     files = dict(row["files"])
+    # Keep declared prefetch rules; the Web editor only changes text fields.
     files["SKILL.md"] = skills.document(
-        row["name"], values["description"], values["instructions"]
+        row["name"], values["description"], values["instructions"], row["prefetch"]
     )
     package = {
         **checked(lambda: skills.parse_document(files["SKILL.md"])),

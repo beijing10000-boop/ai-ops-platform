@@ -128,7 +128,7 @@ const badge = (s) =>
 const sourceLabel = value => ({web: "Web 诊断", alert: "告警分析", qa: "监控问答", feishu: "飞书", ui_test: "界面测试"}[value] || value);
 function stageLabel(value) {
   if (String(value).startsWith("ssh_mcp:")) return "SSH 采集中 · " + ({resolve: "核验主机", cpu: "CPU", memory: "内存", processes: "进程", memory_processes: "内存进程", disk: "磁盘", directory: "目录占用", io: "磁盘 IO", network: "网络", sockets: "连接", system: "系统", service: "服务", logs: "日志", kernel: "内核"}[value.split(":")[1]] || "补充证据");
-  return labels[value] || ({collecting: "收集证据", zabbix_history: "查询监控历史", ai_reasoning: "AI 分析中", skill_analysis: "按 Skill 分析查询步骤", skill_ssh_mcp: "正在查询后台 MCP 服务并进行分析", skill_zabbix_mcp: "正在查询后台 MCP 服务并进行分析", retired: "旧任务已停用"}[value]) || value || "等待执行";
+  return labels[value] || ({collecting: "收集证据", zabbix_history: "查询监控历史", ai_reasoning: "AI 分析中", skill_analysis: "按 Skill 分析查询步骤", skill_prefetch: "按 Skill 预采集证据",skill_ssh_mcp: "正在查询后台 MCP 服务并进行分析", skill_zabbix_mcp: "正在查询后台 MCP 服务并进行分析", retired: "旧任务已停用"}[value]) || value || "等待执行";
 }
 const btn = (action, text, id = "", kind = "", disabled = false) =>
   `<button type="button" class="button ${kind}" data-action="${action}" data-id="${E(id)}" ${disabled ? "disabled" : ""}>${text}</button>`;

@@ -30,16 +30,23 @@ def usage_counts(response):
     if usage is None:
         return None
 
-    def count(name):
-        value = (
-            usage.get(name) if isinstance(usage, dict) else getattr(usage, name, None)
+    def field(source, name):
+        return (
+            source.get(name)
+            if isinstance(source, dict)
+            else getattr(source, name, None)
         )
+
+    def count(name, source=usage):
+        value = field(source, name)
         return value if type(value) is int and value >= 0 else None
 
     return {
         "input": count("input_tokens"),
         "output": count("output_tokens"),
         "total": count("total_tokens"),
+        # Prompt-cache hits are part of `input`; None when the gateway omits it.
+        "cached": count("cached_tokens", field(usage, "input_tokens_details")),
     }
 
 
@@ -102,8 +109,10 @@ def format_usage(usage, *, duration_ms=None):
         duration = f" · 执行耗时：{duration_ms / 1000:.1f} 秒"
     if not usage or usage.get("available") is not True:
         return "本轮 Token 消耗：模型未返回用量" + suffix + duration
-    return "本轮 Token 消耗：{:,}（输入 {:,} / 输出 {:,}）{}{}".format(
-        usage["total"], usage["input"], usage["output"], suffix, duration
+    cached = usage.get("cached")
+    hit = f"，其中缓存命中 {cached:,}" if type(cached) is int and cached > 0 else ""
+    return "本轮 Token 消耗：{:,}（输入 {:,}{} / 输出 {:,}）{}{}".format(
+        usage["total"], usage["input"], hit, usage["output"], suffix, duration
     )
 
 
