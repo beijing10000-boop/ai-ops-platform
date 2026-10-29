@@ -322,7 +322,7 @@ def test_compact_alert_card_and_recovery():
         "severity": "2",
         "event_value": "1",
         "host_name": "DESKTOP",
-        "host_ip": "172.20.108.2",
+        "host_ip": "198.51.100.2",
         "host_groups": "Office",
     }
     card = worker.make_card(event)
@@ -351,7 +351,7 @@ def test_alert_card_newlines_are_real():
             "severity": "3",
             "event_value": "1",
             "host_name": "C15-HX-M",
-            "host_ip": "172.20.202.1",
+            "host_ip": "198.51.100.3",
             "event_name": "Link down",
         }
     )
@@ -445,7 +445,7 @@ def test_zabbix_event_deep_link(monkeypatch):
         if e["tag"] == "action"
         for b in e["actions"]
     )
-    assert "172.20.200.93 转发" not in body
+    assert "192.0.2.10 转发" not in body
     recovery = worker.make_card({**event, "event_value": "0"})
     assert any(
         "eventid=6057922" in b.get("url", "")
@@ -619,7 +619,7 @@ def test_manual_analysis_progress_updates_and_context_for_both_states(monkeypatc
                     "event_value": state,
                     "event_name": "CPU high",
                     "host_name": "node1",
-                    "host_ip": "172.20.2.101",
+                    "host_ip": "198.51.100.21",
                 },
                 "om_original",
                 "oc_group",

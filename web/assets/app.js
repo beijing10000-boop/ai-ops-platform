@@ -491,7 +491,7 @@ function reportText() {
 }
 const configHelp = {
   web_protocol: "用于生成飞书登录回调和报告链接；HTTPS 证书由外部入口配置。",
-  web_public_host: "用户实际访问的平台域名/IP和端口，例如 172.20.200.94:8088。",
+  web_public_host: "用户实际访问的平台域名/IP和端口，例如 192.0.2.11:8088。",
   zabbix_frontend_url: "用于从告警卡片和报告打开 Zabbix 网页。",
   zabbix_webhook_secret: "验证 Zabbix 推送告警的身份，需与 Zabbix 告警媒介中的密钥一致。",
   ai_request_timeout_seconds: "默认 90 秒，受任务总时限及留给总结的时间共同约束。仅影响新任务。",

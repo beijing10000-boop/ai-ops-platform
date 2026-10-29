@@ -145,13 +145,13 @@ def test_hidden_kernel_error_retains_budget_reason_without_exposing_raw_logs():
 
 
 def test_qa_report_exposes_verified_host_and_original_budget_snapshot():
-    task, _ = tasks.create({"question": "查看172.20.2.101的目录"}, source="qa")
+    task, _ = tasks.create({"question": "查看198.51.100.21的目录"}, source="qa")
     tasks.finish(
         task["task_id"],
         {
             "answer": "已采集",
             "device_type": "linux",
-            "target": {"host_id": "11600", "host_name": "172.20.2.101"},
+            "target": {"host_id": "11600", "host_name": "198.51.100.21"},
         },
     )
     with main.connection() as db:
@@ -162,7 +162,7 @@ def test_qa_report_exposes_verified_host_and_original_budget_snapshot():
     data = client_for("auditor").get("/api/v1/platform/tasks/" + task["task_id"]).json()
     assert (
         data["alert"]["host_id"] == "11600"
-        and data["alert"]["host_name"] == "172.20.2.101"
+        and data["alert"]["host_name"] == "198.51.100.21"
     )
     assert data["budget"]["limits"]["calls"] == 12
 

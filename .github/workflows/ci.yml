@@ -14,8 +14,8 @@ jobs:
       matrix:
         python: ['3.11', '3.12']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '${{ matrix.python }}'
           cache: pip
@@ -26,7 +26,7 @@ jobs:
         if: success() || failure()
       - run: python -m ruff format --check --diff app tests
         if: success() || failure()
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: 'python-${{ matrix.python }}-results'
@@ -34,8 +34,8 @@ jobs:
   desktop:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
           cache: pip
@@ -53,7 +53,7 @@ jobs:
       - run: node --check web/assets/app.js && node --check web/assets/experience.js && node --check web/assets/setup.js && node --check web/assets/skills.js
       - run: AIOPS_BROWSER_CHANNEL=chrome python tests/browser_smoke.py
         id: browser-regression
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always() && (steps.browser-regression.outcome == 'success' || steps.browser-regression.outcome == 'failure')
         with:
           name: desktop-results
@@ -63,7 +63,7 @@ jobs:
   container:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: docker compose config --quiet
       - run: docker compose up -d --build --wait --wait-timeout 180
       - run: docker compose exec -T web python -m app.bootstrap

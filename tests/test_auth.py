@@ -71,9 +71,9 @@ def test_http_callback_uses_web_settings_only(monkeypatch):
             "INSERT INTO settings(key,value,secret) VALUES ('web_protocol','http',0)"
         )
         db.execute(
-            "INSERT INTO settings(key,value,secret) VALUES ('web_public_host','172.20.200.93:8088',0)"
+            "INSERT INTO settings(key,value,secret) VALUES ('web_public_host','192.0.2.10:8088',0)"
         )
-    assert _redirect_uri() == "http://172.20.200.93:8088/api/v1/auth/callback"
+    assert _redirect_uri() == "http://192.0.2.10:8088/api/v1/auth/callback"
     assert _secure_cookie() is False
     with connection() as db:
         db.execute("UPDATE settings SET value='https' WHERE key='web_protocol'")
@@ -91,7 +91,7 @@ def test_default_http_and_ui_https_switch(monkeypatch):
     from app.main import connection
 
     monkeypatch.setenv(
-        "FEISHU_LOGIN_REDIRECT_URI", "http://172.20.200.93:8088/api/v1/auth/callback"
+        "FEISHU_LOGIN_REDIRECT_URI", "http://192.0.2.10:8088/api/v1/auth/callback"
     )
     with connection() as db:
         db.execute(

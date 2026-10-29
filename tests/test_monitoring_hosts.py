@@ -84,7 +84,7 @@ def test_host_id_unavailable_and_old_asset_fields_are_rejected(remote):
     for bad in (
         {"asset_id": 1},
         {"zabbix_hostid": "10;id"},
-        {"zabbix_hostid": "172.20.1.1"},
+        {"zabbix_hostid": "198.51.100.1"},
         {"address": "10.0.0.1"},
         {"device_type": "linux"},
     ):
@@ -295,7 +295,7 @@ def test_monitoring_host_query_requests_authoritative_groups(monkeypatch):
                         [
                             {
                                 "hostid": "11848",
-                                "name": "172-20-200-93",
+                                "name": "192-0-2-10",
                                 "inventory": {},
                                 "hostgroups": [
                                     {"groupid": "2", "name": "Linux servers"}

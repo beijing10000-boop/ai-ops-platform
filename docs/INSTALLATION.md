@@ -23,9 +23,9 @@ docker compose exec -T web cat /app/data/bootstrap.token
 ## 2. Web 初始化与飞书登录
 
 1. 打开 `http://服务器IP:8088/setup`。
-2. 填写一次性初始化凭据、协议 HTTP、实际外部访问主机（例如 `172.20.200.94:8088`）、飞书 App ID、App Secret 和超级管理员 Open ID。
+2. 填写一次性初始化凭据、协议 HTTP、实际外部访问主机（例如 `192.0.2.11:8088`）、飞书 App ID、App Secret 和超级管理员 Open ID。
 3. 点击“验证初始化信息”，核对展示的回调地址，再保存。
-4. 在飞书开放平台配置相同的 OAuth 回调地址，如 `http://172.20.200.94:8088/api/v1/auth/callback`。使用飞书登录平台。
+4. 在飞书开放平台配置相同的 OAuth 回调地址，如 `http://192.0.2.11:8088/api/v1/auth/callback`。使用飞书登录平台。
 
 初始化完成后入口关闭；飞书登录、角色权限和 CSRF 保护诊断/配置接口。选择 HTTPS 仅表示外部入口采用 HTTPS，不会自动签发证书或改变 Docker 端口。
 

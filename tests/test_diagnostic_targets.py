@@ -8,11 +8,11 @@ from app.diagnostics.targets import (
 
 
 def test_explicit_target_selectors_and_ambiguous_requests():
-    assert question_target("看下172.20.2.101这台服务器") == ("ip", "172.20.2.101")
+    assert question_target("看下198.51.100.21这台服务器") == ("ip", "198.51.100.21")
     assert question_target("Host ID：11600的磁盘") == ("hostid", "11600")
     assert question_target("一般咨询") is None
     with pytest.raises(ValueError, match="多个"):
-        question_target("比较172.20.2.101与172.20.2.102")
+        question_target("比较198.51.100.21与198.51.100.22")
 
 
 def test_directory_descendants_cannot_escape_requested_root_or_jump_levels():

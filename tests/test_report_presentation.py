@@ -24,8 +24,8 @@ def test_json_report_does_not_expose_human_required_or_convert_raw_identifiers()
 
 
 def test_text_report_is_normalized_without_changing_precise_ip():
-    text = "172.20.2.135 90.12345%，RSS 1000 KiB"
+    text = "198.51.100.35 90.12345%，RSS 1000 KiB"
     result = readable_report_answer(text)
-    assert "172.20.2.135" in result
+    assert "198.51.100.35" in result
     assert "90.12%" in result
     assert "0.98 MiB" in result

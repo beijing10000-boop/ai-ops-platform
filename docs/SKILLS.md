@@ -8,7 +8,7 @@ v0.9.3 起，Skill 是**唯一可编辑的 AI 诊断策略**：数据源选择�
 2. 进入“Skill 管理”，点击“下载运维模板 ZIP”。原样即可使用，也可解压后修改 SKILL.md 与 references 文本，再压缩上传。
 3. 选择适用场景（飞书问答、Web 诊断、告警分析）与允许使用的后台服务，点击“验证并预览”。模板建议同时勾选两种服务。
 4. 将启用状态设为“启用”，点击“导入 Skill”；已有同名包时明确勾选“更新同名 Skill”。点击“验证工具”检查实际目录。验证只初始化 MCP 和读取工具目录，不登录主机、不调用模型。
-5. 在飞书或 Web 输入“查询 172.20.2.101 现在 CPU”或“查询 172.20.2.101 的 /data 目录占用，展开 3 层”。IP 必须已在 SSH 服务登记、核验公钥、绑定凭据，且在专用 Token 主机组/动作授权范围内。无需先选择 Zabbix 主机。
+5. 在飞书或 Web 输入“查询 198.51.100.21 现在 CPU”或“查询 198.51.100.21 的 /data 目录占用，展开 3 层”。IP 必须已在 SSH 服务登记、核验公钥、绑定凭据，且在专用 Token 主机组/动作授权范围内。无需先选择 Zabbix 主机。
 
 模板来源是 [SSH MCP Server](https://github.com/beijing10000-boop/ssh-mcp-server) 和 [initMAX Zabbix MCP Server](https://github.com/initMAX/zabbix-mcp-server)，只使用这两个服务的真实只读工具。实时问题通过 ssh_resolve_target 按已登记 IP 精确解析；历史告警用 Zabbix 查询。Zabbix 同 IP 多条 Host ID 只影响需要明确监控目标的历史查询，不影响独立 SSH 实时诊断。
 
