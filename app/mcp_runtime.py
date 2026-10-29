@@ -15,7 +15,6 @@ from .ai_reliability import (
     evidence_fallback,
     model_failure_code,
     model_failure_message,
-    request_response,
 )
 from .main import read_setting
 from .integrations import zabbix, ssh_mcp
@@ -28,6 +27,7 @@ from .diagnostics.targets import (
     directory_children,
 )
 from .orchestrator import tasks
+from .model_interactions import traced_response
 from .security.redact import redact
 
 log = logging.getLogger(__name__)
@@ -1032,8 +1032,11 @@ async def run(
                     if can_ssh:
                         tools = tools + [ssh_definition]
                     tasks.stage(task_id, "ai_reasoning")
-                    response = await request_response(
+                    response = await traced_response(
                         client,
+                        task_id=task_id,
+                        round_number=sum(d["kind"] == "round" for d in telemetry) + 1,
+                        secret_values=secret_values,
                         deadline=deadline,
                         timeout_seconds=int(
                             read_setting("ai_request_timeout_seconds") or 90
@@ -1137,8 +1140,12 @@ async def run(
                         and sum(d["kind"] == "round" for d in telemetry)
                         < limits["rounds"]
                     ):
-                        response = await request_response(
+                        response = await traced_response(
                             client,
+                            task_id=task_id,
+                            round_number=sum(d["kind"] == "round" for d in telemetry)
+                            + 1,
+                            secret_values=secret_values,
                             deadline=deadline,
                             timeout_seconds=int(
                                 read_setting("ai_request_timeout_seconds") or 90

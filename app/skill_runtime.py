@@ -12,12 +12,12 @@ from .ai_reliability import (
     evidence_fallback,
     model_failure_code,
     model_failure_message,
-    request_response,
 )
 from .orchestrator import tasks
 from .skill_mcp import SkillMCP
 from .skill_store import summary
 from .skill_context import model_view
+from .model_interactions import traced_response
 from .security.redact import redact, redact_data
 from .integrations.ssh_mcp import IntegrationError
 from .diagnostics.targets import question_target
@@ -250,8 +250,11 @@ async def run(
                     ):
                         reasons.append("任务剩余时间不足，停止采集并总结")
                     tasks.stage(task_id, "ai_reasoning" if final else "skill_analysis")
-                    response = await request_response(
+                    response = await traced_response(
                         client,
+                        task_id=task_id,
+                        round_number=rounds + 1,
+                        secret_values=secrets,
                         deadline=deadline,
                         timeout_seconds=int(
                             read_setting("ai_request_timeout_seconds") or 90

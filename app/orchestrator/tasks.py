@@ -231,6 +231,25 @@ def evidence_page(task_id, include_logs=False):
     return rows
 
 
+def model_interaction_page(task_id, *, include_content=False):
+    """Read per-round model metadata; body requires separate logs.read permission."""
+    from ..main import connection
+
+    with connection() as db:
+        cur = db.execute(
+            "SELECT id,round_number,model,status,created_at,duration_ms,"
+            "token_input,token_output,token_total,payload "
+            "FROM model_interactions WHERE task_id=? ORDER BY id LIMIT 100",
+            (task_id,),
+        )
+        rows = [row_dict(row, cur) for row in cur.fetchall()]
+    for row in rows:
+        encrypted = row.pop("payload")
+        if include_content:
+            row["payload"] = decode(encrypted)
+    return rows
+
+
 def finish(
     task_id, report, usage=None, status="success", error_type=None, duration_ms=None
 ):
