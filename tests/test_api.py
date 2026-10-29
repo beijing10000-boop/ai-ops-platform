@@ -216,32 +216,16 @@ def test_deprecated_settings_are_rejected_and_hidden():
     assert "ai_alert_prompt" not in result and "ai_qa_prompt" not in result
 
 
-def test_mcp_tool_loading_setting_allowed_and_validated():
+def test_retired_tool_loading_setting_is_no_longer_accepted():
+    # It only steered the retired fixed compatibility flow; Skills decide tools now.
     from app.main import ALLOWED, DEFAULTS
 
-    assert "ai_tool_loading" in ALLOWED
-    assert DEFAULTS["ai_tool_loading"] == "dynamic"
+    assert "ai_tool_loading" not in ALLOWED and "ai_tool_loading" not in DEFAULTS
     h = {"Authorization": "Bearer test-admin"}
     assert (
         client.put(
             "/api/v1/settings", headers=h, json={"values": {"ai_tool_loading": "full"}}
         ).status_code
-        == 200
-    )
-    assert client.get("/api/v1/settings", headers=h).json()["ai_tool_loading"] == "full"
-    assert (
-        client.put(
-            "/api/v1/settings",
-            headers=h,
-            json={"values": {"ai_tool_loading": "invalid"}},
-        ).status_code
         == 422
     )
-    assert (
-        client.put(
-            "/api/v1/settings",
-            headers=h,
-            json={"values": {"ai_tool_loading": "dynamic"}},
-        ).status_code
-        == 200
-    )
+    assert "ai_tool_loading" not in client.get("/api/v1/settings", headers=h).json()

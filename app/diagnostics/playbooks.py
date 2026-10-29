@@ -2,61 +2,51 @@ PLAYBOOKS = {
     "cpu": {
         "label": "CPU 异常",
         "metrics": ["system.cpu.util", "system.cpu.load", "vm.memory", "system.swap"],
-        "actions": ["cpu", "processes"],
         "limitation": "当前进程 CPU 不能证明其造成历史告警；必须核对采集时间和 iowait",
     },
     "memory": {
         "label": "内存不足",
         "metrics": ["vm.memory", "system.swap", "system.cpu.load"],
-        "actions": ["memory", "memory_processes", "kernel"],
         "limitation": "无权限读取内核日志时无法确认 OOM；RSS 排名不是完整归因",
     },
     "disk": {
         "label": "磁盘容量",
         "metrics": ["vfs.fs.size", "vfs.fs.inode"],
-        "actions": ["disk"],
         "limitation": "文件系统容量与 inode 不能确定具体大目录；目录占用可在独立 SSH MCP 检查，禁止自动清理",
     },
     "io": {
         "label": "IO 性能",
         "metrics": ["vfs.dev", "system.cpu.util"],
-        "actions": ["io", "cpu"],
         "limitation": "无 iostat 时仅返回累计 diskstats，不能将单点累计计数当作实时 IO 延迟",
     },
     "service": {
         "label": "服务异常",
         "metrics": ["proc.num", "net.tcp.service", "systemd"],
-        "actions": ["service", "sockets", "logs", "memory", "disk"],
         "limitation": "必须显式提供 systemd 服务名；禁止自动重启",
     },
     "network": {
         "label": "网络异常",
         "metrics": ["net.if", "net.tcp"],
-        "actions": ["network", "sockets"],
         "limitation": "网卡错误和 TCP 重传为累计计数，缺少前后对照时不能换算当前丢包率",
     },
     "system": {
         "label": "系统异常",
         "metrics": ["system.uptime", "vm.memory"],
-        "actions": ["system", "kernel"],
         "limitation": "SSH 当前快照不能重建未被采集的历史系统活动",
     },
     "unreachable": {
         "label": "主机不可达",
         "metrics": ["agent.ping", "icmpping", "system.uptime"],
-        "actions": ["system"],
         "limitation": "SSH 失败不等于主机关机，应分别核验 Agent、SSH 和网络",
     },
     "bottleneck": {
         "label": "资源瓶颈",
         "metrics": ["system.cpu", "vm.memory", "vfs.dev", "net.if"],
-        "actions": ["cpu", "memory", "io", "network"],
         "limitation": "相关性不等于因果关系",
     },
     "logs": {
         "label": "日志异常",
         "metrics": ["log", "systemd"],
-        "actions": ["logs"],
         "limitation": "仅指定服务和受限时间窗口；自动脱敏不保证移除全部业务敏感信息",
     },
 }

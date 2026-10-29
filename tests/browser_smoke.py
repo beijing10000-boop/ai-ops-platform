@@ -214,7 +214,7 @@ try:
             }
         )
         assert page.get_by_role("heading", name="诊断工具", exact=True).count() == 1
-        assert page.get_by_role("heading", name="标准诊断流程", exact=True).count() == 1
+        assert page.get_by_role("heading", name="诊断类型", exact=True).count() == 1
         discovered = []
 
         def discover(route):
@@ -608,11 +608,16 @@ try:
         )
         page.locator('[data-action="skill-check-import"]').click()
         page.locator('#skill-import [data-verify-result][data-result="ok"]').wait_for()
-        assert "ssh_resolve_target" in page.locator("#skill-preview pre").inner_text()
+        assert "本环境补充规则" in page.locator("#skill-preview pre").inner_text()
         page.locator('#skill-import select[name="enabled"]').select_option("true")
         page.locator('#skill-import button[type="submit"]').click()
-        page.locator('[data-action="skill-open"]').wait_for()
-        row = page.locator("tbody tr").filter(has_text="ops-mcp-readonly")
+        row = page.locator("tbody tr").filter(has_text="ops-custom")
+        row.wait_for()
+        # The platform-maintained base Skill is listed alongside the import.
+        assert (
+            "平台维护"
+            in page.locator("tbody tr").filter(has_text="platform-base").inner_text()
+        )
         assert "已启用" in row.inner_text()
         row.locator('[data-action="skill-open"]').click()
         page.locator("#skill-edit").wait_for()
@@ -622,11 +627,15 @@ try:
         page.locator('[data-action="skill-check-edit"]').click()
         page.locator('#skill-edit [data-verify-result][data-result="ok"]').wait_for()
         page.locator('#skill-edit button[type="submit"]').click()
-        page.get_by_role("heading", name="ops-mcp-readonly · v2").wait_for()
+        page.get_by_role("heading", name="ops-custom · v2").wait_for()
         page.screenshot(path=str(OUT / "skills-1440.png"), full_page=True)
         page.locator('nav [data-page="skills"]').click()
-        page.locator('[data-action="skill-toggle"]').click()
-        page.locator("tbody tr").filter(has_text="已停用").wait_for()
+        page.locator("tbody tr").filter(has_text="ops-custom").locator(
+            '[data-action="skill-toggle"]'
+        ).click()
+        page.locator("tbody tr").filter(has_text="ops-custom").filter(
+            has_text="已停用"
+        ).wait_for()
         checks.append(
             {
                 "workflow": "Skill ZIP upload/preview + enable + versioned edit + disable",

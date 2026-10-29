@@ -1,11 +1,14 @@
 """Validated, encrypted Markdown Skills. Packages are read as data, never extracted or executed."""
 
 import base64
+from functools import cache
 import hashlib
 import io
 import json
-from pathlib import PurePosixPath
+import logging
+from pathlib import Path, PurePosixPath
 import re
+import sqlite3
 import stat
 import uuid
 import zipfile
@@ -13,10 +16,15 @@ import zipfile
 import yaml
 from fastapi import HTTPException
 
+log = logging.getLogger(__name__)
 MAX_PACKAGE = 1024 * 1024
 MAX_DOCUMENT = 64000
 SCOPES = {"alert", "qa", "web"}
 PROVIDERS = {"ssh_mcp", "zabbix_mcp"}
+# A custom Skill either replaces the platform base Skill or is loaded with it.
+MODES = {"standalone", "supplement"}
+BASE_NAME = "platform-base"
+TEMPLATES = Path(__file__).parent / "skill_templates"
 
 
 class SkillLoader(yaml.SafeLoader):
@@ -146,6 +154,58 @@ def digest(files):
     ).hexdigest()
 
 
+def template_files(name):
+    root = TEMPLATES / name
+    return {
+        path.relative_to(root).as_posix(): path.read_text(encoding="utf-8")
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+@cache
+def base_package():
+    files = template_files(BASE_NAME)
+    return {**parse_document(files["SKILL.md"]), "files": files}
+
+
+def ensure_base(db):
+    """Install the platform base Skill, or refresh it when the bundled copy changed.
+
+    Admin choices (enabled, scopes, providers, priority) survive refreshes.
+    """
+    package = base_package()
+    wanted = digest(package["files"])
+    row = db.execute("SELECT id,digest FROM platform_skills WHERE managed=1").fetchone()
+    if row and row[1] == wanted:
+        return
+    if row:
+        db.execute(
+            "UPDATE platform_skills SET description=?,digest=?,bundle=?,revision=revision+1,"
+            "updated_by='platform',updated_at=CURRENT_TIMESTAMP WHERE id=? AND digest!=?",
+            (package["description"], wanted, encode(package["files"]), row[0], wanted),
+        )
+        return
+    try:
+        db.execute(
+            "INSERT INTO platform_skills(id,name,description,enabled,priority,scopes,"
+            "providers,digest,bundle,updated_by,managed,mode) "
+            "VALUES (?,?,?,1,50,?,?,?,?,'platform',1,'base')",
+            (
+                uuid.uuid4().hex,
+                BASE_NAME,
+                package["description"],
+                json.dumps(sorted(SCOPES)),
+                json.dumps(sorted(PROVIDERS)),
+                wanted,
+                encode(package["files"]),
+            ),
+        )
+    except sqlite3.IntegrityError:
+        # Another worker installed it first, or a custom Skill took the name.
+        log.info("PLATFORM_BASE_SKILL_NOT_INSTALLED name_taken_or_race")
+
+
 def encode(files):
     from .main import cipher
 
@@ -162,6 +222,7 @@ def rows(include_content=False):
     from .main import connection
 
     with connection() as db:
+        ensure_base(db)
         cursor = db.execute("SELECT * FROM platform_skills ORDER BY priority DESC,name")
         values = [
             dict(zip([col[0] for col in cursor.description], row))
@@ -169,6 +230,7 @@ def rows(include_content=False):
         ]
     for row in values:
         row["enabled"] = bool(row["enabled"])
+        row["managed"] = bool(row["managed"])
         row["scopes"], row["providers"] = (
             json.loads(row["scopes"]),
             json.loads(row["providers"]),
@@ -198,27 +260,44 @@ def validate_choices(scopes, providers):
         raise ValueError("请选择有效的适用场景与 MCP 服务")
 
 
-def save(package, *, scopes, providers, enabled, priority, actor, replace=False):
+def save(
+    package,
+    *,
+    scopes,
+    providers,
+    enabled,
+    priority,
+    actor,
+    replace=False,
+    mode="standalone",
+):
     from .main import connection
 
     validate_choices(scopes, providers)
+    if mode not in MODES:
+        raise ValueError("Skill 与基础 Skill 的关系须为替代或补充")
     ident = uuid.uuid4().hex
     with connection() as db:
         old = db.execute(
-            "SELECT id FROM platform_skills WHERE name=?", (package["name"],)
+            "SELECT id,managed FROM platform_skills WHERE name=?", (package["name"],)
         ).fetchone()
+        if (old and old[1]) or (not old and package["name"] == BASE_NAME):
+            raise HTTPException(
+                409, "platform-base 由平台维护，请用其他名称导入自定义 Skill"
+            )
         if old and not replace:
             raise HTTPException(409, "同名 Skill 已存在，请明确选择更新")
         if old:
             ident = old[0]
             db.execute(
-                "UPDATE platform_skills SET description=?,enabled=?,priority=?,scopes=?,providers=?,revision=revision+1,digest=?,bundle=?,updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                "UPDATE platform_skills SET description=?,enabled=?,priority=?,scopes=?,providers=?,mode=?,revision=revision+1,digest=?,bundle=?,updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                 (
                     package["description"],
                     int(enabled),
                     priority,
                     json.dumps(scopes),
                     json.dumps(providers),
+                    mode,
                     digest(package["files"]),
                     encode(package["files"]),
                     actor,
@@ -227,7 +306,7 @@ def save(package, *, scopes, providers, enabled, priority, actor, replace=False)
             )
         else:
             db.execute(
-                "INSERT INTO platform_skills(id,name,description,enabled,priority,scopes,providers,digest,bundle,updated_by) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO platform_skills(id,name,description,enabled,priority,scopes,providers,mode,digest,bundle,updated_by) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     ident,
                     package["name"],
@@ -236,11 +315,32 @@ def save(package, *, scopes, providers, enabled, priority, actor, replace=False)
                     priority,
                     json.dumps(scopes),
                     json.dumps(providers),
+                    mode,
                     digest(package["files"]),
                     encode(package["files"]),
                     actor,
                 ),
             )
+    return get(ident)
+
+
+def configure_base(ident, *, scopes, providers, enabled, priority, actor):
+    """The base Skill's text is platform-owned; admins choose only where it runs."""
+    from .main import connection
+
+    validate_choices(scopes, providers)
+    with connection() as db:
+        db.execute(
+            "UPDATE platform_skills SET enabled=?,priority=?,scopes=?,providers=?,revision=revision+1,updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND managed=1",
+            (
+                int(enabled),
+                priority,
+                json.dumps(scopes),
+                json.dumps(providers),
+                actor,
+                ident,
+            ),
+        )
     return get(ident)
 
 
@@ -253,6 +353,10 @@ def snapshot(request, source):
         else "web"
     )
     selected = [row for row in rows(True) if row["enabled"] and scope in row["scopes"]]
+    # A custom Skill in "standalone" mode replaces the base Skill for this scope;
+    # "supplement" Skills load alongside it (higher priority first).
+    if any(not row["managed"] and row["mode"] == "standalone" for row in selected):
+        selected = [row for row in selected if not row["managed"]]
     if sum(len(row["files"]["SKILL.md"].encode()) for row in selected) > 128000:
         raise HTTPException(
             422, "本场景启用的 Skill 正文合计超过 128 KB，请停用无关 Skill"
@@ -263,8 +367,17 @@ def snapshot(request, source):
 def summary(snapshot):
     return [
         {
-            key: row[key]
-            for key in ("id", "name", "description", "revision", "digest", "providers")
+            key: row.get(key)
+            for key in (
+                "id",
+                "name",
+                "description",
+                "revision",
+                "digest",
+                "providers",
+                "managed",
+                "mode",
+            )
         }
         for row in snapshot
     ]

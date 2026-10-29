@@ -1,6 +1,5 @@
-from app.mcp_runtime import compact_result, native_tools
+from app.mcp_runtime import compact_result
 from app.orchestrator.budgets import PROFILES
-from types import SimpleNamespace
 
 
 def test_default_standard_profile():
@@ -23,16 +22,24 @@ def test_compact_tool_result_bounded_and_preserves_tail():
     assert compact_result("normal", 4000) == "normal"
 
 
-def test_native_tools_keeps_only_authorized_discovered_tools():
-    tools = [
-        SimpleNamespace(
-            name=name,
-            description=name,
-            inputSchema={"type": "object", "properties": {}},
-        )
-        for name in ("host_get", "item_get", "custom_tool")
-    ]
-    assert {t["name"] for t in native_tools(tools)} == {"host_get", "item_get"}
+def test_token_usage_aggregation_helpers():
+    from types import SimpleNamespace
+
+    from app import mcp_runtime
+
+    first = SimpleNamespace(
+        usage=SimpleNamespace(input_tokens=120, output_tokens=30, total_tokens=150)
+    )
+    second = SimpleNamespace(
+        usage={"input_tokens": 80, "output_tokens": 20, "total_tokens": 100}
+    )
+    assert mcp_runtime.usage_counts(first) == {"input": 120, "output": 30, "total": 150}
+    assert mcp_runtime.usage_counts(second) == {"input": 80, "output": 20, "total": 100}
+    assert mcp_runtime.usage_counts(SimpleNamespace(usage=None)) is None
+    assert "250" in mcp_runtime.format_usage(
+        {"input": 200, "output": 50, "total": 250, "available": True}
+    )
+    assert "未返回用量" in mcp_runtime.format_usage({"available": False})
 
 
 def test_usage_footer_profiles_and_missing_usage():

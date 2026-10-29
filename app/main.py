@@ -49,7 +49,6 @@ ALLOWED = SENSITIVE | {
     "feishu_alert_chat_ids",
     "feishu_admin_open_ids",
     "ai_analysis_profile",
-    "ai_tool_loading",
 }
 ALLOWED |= {
     "ai_profile_budgets",
@@ -68,7 +67,6 @@ DEFAULTS = {
     "feishu_enabled": "false",
     "web_protocol": "http",
     "ai_analysis_profile": "standard",
-    "ai_tool_loading": "dynamic",
     "ai_request_timeout_seconds": "90",
     "ssh_mcp_enabled": "false",
     "ssh_mcp_timeout_seconds": "90",
@@ -509,13 +507,6 @@ def validate_settings_update(body, identity):
         )
     if any(not isinstance(v, str) or len(v) > 12000 for v in body.values.values()):
         raise HTTPException(status_code=422, detail="invalid value")
-    if "ai_tool_loading" in body.values and body.values["ai_tool_loading"] not in (
-        "dynamic",
-        "full",
-    ):
-        raise HTTPException(
-            status_code=422, detail="MCP工具加载模式必须为 dynamic 或 full"
-        )
     if "ai_analysis_profile" in body.values and body.values[
         "ai_analysis_profile"
     ] not in ("quick", "standard", "deep"):

@@ -180,26 +180,12 @@ async def validate_task(body):
         if body.zabbix_hostid and body.zabbix_hostid != str(event.get("host_id", "")):
             raise HTTPException(422, "所选主机与告警 Host ID 不匹配")
     host_id = str(event.get("host_id") or body.zabbix_hostid or "")
-    host = None
-    from .skill_store import snapshot
-
-    if snapshot({"event": event}, "web"):
-        if host_id and not event:
-            event = {"host_id": host_id, "event_name": body.question}
-        if body.diagnostic_type == "auto":
-            body.diagnostic_type = classify(event.get("event_name") or body.question)
-        return None, event
-    if host_id:
-        host = (await live_hosts(host_id=host_id))[0]
-        if not event:
-            event = {
-                "host_id": host["zabbix_hostid"],
-                "host_name": host["name"],
-                "event_name": body.question,
-            }
+    # Skills decide which sources to query; the selected Host ID is the target.
+    if host_id and not event:
+        event = {"host_id": host_id, "event_name": body.question}
     if body.diagnostic_type == "auto":
         body.diagnostic_type = classify(event.get("event_name") or body.question)
-    return host, event
+    return host_id, event
 
 
 @router.post("/tasks/validate")
@@ -207,18 +193,17 @@ async def validate_diagnostic(body: TaskInput, who=Depends(require("diagnostics.
     import asyncio
     from .integrations import ssh_mcp
 
-    host, event = await validate_task(body)
+    host_id, event = await validate_task(body)
     if (
-        host
-        and host["device_type"] == "linux"
+        host_id
         and body.profile != "quick"
         and read_setting("ssh_mcp_enabled") == "true"
     ):
         try:
             async with asyncio.timeout(20):
                 async with ssh_mcp.configured(read_setting, timeout=15) as adapter:
-                    binding = await adapter.resolve(host["zabbix_hostid"])
-            audit(who["open_id"], "ssh_mcp_binding_verified", host["zabbix_hostid"])
+                    binding = await adapter.resolve(host_id)
+            audit(who["open_id"], "ssh_mcp_binding_verified", host_id)
             return {
                 "ok": True,
                 "message": "监控主机与 SSH MCP Host ID 映射验证通过；未执行 SSH 或 AI 分析。",
@@ -234,13 +219,13 @@ async def validate_diagnostic(body: TaskInput, who=Depends(require("diagnostics.
             ) from None
     return {
         "ok": True,
-        "message": "诊断参数验证通过；本次未执行 SSH 或 AI 分析。实际查询按已启用的 Skill 决定；未启用时采用兼容流程。",
+        "message": "诊断参数验证通过；本次未执行 SSH 或 AI 分析。实际查询按已启用的 Skill 决定（默认为平台基础 Skill）。",
     }
 
 
 @router.post("/tasks", status_code=202)
 async def submit(body: TaskInput, who=Depends(require("diagnostics.run"))):
-    host, event = await validate_task(body)
+    _, event = await validate_task(body)
     request = {**body.model_dump(), "event": event}
     task, created = tasks.create(
         request,

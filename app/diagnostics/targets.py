@@ -31,16 +31,6 @@ def question_target(question):
     return None
 
 
-def matches_target(host, target):
-    key, value = target
-    if key == "hostid":
-        return str(host.get("hostid")) == value
-    return value in {str(host.get("host", "")), str(host.get("name", ""))} or any(
-        isinstance(interface, dict) and interface.get("ip") == value
-        for interface in (host.get("interfaces") or [])
-    )
-
-
 def validate_directory(root):
     if not isinstance(root, str) or len(root) > 120:
         raise ValueError("目录路径长度不正确")
@@ -66,30 +56,3 @@ def directory_request(question):
     if not 1 <= levels <= 5:
         raise ValueError("目录分析支持 1–5 层；请缩小范围后重试")
     return {"root": root, "depth": levels}
-
-
-def directory_children(payload, root):
-    data = payload.get("data") or (payload.get("summary") or {}).get("analysis") or {}
-    if not isinstance(data, dict):
-        return []
-    prefix = root.rstrip("/") + "/"
-    result = []
-    rows = data.get("top_directories", [])
-    if not isinstance(rows, list):
-        return []
-    for row in rows[:30]:
-        if not isinstance(row, dict):
-            continue
-        path = row.get("directory")
-        try:
-            validate_directory(path)
-        except ValueError:
-            continue
-        # Never follow remote paths outside the selected root or jump over levels.
-        if (
-            path.startswith(prefix)
-            and "/" not in path[len(prefix) :]
-            and path not in result
-        ):
-            result.append(path)
-    return result

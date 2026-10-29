@@ -5,6 +5,7 @@ import base64
 from contextlib import asynccontextmanager
 import io
 import json
+import re
 import stat
 import time
 from types import SimpleNamespace
@@ -18,9 +19,29 @@ from app.integrations import ssh_mcp, zabbix
 from app.orchestrator import tasks
 from app.skill_mcp import SkillMCP
 from test_platform import client_for
-from test_orchestrator_scenarios import Call
 
 P = "/api/v1/platform/skills"
+
+
+class Call:
+    """A model function_call item as returned by the Responses API."""
+
+    type = "function_call"
+
+    def __init__(self, name, args):
+        self.name = name
+        self.arguments = json.dumps(args)
+        self.call_id = "fixture-call"
+
+    def model_dump(self, **kwargs):
+        return {
+            "type": self.type,
+            "name": self.name,
+            "arguments": self.arguments,
+            "call_id": self.call_id,
+        }
+
+
 TEXT = "---\nname: direct-ssh\ndescription: 实时主机查询\n---\n直接查询 SSH MCP，禁止预先查询 Zabbix。"
 
 
@@ -52,7 +73,9 @@ def test_skill_crud_permissions_encryption_and_version_snapshots():
     client = client_for()
     body = upload(enabled=True, providers=["ssh_mcp"])
     assert client.post(P + "/validate", json=body).json()["ok"]
-    assert client.get(P).json()["items"] == []
+    # Only the platform-maintained base Skill exists before any import.
+    [base] = client.get(P).json()["items"]
+    assert base["name"] == "platform-base" and base["managed"] and base["enabled"]
     row = client.post(P, json=body).json()
     assert client.post(P, json=body).status_code == 409
     assert client_for("auditor").post(P, json=body).status_code == 403
@@ -68,7 +91,10 @@ def test_skill_crud_permissions_encryption_and_version_snapshots():
     old, _ = tasks.create({"question": "现在 CPU"}, source="qa")
     with main.connection() as db:
         assert (
-            TEXT not in db.execute("SELECT bundle FROM platform_skills").fetchone()[0]
+            TEXT
+            not in db.execute(
+                "SELECT bundle FROM platform_skills WHERE name='direct-ssh'"
+            ).fetchone()[0]
         )
         assert (
             "直接查询"
@@ -96,7 +122,11 @@ def test_skill_crud_permissions_encryption_and_version_snapshots():
     )
     client.put(P + "/" + row["id"], json={"enabled": False})
     after, _ = tasks.create({"question": "disabled"})
-    assert tasks.get(after["task_id"], private=True)["request"]["skills"] == []
+    # With the custom Skill disabled, the scope falls back to the base Skill.
+    assert [
+        s["name"]
+        for s in tasks.get(after["task_id"], private=True)["request"]["skills"]
+    ] == ["platform-base"]
     assert client.delete(P + "/" + row["id"]).status_code == 200
     assert (
         tasks.get(old["task_id"], private=True)["request"]["skills"][0]["files"][
@@ -119,14 +149,48 @@ def test_skill_scopes_priority_and_bundled_template():
     assert [
         row["name"] for row in skills.snapshot({"event": {"event_id": "1"}}, "feishu")
     ] == ["alert-triage"]
-    assert skills.snapshot({}, "web") == []
+    # No custom Skill covers Web diagnosis, so the base Skill serves it.
+    assert [row["name"] for row in skills.snapshot({}, "web")] == ["platform-base"]
     raw = client_for().get(P + "/template").content
     parsed = skills.parse_package("template.zip", base64.b64encode(raw))
-    assert parsed["name"] == "ops-mcp-readonly" and len(parsed["files"]) == 4
-    assert "ssh_resolve_target" in parsed["instructions"]
-    assert "诊断规则" in parsed["instructions"]
-    assert "重复 list_mcp_tools" in parsed["instructions"]
-    assert "sortfield" in parsed["files"]["references/zabbix-tools.md"]
+    assert parsed["name"] == "ops-custom" and list(parsed["files"]) == ["SKILL.md"]
+    assert "补充" in parsed["description"]
+    base = skills.base_package()
+    assert base["name"] == "platform-base" and len(base["files"]) == 4
+    assert "ssh_resolve_target" in base["instructions"]
+    assert "trend_get" in base["instructions"]
+    assert "load_cpu_divergence" in base["instructions"]
+    assert "sortfield" in base["files"]["references/zabbix-tools.md"]
+
+
+# Every tool name the bundled templates mention must exist, or verification fails.
+SSH_TOOLS = {
+    "ssh_resolve_target",
+    "ssh_resolve_host",
+    "ssh_list_hosts",
+    "ssh_test_connection",
+    "ssh_triage",
+    *(
+        "ssh_diagnose_" + action
+        for action in (
+            "cpu memory processes memory_processes pressure resource_limits disk io "
+            "mounts block_devices network sockets peer_connections peer_traffic "
+            "tcp_states system health capabilities failed_services "
+            "service_inventory timers time_sync containers container_stats "
+            "system_errors oom security_status service logs kernel directory_usage"
+        ).split()
+    ),
+}
+PLATFORM_TOOLS = {"list_mcp_tools", "call_mcp_tool", "read_skill_resource"}
+
+
+@pytest.mark.parametrize("template", ["platform-base", "custom-example"])
+def test_templates_only_reference_existing_tools(template):
+    text = "\n".join(skills.template_files(template).values())
+    referenced = set(re.findall(r"`((?:ssh|list|call|read)_[a-z_]+|[a-z]+_get)`", text))
+    assert referenced <= SSH_TOOLS | set(zabbix.READ_TOOLS) | PLATFORM_TOOLS, (
+        referenced - SSH_TOOLS - set(zabbix.READ_TOOLS) - PLATFORM_TOOLS
+    )
 
 
 @pytest.mark.parametrize(
@@ -951,3 +1015,172 @@ def test_alert_is_sent_once_without_unexpanded_macros(rig):
     assert sent["alert"]["event_name"] == event["event_name"]
     assert "recovery_date" not in sent["alert"] and "recovery_id" not in sent["alert"]
     assert event["recovery_date"] == "{EVENT.RECOVERY.DATE}"
+
+
+def base_row():
+    return next(row for row in client_for().get(P).json()["items"] if row["managed"])
+
+
+def test_base_skill_is_installed_and_refreshed_but_keeps_admin_choices(monkeypatch):
+    base = base_row()
+    assert base["scopes"] == ["alert", "qa", "web"] and base["mode"] == "base"
+    assert (
+        client_for()
+        .put(P + "/" + base["id"], json={"enabled": False, "priority": 7})
+        .status_code
+        == 200
+    )
+    changed = {
+        **skills.base_package(),
+        "files": {
+            **skills.base_package()["files"],
+            "SKILL.md": skills.base_package()["files"]["SKILL.md"] + "\n新版规则。\n",
+        },
+    }
+    monkeypatch.setattr(skills, "base_package", lambda: changed)
+    refreshed = base_row()
+    assert refreshed["digest"] == skills.digest(changed["files"])
+    assert refreshed["revision"] == base["revision"] + 2
+    # An upgrade replaces the text but not where or whether it runs.
+    assert refreshed["enabled"] is False and refreshed["priority"] == 7
+    assert "新版规则" in skills.get(refreshed["id"])["instructions"]
+    assert base_row()["revision"] == refreshed["revision"]  # unchanged copy: no-op
+
+
+def test_base_skill_text_is_read_only_and_cannot_be_deleted_or_shadowed():
+    base, client = base_row(), client_for()
+    assert (
+        client.put(P + "/" + base["id"], json={"instructions": "改写"}).status_code
+        == 409
+    )
+    assert (
+        client.put(P + "/" + base["id"], json={"mode": "standalone"}).status_code == 409
+    )
+    assert client.delete(P + "/" + base["id"]).status_code == 409
+    shadow = upload(TEXT.replace("direct-ssh", "platform-base"), enabled=True)
+    assert client.post(P, json={**shadow, "replace_existing": True}).status_code == 409
+    assert base_row()["revision"] == base["revision"]
+
+
+def test_standalone_skill_replaces_base_and_supplement_loads_with_it():
+    client = client_for()
+    supplement = upload(
+        TEXT.replace("direct-ssh", "site-rules"),
+        enabled=True,
+        scopes=["web"],
+        mode="supplement",
+    )
+    assert client.post(P, json=supplement).status_code == 201
+    install(scopes=["qa"])  # default mode: standalone
+    assert [r["name"] for r in skills.snapshot({}, "web")] == [
+        "site-rules",
+        "platform-base",
+    ]
+    assert [r["name"] for r in skills.snapshot({}, "qa")] == ["direct-ssh"]
+    assert [
+        r["name"] for r in skills.snapshot({"event": {"event_id": "9"}}, "alert")
+    ] == ["platform-base"]
+    row = next(r for r in client.get(P).json()["items"] if r["name"] == "site-rules")
+    assert row["mode"] == "supplement"
+    client.put(P + "/" + row["id"], json={"mode": "standalone"})
+    assert [r["name"] for r in skills.snapshot({}, "web")] == ["site-rules"]
+
+
+def test_scope_without_any_enabled_skill_fails_explicitly(rig):
+    client_for().put(P + "/" + base_row()["id"], json={"enabled": False})
+    create = AsyncMock()
+    answer, usage = asyncio.run(
+        mcp_runtime.run(
+            "report",
+            "CPU",
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            return_usage=True,
+        )
+    )
+    task = tasks.get(usage["task_id"])
+    assert task["status"] == "failed" and task["error_type"] == "NoSkillEnabled"
+    assert "启用" in answer and not create.called
+
+
+def test_secrets_never_reach_the_model_or_the_report(rig):
+    session, config = rig
+    install(providers=["ssh_mcp"])
+    config["openai_api_key"] = "sk-never-expose-api-key"
+    leaked = config["ssh_mcp_token"] + " / " + config["openai_api_key"]
+
+    async def call_tool(name, args):
+        session.calls.append((name, args))
+        data = (
+            {
+                "status": "success",
+                "host_id": 7,
+                "address": "198.51.100.21",
+                "revision": 3,
+                "name": "linux-live",
+                "zabbix_hostid": "10913",
+            }
+            if name == "ssh_resolve_target"
+            else {"status": "success", "host_id": 7, "note": "token " + leaked}
+        )
+        return SimpleNamespace(structuredContent=data, content=[], isError=False)
+
+    session.call_tool = call_tool
+    create = AsyncMock(
+        side_effect=[
+            response(
+                Call(
+                    "call_mcp_tool",
+                    {
+                        "provider": "ssh_mcp",
+                        "name": "ssh_resolve_target",
+                        "arguments": {"address": "198.51.100.21"},
+                    },
+                )
+            ),
+            response(
+                Call(
+                    "call_mcp_tool",
+                    {
+                        "provider": "ssh_mcp",
+                        "name": "ssh_diagnose_cpu",
+                        "arguments": {"host_id": 7},
+                    },
+                )
+            ),
+            response(text="结论，原文含 " + leaked),
+        ]
+    )
+    answer, usage = asyncio.run(
+        mcp_runtime.run(
+            "report",
+            "查询 198.51.100.21 现在 CPU",
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            return_usage=True,
+        )
+    )
+    model_inputs = json.dumps(
+        [call.kwargs for call in create.call_args_list], default=str
+    )
+    report = json.dumps(tasks.get(usage["task_id"])["report"], ensure_ascii=False)
+    for secret in (config["ssh_mcp_token"], config["openai_api_key"]):
+        assert secret not in model_inputs
+        assert secret not in report and secret not in answer
+
+
+def test_long_answer_is_kept_whole_in_web_and_feishu(rig):
+    from app.worker import analysis_summary
+
+    install(providers=["ssh_mcp"])
+    long_answer = "完整依据🙂\n" * 9000 + "最后一段不能丢失"
+    create = AsyncMock(return_value=response(text=long_answer))
+    answer, usage = asyncio.run(
+        mcp_runtime.run(
+            "report",
+            "CPU",
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            return_usage=True,
+        )
+    )
+    report = tasks.get(usage["task_id"])["report"]
+    assert answer == long_answer and report["answer"] == long_answer
+    assert long_answer in analysis_summary({"_report_answer": report["answer"]})

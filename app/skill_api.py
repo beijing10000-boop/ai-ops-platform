@@ -1,7 +1,7 @@
 """Web-managed Skills: preview, import, edit, enable, export and readiness checks."""
 
-from pathlib import Path
 import re
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
@@ -27,6 +27,7 @@ class ImportSkill(BaseModel):
         default_factory=lambda: ["ssh_mcp", "zabbix_mcp"], max_length=2
     )
     priority: int = Field(default=100, ge=0, le=2147483647)
+    mode: Literal["standalone", "supplement"] = "standalone"
 
 
 class UpdateSkill(BaseModel):
@@ -37,6 +38,7 @@ class UpdateSkill(BaseModel):
     scopes: list[str] | None = Field(default=None, max_length=3)
     providers: list[str] | None = Field(default=None, max_length=2)
     priority: int | None = Field(default=None, ge=0, le=2147483647)
+    mode: Literal["standalone", "supplement"] | None = None
 
 
 def checked(call):
@@ -57,17 +59,13 @@ def list_skills(who=Depends(require("tools.read"))):
 
 @router.get("/template")
 def template(who=Depends(require("tools.read"))):
-    root = Path(__file__).parent / "skill_templates" / "ops-readonly"
-    files = {
-        str(path.relative_to(root)): path.read_text()
-        for path in root.rglob("*")
-        if path.is_file()
-    }
+    # The base rules ship as the managed platform-base Skill; the download is a
+    # supplement skeleton for environment-specific rules only.
     return Response(
-        skills.export(files),
+        skills.export(skills.template_files("custom-example")),
         media_type="application/zip",
         headers={
-            "Content-Disposition": 'attachment; filename="ai-ops-skill-template.zip"'
+            "Content-Disposition": 'attachment; filename="ai-ops-skill-supplement-example.zip"'
         },
     )
 
@@ -99,6 +97,7 @@ def import_skill(body: ImportSkill, who=Depends(require("settings.manage"))):
             priority=body.priority,
             actor=who["open_id"],
             replace=body.replace_existing,
+            mode=body.mode,
         )
     )
     audit(who["open_id"], "skill_imported", row["name"])
@@ -124,6 +123,24 @@ def detail(ident: str, who=Depends(require("tools.read"))):
 def update(ident: str, body: UpdateSkill, who=Depends(require("settings.manage"))):
     row = skills.get(ident)
     values = {**row, **body.model_dump(exclude_none=True)}
+    if row["managed"]:
+        if {"description", "instructions", "mode"} & body.model_fields_set:
+            raise HTTPException(
+                409,
+                "platform-base 正文由平台随版本维护；自定义规则请写在“补充”模式的 Skill 中",
+            )
+        saved = checked(
+            lambda: skills.configure_base(
+                ident,
+                scopes=values["scopes"],
+                providers=values["providers"],
+                enabled=values["enabled"],
+                priority=values["priority"],
+                actor=who["open_id"],
+            )
+        )
+        audit(who["open_id"], "skill_updated", row["name"])
+        return public(saved)
     files = dict(row["files"])
     files["SKILL.md"] = skills.document(
         row["name"], values["description"], values["instructions"]
@@ -141,6 +158,7 @@ def update(ident: str, body: UpdateSkill, who=Depends(require("settings.manage")
             priority=values["priority"],
             actor=who["open_id"],
             replace=True,
+            mode=values["mode"],
         )
     )
     audit(who["open_id"], "skill_updated", row["name"])
@@ -150,6 +168,8 @@ def update(ident: str, body: UpdateSkill, who=Depends(require("settings.manage")
 @router.delete("/{ident}")
 def delete(ident: str, who=Depends(require("settings.manage"))):
     row = skills.get(ident)
+    if row["managed"]:
+        raise HTTPException(409, "platform-base 由平台维护，不能删除；不需要时可以停用")
     with connection() as db:
         db.execute("DELETE FROM platform_skills WHERE id=?", (ident,))
     audit(who["open_id"], "skill_deleted", row["name"])
