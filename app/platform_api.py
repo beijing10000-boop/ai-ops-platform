@@ -4,6 +4,7 @@ import json
 import sqlite3
 from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 from .platform_db import row_dict, archived_asset
 from .integrations import zabbix
@@ -354,6 +355,33 @@ def model_interactions(
         "content_visible": include_content,
         "note": "按模型请求记录；内容为脱敏、限长预览，不包含模型内部推理。仅升级后的新任务留存。",
     }
+
+
+@router.get("/tasks/{task_id}/detailed-report")
+def download_detailed_report(
+    task_id: str,
+    who=Depends(require("reports.read")),
+):
+    """Download all stored evidence and model previews, only for logs.read users."""
+    enforce(who["open_id"], "logs.read")
+    task = tasks.get(task_id, private=True)
+    if task is None:
+        raise HTTPException(404, "任务不存在")
+    from .detailed_report import build_detailed_report
+
+    document = build_detailed_report(task_id, task=task)
+    audit(who["open_id"], "detailed_report_export", task_id, task["trace_id"])
+    filename = "diagnostic-detailed-" + task_id[:12] + ".md"
+    return Response(
+        content=document,
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "private, no-store",
+            "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.post("/tasks/{task_id}/cancel")
