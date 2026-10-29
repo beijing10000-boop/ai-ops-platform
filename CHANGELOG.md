@@ -1,5 +1,11 @@
 # 更新记录
 
+## 1.0.9 — 2026-10-29
+
+- 各阶段耗时：报告新增 `timing`（预采集、模型各轮、模型自行发起的工具调用），飞书卡片页脚的“执行耗时”后面附上“（预采集 x 秒 · 模型 n 轮 y 秒 · 工具 z 秒）”，网页任务页的分析预算表新增“阶段耗时”一行（含最长一轮）。模型某一轮异常慢时一眼能看出来。
+- 磁盘读写延迟类告警（“Disk read/write request responses are too high”“Disk I/O is overloaded”等）此前被归为 bottleneck、按 CPU 预采集；分类词补充 disk read / disk write / read/write / i/o / await / iops / queue length / vfs.dev / 磁盘读写 / 响应时间，现在归为 io，预采集 vfs.dev 监控项与 iowait。
+- platform-base 的 CPU、内存、磁盘、IO、网络规则预载 item_get 参数结构，模型想补查监控项时不必先取工具目录（版本号 +1）。
+
 ## 1.0.8 — 2026-10-29
 
 - 飞书“AI 分析结果”卡片正文放宽到 1000 字内，并在处理建议之后加入“分析与依据”（占剩余篇幅，按句子截断）：结论最多 400 字，处理建议最多 8 条。不再标注“需人工处理”。告警提示词要求 analysis 写 200–400 字、证据编号只以括号附在句末，卡片去掉编号后仍通顺。
