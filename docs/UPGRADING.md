@@ -1,5 +1,29 @@
 # 升级说明
 
+## v0.9.7 → v0.9.8：Skill 工具结果完整送达模型、预算如实记录
+
+本次无数据库迁移，不改变飞书卡片签名，无需更新 Skill、独立 SSH MCP 或 Zabbix MCP，也不用重新导入 Skill。升级前先备份数据库与配套主密钥（命令见下方“已部署 ai-ops-platform”一节），然后在原部署目录更新 main 并重建全部容器：
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://127.0.0.1:8088/healthz
+```
+
+healthz 应返回 version 0.9.8。未启用飞书接收器时去掉 `--profile feishu`；不要执行 `down -v`。新逻辑只对升级后创建的任务生效：发起一次 Linux 主机 CPU 诊断，然后在“诊断详情 → 下载详细报告”中检查：
+
+- 预算部分出现 `limits_hit`，写明触发强制总结的上限，以及 Token 是否超出预算；
+- 逐轮交互中，同一工具的参数结构不再重复查询，历史查询结果中不再出现 `...[truncated]...`；
+- 告警任务首轮输入只有一份告警，并且不含 `{EVENT.RECOVERY.*}` 等未展开的宏。
+
+`budget_exhausted` 现在只要触达任一预算上限就为真。这只是预算说明，不计入诊断不足，也不改变任务状态。
+
+回滚：本次无数据库变更，在部署目录切回 v0.9.7 的提交（`git switch --detach 4905e21`）后重新执行上面的 `docker compose ... up -d --build` 即可。新任务报告里多出的 `limits_hit` 字段，旧版本会直接忽略。
+
+
 ## v0.9.6 → v0.9.7：下载详细报告
 
 本次不改变数据库结构，无需更新 SSH MCP 或 Skill。升级前备份数据库和主密钥，拉取 main 并重建 Web/诊断 Worker。进入“AI 诊断 → 诊断详情”：原“下载报告”仍生成简版 Markdown；有 reports.read + logs.read 权限的超级管理员或运维管理员额外看到“下载详细报告”，导出全部已保存 MCP 原始证据、任务与 Skill 快照、时间线，以及模型交互预览。该下载在服务端重新验权、脱敏并审计，浏览器不需要打开“读取日志证据”。模型交互本就限长，旧任务未保存的内容不可恢复；内部资料请按敏感运维资料保管。
