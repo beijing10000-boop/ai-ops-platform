@@ -1726,6 +1726,42 @@ def test_alert_prefetch_collects_alert_window_history_and_weekly_trend(monkeypat
     assert "- Zabbix 历史查询窗口（北京时间）：" in task["report"]["answer"]
 
 
+def test_prefetch_star_collects_the_hosts_items_without_a_key_filter(monkeypatch):
+    log = zabbix_rig(
+        monkeypatch,
+        lambda name, args: (
+            [{"itemid": "1", "key_": "agent.ping", "value_type": "3", "lastclock": "1"}]
+            if name == "item_get"
+            else []
+        ),
+    )
+    text = (
+        "---\nname: whole-host\ndescription: 全部监控项\nprefetch:\n"
+        "- scopes: [alert]\n  types: [unreachable]\n  zabbix_items: ['*']\n"
+        "---\n按预采集分析。"
+    )
+    client_for().post(P, json=upload(text, enabled=True, providers=["zabbix_mcp"]))
+    event = {
+        "event_id": "770300",
+        "event_name": "Windows: Zabbix agent is not available (for 3m)",
+        "host_id": "10913",
+    }
+    create = AsyncMock(return_value=response(text='{"cause": "agent 停止"}'))
+    asyncio.run(
+        mcp_runtime.run(
+            "JSON",
+            json.dumps({"alert": event}, ensure_ascii=False),
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            event=event,
+            return_usage=True,
+        )
+    )
+    [(_, args)] = [(name, args) for name, args in log if name == "item_get"]
+    assert "search" not in args["extra_params"]
+    assert args["extra_params"]["hostids"] == ["10913"]
+    assert args["extra_params"]["limit"] == 60
+
+
 def test_errors_wrapped_by_anyio_while_ssh_is_connected_still_give_partial_reports(
     rig, monkeypatch
 ):

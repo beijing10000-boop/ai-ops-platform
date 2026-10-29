@@ -1,5 +1,10 @@
 # 更新记录
 
+## 1.0.7 — 2026-10-29
+
+- 不可达 / agent 不可用类告警（unreachable）的预采集：取该主机全部监控项（最多 60 个，含最近采集时间），平台在 signals 里给出 `collection_freshness`（多少监控项在最近 10 分钟内仍有新数据、最后一次采集时间），一眼区分“整机不可达”与“只是 agent 停了”；预载 item_get 参数结构，省掉模型第一轮的目录查询。基础 Skill 新增该类告警的分析指引：用预采集结果直接总结，不再查 problem_get、重复 event_get 或逐个翻监控项。此前一条 Windows agent 不可用告警要摸索 3 轮才开始写结论，总结轮再撞上 70 秒请求超时。
+- Skill prefetch 的 `zabbix_items` 支持 `"*"`（不按 key 过滤）。platform-base 版本号 +1。
+
 ## 1.0.6 — 2026-10-29
 
 - 总结轮（tool_choice=none）里模型若仍夹带工具调用，平台现在直接采用它最终给出的文本结论。百炼上的 DeepSeek 会无视 tool_choice 发起调用，网关回以 “Tool … does not exists” 后模型继续并给出了完整 JSON，但此前平台只看到调用、丢掉了答案，报告落为“模型未返回最终结论”。

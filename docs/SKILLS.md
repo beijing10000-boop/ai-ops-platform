@@ -51,7 +51,7 @@ prefetch:
 ```
 
 - 有 ssh 项时，平台先按任务目标解析 SSH 资产（告警 Host ID 用 ssh_resolve_host，问题里的 IP 用 ssh_resolve_target），解析失败只记为说明，不视为诊断缺口；之后的 SSH 诊断固定使用解析出的 host_id 与 revision。
-- zabbix_items 只在任务有 Zabbix Host ID 时执行。预采集计入采集次数，并为模型的后续补查保留至少 2 次。
+- zabbix_items 只在任务有 Zabbix Host ID 时执行；写 `"*"` 表示不按 key 过滤、取该主机的监控项（最多 60 个，含最近采集时间），平台据此在 signals 里给出 `collection_freshness`（仍在更新的监控项数）。预采集计入采集次数，并为模型的后续补查保留至少 2 次。
 - 告警任务无论 Skill 是否声明，平台都先按告警的触发器 ID 查 item_get（触发器对应的监控项）和 event_get（该触发器近 24 小时的事件），并把这些监控项排在 history 采集的最前面；网络设备等没有 SSH 资产的对象因此同样能一轮完成。
 - history 按声明顺序在 item_get 返回的数值型监控项里匹配（`*` 为通配，`[`、`,` 按原文匹配），最多取 8 项：平台用 history_get 取告警时间前后各 30 分钟的完整序列（手动分析也以告警时间为准），再用 trend_get 取前 4 项近 7 天的小时趋势。两者整窗口一次取完，发给模型的是统计值加样本。
 - 规则只在匹配的场景与诊断类型生效；platform-base 只为告警声明预采集，飞书问答和 Web 诊断仍按问题选择数据源（例如历史问题不会连接 SSH）。

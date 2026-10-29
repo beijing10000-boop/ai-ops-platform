@@ -33,9 +33,14 @@ prefetch:
   history: ["net.if.in[*]", "net.if.out[*]"]
   schemas: [history_get, trend_get]
 - scopes: [alert]
-  types: [system, service, logs, unreachable]
+  types: [system, service, logs]
   ssh: [ssh_diagnose_system]
   schemas: [history_get, event_get]
+- scopes: [alert]
+  types: [unreachable]
+  ssh: [ssh_diagnose_system]
+  zabbix_items: ["*"]
+  schemas: [history_get, event_get, item_get]
 ---
 
 # 平台基础诊断规则
@@ -76,7 +81,8 @@ prefetch:
    - SSH 返回 `load_cpu_divergence`（负载高但 CPU 空闲）时，优先核查 `procs_blocked`、D 状态进程（`uninterruptible` 的 wchan）和 PSI，而不是只看 CPU 占用排行。
    - 当前谁在占 CPU 以 `cpu_interval`（最近 1 秒增量）为准；`cpu_percent` 是进程生命周期平均值，不能代表告警时段。
    - VMware 等虚拟机的 steal 通常为 0，不能据此排除宿主机 CPU 争抢；需要时建议在虚拟化平台查看 CPU Ready。
-6. 已有 2–4 项最关键的证据足以支撑结论时就总结，不为用满预算继续采集。
+6. 不可达 / agent 不可用告警：预采集里已有可用性监控项的历史（何时由 1 变 0）、近 24 小时事件和该主机全部监控项的最近采集时间，signals 里的 `collection_freshness` 已算好“有多少监控项仍在更新”。全部停止更新则按主机不可达或采集链路中断处理，部分仍在更新则更可能是 agent 服务本身；没有 ICMP 监控项时写明无法区分整机宕机与 agent 停止。不要再查 problem_get、重复 event_get 或逐个翻监控项，直接总结。
+7. 已有 2–4 项最关键的证据足以支撑结论时就总结，不为用满预算继续采集。
 
 ## 问答与 Web 诊断
 

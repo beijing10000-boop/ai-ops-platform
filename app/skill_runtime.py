@@ -523,14 +523,20 @@ async def run(
                     )
                 )
             if plan["zabbix_items"] and "item_get" in tools:
+                # "*" asks for the host's items as a whole (which of them are
+                # still being collected matters more than any one key).
+                narrow = (
+                    {}
+                    if "*" in plan["zabbix_items"]
+                    else {"search": {"key_": plan["zabbix_items"]}, "searchByAny": True}
+                )
                 jobs.append(
                     (
                         "zabbix_mcp",
                         "item_get",
                         {
                             "hostids": [target[1]],
-                            "search": {"key_": plan["zabbix_items"]},
-                            "searchByAny": True,
+                            **narrow,
                             "output": fields,
                             "limit": 60,
                         },

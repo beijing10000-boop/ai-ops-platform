@@ -143,6 +143,46 @@ def test_model_alert_drops_only_unexpanded_zabbix_macros():
     assert "recovery_date" in event and model_alert(None) == {}
 
 
+def test_collection_freshness_signal_separates_dead_hosts_from_stopped_agents(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+    from app import skill_context
+
+    now = 1_793_274_921  # 2026-10-29 19:55:21 Beijing time
+    monkeypatch.setattr(skill_context, "time", SimpleNamespace(time=lambda: now))
+
+    def items(*ages):
+        return {
+            "records": [
+                {"itemid": str(i), "key_": f"k{i}", "lastclock": str(now - age)}
+                for i, age in enumerate(ages)
+            ]
+        }
+
+    [stale] = skill_context.derive_signals(
+        [("zabbix_mcp", "item_get", items(1700, 1650, 1600), "E8")]
+    )
+    assert stale["metric"] == "collection_freshness" and stale["level"] == "warning"
+    assert stale["evidence_id"] == "E8"
+    assert stale["value"] == {
+        "items": 3,
+        "updated_within_10m": 0,
+        "newest_lastclock_local": "2026-10-29T19:28:41+08:00",
+    }
+    assert "全部停止更新" in stale["hint"] and "19:28:41" in stale["hint"]
+    [mixed] = skill_context.derive_signals(
+        [("zabbix_mcp", "item_get", items(1700, 60, 30), "E2")]
+    )
+    assert mixed["level"] == "info" and mixed["value"]["updated_within_10m"] == 2
+    assert "2/3" in mixed["hint"]
+    # Too few items to say anything about the host.
+    assert (
+        skill_context.derive_signals([("zabbix_mcp", "item_get", items(60, 30), "E2")])
+        == []
+    )
+
+
 def test_ssh_process_lists_keep_busy_rows_only_and_leave_the_evidence_whole():
     rows = [
         {"pid": i, "name": "postgres", "cpu_percent": 13.0 - i, "memory_percent": 28.0}

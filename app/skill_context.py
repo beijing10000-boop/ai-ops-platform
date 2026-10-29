@@ -5,9 +5,15 @@ Only the model context receives a preview, never the authoritative report.
 """
 
 from collections import defaultdict
+from datetime import datetime
 import json
 from math import isfinite
 import re
+import time
+from zoneinfo import ZoneInfo
+
+BEIJING = ZoneInfo("Asia/Shanghai")
+FRESH_SECONDS = 600
 
 # A schema cut mid-JSON cannot be called correctly; discovery gets its own budget
 # and drops whole tools instead (four Zabbix schemas are roughly 14k characters).
@@ -198,6 +204,7 @@ def derive_signals(collected):
     outcome, not the size-limited view, so trimmed rows still count.
     """
     signals, latest = [], {}
+    clocks, clock_evidence = [], None
     for provider, tool, outcome, evidence_id in collected:
         if not isinstance(outcome, dict):
             continue
@@ -205,6 +212,9 @@ def derive_signals(collected):
             for row in outcome.get("records") or []:
                 if isinstance(row, dict) and row.get("key_"):
                     latest[row["key_"]] = (row.get("lastvalue"), evidence_id)
+                if isinstance(row, dict) and str(row.get("lastclock", "")).isdigit():
+                    clocks.append(int(row["lastclock"]))
+                    clock_evidence = clock_evidence or evidence_id
         elif provider == "ssh_mcp" and isinstance(outcome.get("data"), dict):
             for finding in outcome["data"].get("findings") or []:
                 if isinstance(finding, dict) and finding.get("level") in {
@@ -227,6 +237,36 @@ def derive_signals(collected):
                             },
                         }
                     )
+
+    # Whether the host's items are still being collected: for "agent not
+    # available" alerts this separates a dead host from a stopped agent, and
+    # SSH is not an option on Windows or network devices.
+    if len(clocks) >= 3:
+        now = int(time.time())
+        fresh = sum(1 for clock in clocks if now - clock <= FRESH_SECONDS)
+        newest = max(clocks)
+        signals.append(
+            {
+                "source": "zabbix_mcp",
+                "evidence_id": clock_evidence,
+                "level": "warning" if fresh == 0 else "info",
+                "metric": "collection_freshness",
+                "value": {
+                    "items": len(clocks),
+                    "updated_within_10m": fresh,
+                    "newest_lastclock_local": datetime.fromtimestamp(
+                        newest, BEIJING
+                    ).isoformat(),
+                },
+                "hint": (
+                    f"该主机 {len(clocks)} 个监控项全部停止更新，最后一次采集在 "
+                    f"{datetime.fromtimestamp(newest, BEIJING).strftime('%H:%M:%S')}"
+                    "：整机不可达或 Zabbix 到该主机的采集链路中断，而不只是单个监控项"
+                    if fresh == 0
+                    else f"该主机 {fresh}/{len(clocks)} 个监控项在最近 10 分钟内仍有新数据：主机或采集链路至少部分可用，问题更可能在未更新的那部分（如 agent 服务本身）"
+                ),
+            }
+        )
 
     def number(key):
         try:
