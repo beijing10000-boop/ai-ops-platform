@@ -15,7 +15,9 @@ PROFILES = {
         "calls": 12,
         "per_round": 4,
         "result_chars": 4000,
-        "seconds": 110,
+        # Thinking models spend 15–40 s a round and the summary round sends the
+        # whole context; 110 s only fitted three rounds.
+        "seconds": 180,
         "tokens": 24000,
     },
     "deep": {
@@ -23,7 +25,7 @@ PROFILES = {
         "calls": 16,
         "per_round": 8,
         "result_chars": 6000,
-        "seconds": 150,
+        "seconds": 240,
         "tokens": 48000,
     },
 }
