@@ -32,7 +32,17 @@ docker compose --profile feishu up -d --build --remove-orphans --wait --wait-tim
 curl -fsS http://127.0.0.1:8088/healthz
 ```
 
-healthz 应返回 version 1.0.0。未启用飞书接收器时去掉 `--profile feishu`；不要执行 `down -v`。浏览器按 Ctrl+F5 刷新。
+healthz 应返回 version 1.0.0。未启用飞书接收器时去掉 `--profile feishu`；不要执行 `down -v`。浏览器按 Ctrl+F5 刷新。如果 `WEB_BIND_IP` 设成了服务器地址，curl 要用该地址，127.0.0.1 访问不到。
+
+**构建时 pip 下载超时**（`ReadTimeoutError: HTTPSConnectionPool(host='files.pythonhosted.org'...)`）：v1.0 升级了依赖，第一次构建要重新下载全部 Python 包。构建失败时 compose 不会替换正在运行的容器，旧版本照常运行，数据库也没有变化。
+
+Dockerfile 已加长超时并自动重试。如果访问 PyPI 仍然很慢，在部署目录的 `.env` 中加一行镜像源，例如：
+
+```bash
+PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+```
+
+然后重新执行上面的 `docker compose ... up -d --build`。镜像源地址会写进镜像构建记录，不要使用带账号密码的地址。
 
 ### 3. 处理原有 Skill（必须看）
 
