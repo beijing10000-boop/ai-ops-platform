@@ -388,6 +388,25 @@ function readableReportAnswer(raw) {
   if (value.human_required === true) lines.push("需人工核验：是");
   return lines.join("\n\n");
 }
+function modelInteractionsPanel(data) {
+  const items = data?.items || [];
+  const introText = "按模型请求记录实际发送内容和模型返回值；脱敏、限长预览。Token 为模型返回的逐轮实际用量；MCP 证据在下方单独查看。";
+  if (!items.length) return panel("与大模型交互记录", '<div class="empty">暂无交互记录。旧任务不会补录；新诊断任务执行后自动保存。</div>', introText);
+  const content = items.map((entry) => {
+    const payload = entry.payload || {}, request = payload.request || {}, response = payload.response || {};
+    const tokenText = `输入 ${fmt(entry.token_input)} / 输出 ${fmt(entry.token_output)} / 合计 ${fmt(entry.token_total)}`;
+    const preview = (title, value) => value ? `<details class="evidence"><summary>${E(title)} · ${fmt(value.original_chars)} 字符${value.truncated ? " · 已截断" : ""}</summary><pre>${E(value.text)}</pre></details>` : "";
+    const details = data.content_visible
+      ? preview("系统指令（脱敏预览）", request.instructions) +
+        preview("发送给模型的消息（脱敏预览）", request.input) +
+        preview("模型返回的正文（脱敏预览）", response.text) +
+        (response.items?.length ? `<details class="evidence"><summary>模型输出类型与工具调用</summary><pre>${E(JSON.stringify(response.items, null, 2))}</pre></details>` : "") +
+        (payload.error ? `<p class="muted small">错误：${E(payload.error)}（${E(payload.error_class)}）</p>` : "")
+      : '<p class="muted small">请求及响应内容需要 logs.read 权限才能展开，当前仅显示调用元数据。</p>';
+    return `<details class="evidence"><summary>第 ${E(entry.round_number)} 轮 · ${E(entry.model)} · ${E(entry.status === "completed" ? "完成" : "失败")} · ${(entry.duration_ms / 1000).toFixed(1)} 秒 · ${E(tokenText)}</summary><p class="muted small">请求时间：${date(entry.created_at)} · 可用工具：${E((request.tools || []).join(" / ") || "见任务授权")}</p>${details}</details>`;
+  }).join("");
+  return panel("与大模型交互记录", content, introText);
+}
 async function report(id) {
   const t = await api(
     P +
@@ -395,6 +414,12 @@ async function report(id) {
       encodeURIComponent(id) +
       (state.includeLogs ? "?include_logs=true" : ""),
   );
+  let modelHistory = {items: []};
+  try {
+    modelHistory = await api(P + "/tasks/" + encodeURIComponent(id) + "/model-interactions" + (can("logs.read") ? "?include_content=true" : ""));
+  } catch (err) {
+    modelHistory = {items: [], note: "模型交互记录读取失败：" + (err.message || "未知错误")};
+  }
   if (location.hash === "#report/" + id) state.currentTask = t;
   const target = t.report?.target || {};
   return (
@@ -434,6 +459,7 @@ async function report(id) {
       "诊断时间线",
       `<div class="timeline"><div>任务创建<small>${date(t.created_at)}</small></div>${t.started_at ? `<div>开始执行<small>${date(t.started_at)}</small></div>` : ""}${t.evidence.map((e) => `<div>${E(e.provider)} · ${E(e.tool)} ${badge(e.status)}<small>${date(e.collected_at)} · ${e.duration_ms} ms</small></div>`).join("")}${t.completed_at ? `<div>任务结束<small>${date(t.completed_at)}</small></div>` : ""}</div>`,
     ) +
+    modelInteractionsPanel(modelHistory) +
     `<div class="panel"><div class="section-heading"><div><h2>证据与工具执行记录</h2><p class="muted small">Zabbix 为监控证据；SSH 为采集当时快照。日志内容需要独立权限。</p></div>${can("logs.read") ? btn("toggle-logs", state.includeLogs ? "隐藏原始日志" : "读取日志证据", id) : ""}</div>${t.evidence.length ? t.evidence.map((e) => `<details class="evidence" data-evidence="${E(e.id)}"><summary>${E(e.provider)} / ${E(e.tool)} ${badge(e.status)} · ${date(e.collected_at)}</summary><pre>${E(JSON.stringify(e.payload, null, 2))}</pre></details>`).join("") : '<div class="empty">暂无采集证据</div>'}</div>`
   );
 }
