@@ -28,6 +28,7 @@ from .diagnostics.targets import (
     directory_children,
 )
 from .orchestrator import tasks
+from .model_interactions import traced_response
 from .security.redact import redact
 
 log = logging.getLogger(__name__)
@@ -1032,7 +1033,10 @@ async def run(
                     if can_ssh:
                         tools = tools + [ssh_definition]
                     tasks.stage(task_id, "ai_reasoning")
-                    response = await request_response(
+                    response = await traced_response(
+                            task_id=task_id,
+                            round_number=sum(d["kind"] == "round" for d in telemetry) + 1,
+                            secret_values=secret_values,
                         client,
                         deadline=deadline,
                         timeout_seconds=int(
@@ -1137,7 +1141,10 @@ async def run(
                         and sum(d["kind"] == "round" for d in telemetry)
                         < limits["rounds"]
                     ):
-                        response = await request_response(
+                        response = await traced_response(
+                            task_id=task_id,
+                            round_number=sum(d["kind"] == "round" for d in telemetry) + 1,
+                            secret_values=secret_values,
                             client,
                             deadline=deadline,
                             timeout_seconds=int(
