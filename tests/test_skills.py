@@ -827,3 +827,120 @@ def test_skill_zabbix_target_metadata_comes_only_from_unique_returned_host(
     assert calls == (
         ["hostinterface_get", "host_get"] if target[0] == "ip" else ["host_get"]
     )
+
+
+def tool_outputs(create):
+    return [
+        json.loads(item["output"])
+        for item in create.call_args_list[-1].kwargs["input"]
+        if item.get("type") == "function_call_output"
+    ]
+
+
+def test_delivered_schema_is_not_rediscovered_or_counted(rig):
+    install(providers=["ssh_mcp"])
+    create = AsyncMock(
+        side_effect=[
+            response(
+                Call(
+                    "list_mcp_tools",
+                    {"provider": "ssh_mcp", "names": ["ssh_diagnose_cpu"]},
+                )
+            ),
+            # Same tool by exact query: a different signature, same schema.
+            response(
+                Call(
+                    "list_mcp_tools",
+                    {"provider": "ssh_mcp", "query": "ssh_diagnose_cpu"},
+                )
+            ),
+            response(text="只取得工具定义，未采集主机。"),
+        ]
+    )
+    _, usage = asyncio.run(
+        mcp_runtime.run(
+            "report",
+            "CPU",
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            return_usage=True,
+        )
+    )
+    first, second = tool_outputs(create)
+    assert first["tools"][0]["name"] == "ssh_diagnose_cpu"
+    assert "parameters" in first["tools"][0]
+    assert second["already_loaded"] is True and second["names"] == ["ssh_diagnose_cpu"]
+    task = tasks.get(usage["task_id"])
+    assert task["tools"] == 1 and task["report"]["budget"]["used"]["calls"] == 1
+    sent = json.loads(create.call_args_list[0].kwargs["input"][0]["content"])
+    assert sent["question"] == "CPU"
+
+
+def test_budget_reports_forced_final_round_and_token_overrun(rig):
+    install(providers=["ssh_mcp"])
+    with main.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO settings VALUES ('ai_profile_budgets',?,0)",
+            (json.dumps({"standard": {"rounds": 2, "tokens": 2000}}),),
+        )
+
+    def heavy(*calls, text=""):
+        result = response(*calls, text=text)
+        result.usage = SimpleNamespace(
+            input_tokens=1200, output_tokens=100, total_tokens=1300
+        )
+        return result
+
+    create = AsyncMock(
+        side_effect=[
+            heavy(Call("list_mcp_tools", {"provider": "ssh_mcp"})),
+            heavy(text="只列出了工具目录，未采集主机。"),
+        ]
+    )
+    _, usage = asyncio.run(
+        mcp_runtime.run(
+            "report",
+            "CPU",
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            return_usage=True,
+        )
+    )
+    assert create.call_args_list[-1].kwargs["tool_choice"] == "none"
+    task = tasks.get(usage["task_id"])
+    spent = task["report"]["budget"]
+    # Budget limits are reported truthfully but are not diagnostic gaps.
+    assert task["status"] == "success" and task["report"]["limitations"] == []
+    assert spent["reasons"] == [] and spent["used"]["tokens"] == 2600
+    assert spent["exhausted"] and task["report"]["budget_exhausted"]
+    assert spent["limits_hit"] == [
+        "已到最后一轮（上限 2 轮），本轮只总结",
+        "Token 用量 2600 超过预算 2000（总结轮仍需发送完整上下文）",
+    ]
+
+
+def test_alert_is_sent_once_without_unexpanded_macros(rig):
+    install(providers=["ssh_mcp"])
+    event = {
+        "event_id": "6619496",
+        "event_value": "1",
+        "event_source": "0",
+        "event_name": "Linux: Load average is too high (per CPU load over 1.5 for 5m)",
+        "severity": "3",
+        "host_id": "10913",
+        "host_ip": "172.20.2.101",
+        "recovery_date": "{EVENT.RECOVERY.DATE}",
+        "recovery_id": "{EVENT.RECOVERY.ID}",
+    }
+    create = AsyncMock(return_value=response(text='{"cause": "负载偏高"}'))
+    asyncio.run(
+        mcp_runtime.run(
+            "JSON",
+            json.dumps({"alert": event}, ensure_ascii=False),
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            event=event,
+        )
+    )
+    sent = json.loads(create.call_args_list[0].kwargs["input"][0]["content"])
+    assert "question" not in sent
+    assert sent["alert"]["event_name"] == event["event_name"]
+    assert "recovery_date" not in sent["alert"] and "recovery_id" not in sent["alert"]
+    assert event["recovery_date"] == "{EVENT.RECOVERY.DATE}"
