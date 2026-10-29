@@ -113,7 +113,9 @@ def test_flapping_trigger_reuses_the_recent_analysis_on_the_original_card(
     assert queued == [] and ai_status("880002") == "reused"
     [card] = cards
     assert "本次不重复分析" in card and "近 24 小时共 3 次告警" in card
-    assert "#report/" + reused in card and "AI分析" in card
+    # The report link opens inside the Feishu client (AppLink, URL encoded).
+    assert "web_url/open?mode=window&url=" in card and "AI分析" in card
+    assert "%23report%2F" + reused in card
 
 
 def test_reuse_needs_same_trigger_within_the_window(monkeypatch):

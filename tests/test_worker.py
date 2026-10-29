@@ -91,6 +91,14 @@ def test_feishu_card_shows_conclusion_and_actions_without_evidence_ids():
     assert "下列仅为" not in text and "分析结果需要人工复核" not in text
 
 
+def test_report_links_open_inside_the_feishu_client():
+    url = "http://192.0.2.10:8088/#report/0123456789abcdef0123456789abcdef"
+    assert worker.in_feishu(url) == (
+        "https://applink.feishu.cn/client/web_url/open?mode=window&url="
+        "http%3A%2F%2F192.0.2.10%3A8088%2F%23report%2F0123456789abcdef0123456789abcdef"
+    )
+
+
 def test_card_keeps_complete_report_without_fixed_character_truncation():
     info = {
         "cause": "根因待确认",
