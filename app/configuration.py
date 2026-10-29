@@ -4,6 +4,14 @@ import re
 from urllib.parse import urlsplit
 from fastapi import HTTPException
 
+INTEGER_SETTINGS = {
+    "data_retention_days": (
+        0,
+        3650,
+        "诊断明细保留天数须为 0–3650 的整数，0 表示永久保留",
+    ),
+}
+
 
 def validate_form(values, read):
     def value(key):
@@ -69,6 +77,12 @@ def validate_form(values, read):
         str(i) for i in range(6)
     }:
         raise HTTPException(422, "告警最低级别必须为 0–5")
+    for key, (low, high, message) in INTEGER_SETTINGS.items():
+        raw = values.get(key)
+        if raw is not None and not (
+            raw.isdecimal() and str(int(raw)) == raw and low <= int(raw) <= high
+        ):
+            raise HTTPException(422, message)
     for key in ("allowed_chat_ids", "feishu_alert_chat_ids"):
         if key in values:
             ids = [s.strip() for s in values[key].split(",") if s.strip()]

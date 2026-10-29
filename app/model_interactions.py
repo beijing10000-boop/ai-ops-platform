@@ -85,10 +85,17 @@ def _response_payload(response, secrets):
 def _record(task_id, round_number, model, status, duration_ms, usage, payload):
     """A missing/misconfigured trace store must not abort the real diagnosis."""
     from .main import connection
-    from .orchestrator.tasks import encode
+    from .orchestrator.tasks import encode, store_blob
 
     try:
         with connection() as db:
+            request = payload.get("request") or {}
+            instructions = request.get("instructions")
+            if isinstance(instructions, dict) and "text" in instructions:
+                # Every round repeats the same system instructions; keep one copy.
+                shared = {k: v for k, v in instructions.items() if k != "text"}
+                shared["blob"] = store_blob(db, "instructions", instructions["text"])
+                payload = {**payload, "request": {**request, "instructions": shared}}
             db.execute(
                 """INSERT INTO model_interactions(
                     task_id, round_number, model, status, duration_ms,

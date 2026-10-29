@@ -575,6 +575,13 @@ def test_history_skill_calls_zabbix_only_and_adapts_initmax_arguments(monkeypatc
         == 1
     )
     assert log[0][1]["extra_params"]["hostids"] == ["10"]
+    stored = [
+        r["payload"]
+        for r in tasks.evidence_page(usage["task_id"])
+        if r["tool"] in {"item_get", "history_get"}
+    ]
+    # Rows are kept once; the identical `data` text copy is not stored again.
+    assert stored and all(p["records"] and "data" not in p for p in stored)
     query_context = json.loads(create.call_args_list[0].kwargs["input"][0]["content"])
     assert query_context["current_timestamp"] > 0
     assert query_context["current_time"].endswith("+08:00")

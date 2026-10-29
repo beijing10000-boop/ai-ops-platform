@@ -495,6 +495,7 @@ const configHelp = {
   zabbix_frontend_url: "用于从告警卡片和报告打开 Zabbix 网页。",
   zabbix_webhook_secret: "验证 Zabbix 推送告警的身份，需与 Zabbix 告警媒介中的密钥一致。",
   ai_request_timeout_seconds: "默认 90 秒，受任务总时限及留给总结的时间共同约束。仅影响新任务。",
+  data_retention_days: "超过天数的已结束任务，删除 MCP 证据和逐轮模型交互明细；任务结论、状态与 Token 统计永久保留。0 为永久保留，建议 180。每天最多清理一次，操作记入审计。",
 };
 const configGroups = {
   ai: [
@@ -513,6 +514,7 @@ const configGroups = {
       ],
     ],
     ["ai_tool_loading", "监控工具加载方式", "select", [["dynamic", "按需加载（推荐）"], ["full", "加载全部授权工具"]]],
+    ["data_retention_days", "诊断明细保留天数（0 为永久）", "number"],
   ],
   feishu: [
     ["lark_app_id", "飞书应用 App ID"],
