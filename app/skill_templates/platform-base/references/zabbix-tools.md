@@ -14,7 +14,7 @@ output、selectInterfaces、selectInventory、selectTags、selectHostGroups 等�
 ## 告警与历史
 
 1. 告警事实不足时，用 `event_get` 的 eventids 核实 clock、value、r_eventid；需要当前问题或触发器状态时用 `problem_get`、`trigger_get`。`problem_get` 的 sortfield 只支持 eventid，按时间分析时读取返回的 clock。平台不开放触发器表达式；描述里没有明确阈值时，写明阈值未核实。
-2. `item_get` 按 hostids 与 search.key_ 或 search.name 查找监控项，可用 searchByAny，限制数量；保留 itemid、value_type、lastvalue、lastclock、units。
+2. `item_get` 按 hostids 与 search.key_ 或 search.name 查找监控项，可用 searchByAny，限制数量；保留 itemid、value_type、lastvalue、lastclock、units。只能按 itemid、name、key_ 排序，不能按 lastclock 或 lastvalue 排序；要找“最近停采的监控项”，取回后自己比较 lastclock。
 3. `history_get` 只能使用本任务 item_get 返回过的 itemids；history 与 value_type 对应；time_from、time_till 为秒级 Unix 时间戳。先查告警前后的短窗口；每次不超过 8 个监控项、86400 秒、120 条。平台给模型的历史结果是数值统计加少量样本，样本不是完整序列，不能据此推断逐分钟变化或精确持续时长。
 4. `trend_get` 同样先核验 itemid，再查有界时间段（最长 31 天），不接受 sortfield / sortorder；分析 value_min / value_avg / value_max，不能把小时平均值写成瞬时峰值。告警诊断的近 7 天基线通常已由平台预采集，没有时再查。
 

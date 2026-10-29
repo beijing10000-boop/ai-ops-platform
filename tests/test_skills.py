@@ -995,6 +995,79 @@ def test_budget_reports_forced_final_round_and_token_overrun(rig):
     ]
 
 
+def test_summary_round_takes_the_message_even_when_the_model_also_calls_tools(rig):
+    # Bailian's DeepSeek ignored tool_choice "none", called tools (the gateway
+    # answered "tool does not exist") and still ended with the full answer.
+    install(providers=["ssh_mcp"])
+    with main.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO settings VALUES ('ai_profile_budgets',?,0)",
+            (json.dumps({"standard": {"rounds": 2}}),),
+        )
+    stray = Call(
+        "call_mcp_tool",
+        {"provider": "ssh_mcp", "name": "ssh_list_hosts", "arguments": {}},
+    )
+    create = AsyncMock(
+        side_effect=[
+            response(Call("list_mcp_tools", {"provider": "ssh_mcp"})),
+            response(stray, stray, text='{"cause": "agent 自 19:31 起不再应答"}'),
+        ]
+    )
+    answer, usage = asyncio.run(
+        mcp_runtime.run(
+            "report",
+            "CPU",
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            return_usage=True,
+        )
+    )
+    assert create.call_args_list[-1].kwargs["tool_choice"] == "none"
+    assert "agent 自 19:31 起不再应答" in answer
+    task = tasks.get(usage["task_id"])
+    assert task["status"] == "success" and task["report"]["limitations"] == []
+    # Only round 1's discovery counted; the stray calls were never executed.
+    assert task["report"]["budget"]["used"]["calls"] == 1
+
+
+def test_prompt_cache_hits_do_not_count_against_the_token_budget(rig):
+    install(providers=["ssh_mcp"])
+    with main.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO settings VALUES ('ai_profile_budgets',?,0)",
+            (json.dumps({"standard": {"rounds": 2, "tokens": 2000}}),),
+        )
+
+    def cached(*calls, text=""):
+        result = response(*calls, text=text)
+        result.usage = SimpleNamespace(
+            input_tokens=1200,
+            output_tokens=100,
+            total_tokens=1300,
+            input_tokens_details=SimpleNamespace(cached_tokens=1100),
+        )
+        return result
+
+    create = AsyncMock(
+        side_effect=[
+            cached(Call("list_mcp_tools", {"provider": "ssh_mcp"})),
+            cached(text="只列出了工具目录，未采集主机。"),
+        ]
+    )
+    _, usage = asyncio.run(
+        mcp_runtime.run(
+            "report",
+            "CPU",
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            return_usage=True,
+        )
+    )
+    spent = tasks.get(usage["task_id"])["report"]["budget"]
+    # 2,600 tokens were sent, but 2,200 of them were cache hits: 400 count.
+    assert spent["used"]["tokens"] == 2600 and spent["used"]["cached_tokens"] == 2200
+    assert spent["limits_hit"] == ["已到最后一轮（上限 2 轮），本轮只总结"]
+
+
 def test_alert_is_sent_once_without_unexpanded_macros(rig):
     install(providers=["ssh_mcp"])
     event = {

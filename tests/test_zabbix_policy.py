@@ -171,6 +171,28 @@ def test_problem_get_rejects_clock_sort_and_advertises_only_eventid():
     )
 
 
+def test_sort_fields_match_what_zabbix_accepts():
+    # item.get cannot sort by lastclock; advertising it cost a wasted round.
+    schema = zabbix.input_schema("item_get")["properties"]["sortfield"]
+    assert schema["anyOf"][0]["enum"] == ["itemid", "name", "key_"]
+    with pytest.raises(ValueError, match="sortfield"):
+        zabbix.validate_args("item_get", {"sortfield": "lastclock"}, host_id="1")
+    assert (
+        zabbix.validate_args("item_get", {"sortfield": "key_"}, host_id="1")[
+            "sortfield"
+        ]
+        == "key_"
+    )
+    with pytest.raises(ValueError, match="sortfield"):
+        zabbix.validate_args("event_get", {"sortfield": "value"}, host_id="1")
+    with pytest.raises(ValueError, match="sortfield"):
+        zabbix.validate_args(
+            "history_get",
+            {"itemids": ["1"], "history": 0, "sortfield": "value"},
+            host_id="1",
+        )
+
+
 def test_trend_get_allows_a_month_without_sort_parameters_and_history_stays_one_day():
     assert "sortfield" not in zabbix.input_schema("trend_get")["properties"]
     assert "sortfield" in zabbix.input_schema("history_get")["properties"]
