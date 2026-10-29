@@ -112,10 +112,11 @@ def test_manual_analysis_uses_priority_queue_and_refuses_repeat_clicks(monkeypat
     assert (queue, func) == ("ai-alert-manual", "app.worker.process_manual_analysis")
     assert args == (event, "om_card_884450", "oc_group", job_id)
     with connection() as db:
-        status = db.execute(
-            "SELECT status FROM diagnostic_tasks WHERE task_id=?", (job_id,)
-        ).fetchone()[0]
-    assert status == "queued"
+        status, actor = db.execute(
+            "SELECT status,actor FROM diagnostic_tasks WHERE task_id=?", (job_id,)
+        ).fetchone()
+    # The clicking user, so manual runs stay outside the automatic daily budget.
+    assert status == "queued" and actor == "ou_admin"
     # Still waiting in the queue: the queued task refuses a second click.
     ok, message = handle_analyze_action(value, "ou_admin", "om_card_884450")
     assert ok and "正在分析中" in message and len(jobs) == 1

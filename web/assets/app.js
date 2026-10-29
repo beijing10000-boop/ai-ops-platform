@@ -87,6 +87,8 @@ const labels = {
   disabled: "未开启",
   pending: "等待分析",
   not_required: "未触发分析",
+  reused: "复用近期分析",
+  skipped_budget: "超出每日额度",
   suppressed_unpaired: "未发送问题通知",
   linux: "Linux",
   windows: "Windows",
@@ -495,6 +497,10 @@ const configHelp = {
   zabbix_frontend_url: "用于从告警卡片和报告打开 Zabbix 网页。",
   zabbix_webhook_secret: "验证 Zabbix 推送告警的身份，需与 Zabbix 告警媒介中的密钥一致。",
   ai_request_timeout_seconds: "默认 90 秒，受任务总时限及留给总结的时间共同约束。仅影响新任务。",
+  ai_alert_reuse_hours: "同一主机、同一触发器在此时间内已完成 AI 分析时，新告警不再自动分析，原告警卡片附上该次报告链接和 24 小时告警次数。手动点击“AI分析”不受影响。",
+  ai_daily_token_limit: "只统计自动告警分析（北京时间自然日）。达到上限后新告警只发送通知并在卡片注明，手动分析不受限制。",
+  ai_quick_severity_max: "达到自动分析门槛、但级别不高于所选值的告警，使用快速分析模式的预算。",
+  ai_quick_host_groups: "告警所属主机组包含任一关键字（如 测试环境）时，自动分析使用快速分析模式。",
   data_retention_days: "超过天数的已结束任务，删除 MCP 证据和逐轮模型交互明细；任务结论、状态与 Token 统计永久保留。0 为永久保留，建议 180。每天最多清理一次，操作记入审计。",
 };
 const configGroups = {
@@ -542,6 +548,10 @@ const configGroups = {
         ["5", "灾难"],
       ],
     ],
+    ["ai_alert_reuse_hours", "复用同一触发器近期分析（小时，0 为关闭）", "number"],
+    ["ai_daily_token_limit", "自动分析每日 Token 上限（0 为不限）", "number"],
+    ["ai_quick_severity_max", "按告警级别使用快速分析", "select", [["", "不按级别降档"], ["2", "警告及以下"], ["3", "一般严重及以下"]]],
+    ["ai_quick_host_groups", "使用快速分析的主机组关键字（英文逗号分隔）"],
     ["feishu_admin_open_ids", "超级管理员 Open ID（英文逗号分隔）"],
   ],
   settings: [

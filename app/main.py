@@ -59,10 +59,17 @@ ALLOWED |= {
     "disabled_tools",
     "zabbix_frontend_url",
     "data_retention_days",
+    "ai_alert_reuse_hours",
+    "ai_daily_token_limit",
+    "ai_quick_severity_max",
+    "ai_quick_host_groups",
 }
 DEFAULTS = {
     # 0 keeps every evidence and model-round detail; opt in to deletion.
     "data_retention_days": "0",
+    # A flapping trigger is analyzed once per window; manual analysis is unaffected.
+    "ai_alert_reuse_hours": "2",
+    "ai_daily_token_limit": "0",
     "ai_min_severity": "4",
     "feishu_enabled": "false",
     "web_protocol": "http",

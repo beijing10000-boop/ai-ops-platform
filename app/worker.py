@@ -94,7 +94,89 @@ async def analyze(event, task_id=None):
     return data
 
 
-def enqueue_analysis(queue_name, func, event, *args):
+def alert_profile(event):
+    """Automatic analysis of low-severity or matched host-group alerts runs quick."""
+    default = cfg("ai_analysis_profile") or "standard"
+    try:
+        ceiling = int(cfg("ai_quick_severity_max") or "-1")
+        severity = int(event.get("severity") or 0)
+    except ValueError:
+        return default
+    groups = str(event.get("host_groups") or "")
+    keywords = [
+        word.strip()
+        for word in (cfg("ai_quick_host_groups") or "").split(",")
+        if word.strip()
+    ]
+    if severity <= ceiling or any(word in groups for word in keywords):
+        return "quick"
+    return default
+
+
+def recent_analysis(event):
+    """A finished analysis of the same host and trigger within the reuse window."""
+    from .main import beijing_time, connection
+
+    host = str(event.get("host_id") or "")
+    trigger = str(event.get("trigger_id") or "")
+    try:
+        hours = int(cfg("ai_alert_reuse_hours") or "0")
+    except ValueError:
+        hours = 0
+    if hours <= 0 or not (host.isdigit() and trigger.isdigit()):
+        return None
+    with connection() as db:
+        row = db.execute(
+            "SELECT t.task_id,t.completed_at FROM diagnostic_tasks t "
+            "JOIN alert_events a ON a.event_id=t.event_id AND a.event_value='1' "
+            "WHERE t.kind='analysis' AND t.status IN ('success','partial') "
+            "AND t.completed_at >= datetime('now', ?) AND t.event_id != ? "
+            "AND json_extract(a.event_json,'$.host_id')=? "
+            "AND json_extract(a.event_json,'$.trigger_id')=? "
+            "ORDER BY t.completed_at DESC LIMIT 1",
+            ("-" + str(hours) + " hours", str(event.get("event_id")), host, trigger),
+        ).fetchone()
+        if not row:
+            return None
+        occurrences = db.execute(
+            "SELECT COUNT(*) FROM alert_events WHERE event_value='1' "
+            "AND received_at >= datetime('now','-24 hours') "
+            "AND json_extract(event_json,'$.host_id')=? "
+            "AND json_extract(event_json,'$.trigger_id')=?",
+            (host, trigger),
+        ).fetchone()[0]
+    return {
+        "task_id": row[0],
+        "completed": beijing_time(row[1]),
+        "hours": hours,
+        "occurrences": occurrences,
+    }
+
+
+def daily_budget():
+    """(used, limit) Token of today's automatic alert analyses, or None if unlimited.
+
+    Manual analyses carry the clicking user as actor and are not counted;
+    analyses still running have no Token total yet.
+    """
+    from .main import connection
+
+    try:
+        limit = int(cfg("ai_daily_token_limit") or "0")
+    except ValueError:
+        return None
+    if limit <= 0:
+        return None
+    with connection() as db:
+        used = db.execute(
+            "SELECT COALESCE(SUM(token_total),0) FROM diagnostic_tasks "
+            "WHERE source='alert' AND actor='system' "
+            "AND date(created_at,'+8 hours')=date('now','+8 hours')"
+        ).fetchone()[0]
+    return used, limit
+
+
+def enqueue_analysis(queue_name, func, event, *args, profile_name=None, actor="system"):
     """Create the queued task before its job, so the active-task index refuses
     duplicates while the job waits. Returns (task, created)."""
     from .main import REDIS_URL
@@ -103,7 +185,7 @@ def enqueue_analysis(queue_name, func, event, *args):
 
     redis = Redis.from_url(REDIS_URL, socket_connect_timeout=2, socket_timeout=3)
     question = json.dumps({"alert": event}, ensure_ascii=False)
-    task, created = create_task(question, event)
+    task, created = create_task(question, event, profile_name, actor)
     if (
         not created
         and task["status"] == "queued"
@@ -117,7 +199,7 @@ def enqueue_analysis(queue_name, func, event, *args):
             status="failed",
             error_type="QueueLost",
         )
-        task, created = create_task(question, event)
+        task, created = create_task(question, event, profile_name, actor)
     if not created:
         return task, False
     try:
@@ -310,6 +392,17 @@ def make_card(event, info=None, *, analysis=False, mute_info=None):
     )
     link = zabbix_event_link(event)
     elements = [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}}]
+    if info.get("note") and not analysis and not recovery:
+        # Why no automatic analysis follows (reused recent one, daily budget).
+        elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": "**AI 分析**  " + safe(info["note"], 600),
+                },
+            }
+        )
     if not analysis:
         host_id = str(event.get("host_id") or "")
         trigger_id = str(event.get("trigger_id") or "")
@@ -648,6 +741,30 @@ async def handle_alert(event):
                 update_event(event, notify_status="muted", ai_status="not_required")
                 log.info("FEISHU_ALERT_MUTED event_id=%s", event.get("event_id"))
                 return {"event_id": event["event_id"], "notified": False, "muted": True}
+    threshold = int(cfg("ai_min_severity") or "4")
+    # Decide before notifying, so a skip reason rides on the original card
+    # instead of another message.
+    plan = None if recovery or severity < threshold else "analyze"
+    reused = budget = None
+    if plan:
+        reused = recent_analysis(event)
+        budget = None if reused else daily_budget()
+        if reused:
+            plan = "reuse"
+            url = report_url({"_task_id": reused["task_id"]})
+            info["note"] = (
+                f"近 {reused['hours']} 小时内同一主机、同一触发器已完成 AI 分析"
+                f"（{reused['completed']}），近 24 小时共 {reused['occurrences']} 次告警，"
+                "本次不重复分析。"
+                + (f"[查看该次报告]({url})。" if url else "")
+                + "需要重新分析可点击“AI分析”。"
+            )
+        elif budget and budget[0] >= budget[1]:
+            plan = "budget"
+            info["note"] = (
+                f"今日自动 AI 分析已用 {budget[0]:,} Token，达到每日上限 {budget[1]:,}，"
+                "本告警未自动分析；需要时可点击“AI分析”手动发起。"
+            )
     try:
         await notify(make_card(event, info), event=event)
         update_event(
@@ -662,19 +779,27 @@ async def handle_alert(event):
             "INITIAL_ALERT_DELIVERY_FAILED event_id=%s", event.get("event_id")
         )
         raise
-    threshold = int(cfg("ai_min_severity") or "4")
-    if recovery or severity < threshold:
+    if plan != "analyze":
+        if plan:
+            update_event(
+                event, ai_status="reused" if plan == "reuse" else "skipped_budget"
+            )
         return {
             "event_id": event["event_id"],
             "notified": True,
             "diagnosed": False,
             "ai_skipped": True,
+            **({"reused_task_id": reused["task_id"]} if reused else {}),
+            **({"budget_exhausted": True} if plan == "budget" else {}),
         }
     # Analysis runs on its own workers so the next alert's notification never
     # waits behind a model call.
     try:
         task, queued = enqueue_analysis(
-            queues.ALERT_ANALYSIS, "app.worker.process_alert_analysis", event
+            queues.ALERT_ANALYSIS,
+            "app.worker.process_alert_analysis",
+            event,
+            profile_name=alert_profile(event),
         )
     except Exception as exc:
         update_event(event, ai_status="failed")
