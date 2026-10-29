@@ -52,13 +52,29 @@ def test_feishu_card_shows_conclusion_and_actions_without_evidence_ids():
         == "**诊断结论**\n磁盘将满\n\n**处理建议**\n1. 清理日志"
     )
     long = {
-        "cause": "结论" * 400,
+        "cause": "负载来自周期性任务，建议核对。" * 20,
         "action": [f"建议 {n}" for n in range(1, 9)],
         "_diagnostic_status": "success",
     }
     text = worker.card_summary(long)
-    assert "……（全文见完整诊断报告）" in text and len(text) < 800
+    # The conclusion is cut at a sentence end within 200 characters.
+    assert (
+        text.split("\n")[1]
+        == "负载来自周期性任务，建议核对。" * 13 + "（详见完整报告）"
+    )
     assert "6. 建议 6\n其余建议见完整诊断报告。" in text and "建议 7" not in text
+    # Body text stays within 300 characters: actions that do not fit are dropped.
+    step = "核对定时任务并记录执行时长，必要时调整执行窗口以避开业务高峰。"
+    text = worker.card_summary(
+        {
+            "cause": "负载偏高。" * 30,
+            "action": [step] * 4,
+            "_diagnostic_status": "success",
+        }
+    )
+    assert "3. " + step in text and "4. " + step not in text
+    assert text.endswith("其余建议见完整诊断报告。") and len(text) <= 300
+    assert worker.clipped("结论" * 120, 200) == "结论" * 99 + "结…"
     # Model-error fallbacks are plain text: the first line says why.
     partial = {
         "cause": "分析结果需要人工复核",

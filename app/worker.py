@@ -17,7 +17,7 @@ log = logging.getLogger(__name__)
 ALERT_OUTPUT_CONTRACT = (
     "告警卡片要求只输出 JSON 对象，必须包含 "
     "host_groups,cause,action,analysis,human_required 字段，另加 evidence 数组。"
-    "cause 写完整中文结论：证据充分的直接成因，关键数值后注明证据编号（E2）；"
+    "cause 写完整中文结论（100–200 字）：证据充分的直接成因和主要依据，关键数值后注明证据编号（E2）；"
     "action 为处理建议数组，按影响与风险排序，每项一句；"
     "analysis 只写证据之间的关联、排除项和尚未证实的方向。"
     "目标、时间范围、告警字段、各证据数值和诊断不足由平台渲染，不要复述。"
@@ -329,22 +329,41 @@ def card_summary(info):
             "请打开完整诊断报告核验已采集的证据，必要时重新发起分析。",
         ]
     else:
-        cause = without_evidence_ids(numbered(info.get("cause")))
-        if len(cause) > 600:
-            cause = cause[:600].rstrip() + "……（全文见完整诊断报告）"
+        full = without_evidence_ids(numbered(info.get("cause")))
+        cause = clipped(full, CAUSE_CHARS)
+        if cause != full:
+            cause += "（详见完整报告）"
+        budget = CARD_CHARS - len(cause)
         actions = [
             line.strip()
             for line in without_evidence_ids(numbered(info.get("action"))).split("\n")
             if line.strip()
         ]
-        if len(actions) > 6:
-            actions = actions[:6] + ["其余建议见完整诊断报告。"]
+        kept = []
+        for index, item in enumerate(actions):
+            if index == 6 or (kept and len(item) > budget):
+                kept.append("其余建议见完整诊断报告。")
+                break
+            kept.append(clipped(item, max(budget, 40)))
+            budget -= len(kept[-1])
         lines += ["**诊断结论**", cause or "未知", ""]
         lines.append(
             "**处理建议**" + ("（需人工处理）" if info.get("human_required") else "")
         )
-        lines += actions or ["无"]
+        lines += kept or ["无"]
     return human_metrics("\n".join(lines))
+
+
+# Body text of the card; with its headings the card stays within ~300 characters.
+CARD_CHARS, CAUSE_CHARS = 280, 200
+
+
+def clipped(text, limit):
+    """Cut long text at the last sentence end within the limit, else with an ellipsis."""
+    if len(text) <= limit:
+        return text
+    cut = max(text.rfind(mark, 0, limit) for mark in "。；！？")
+    return text[: cut + 1] if cut >= limit // 2 else text[: limit - 1].rstrip() + "…"
 
 
 def valid_macro(value):
