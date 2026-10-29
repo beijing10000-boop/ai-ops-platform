@@ -108,7 +108,9 @@ def migrate(db):
             token_input INTEGER, token_output INTEGER, token_total INTEGER,
             payload TEXT NOT NULL
         )""")
-        db.execute("CREATE INDEX IF NOT EXISTS ix_model_interactions_task ON model_interactions(task_id,id)")
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS ix_model_interactions_task ON model_interactions(task_id,id)"
+        )
         db.execute("INSERT INTO platform_migrations(version) VALUES (6)")
 
 
