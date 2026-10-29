@@ -16,7 +16,7 @@ from .ai_reliability import (
 from .orchestrator import tasks
 from .skill_mcp import SkillMCP
 from .skill_store import summary
-from .skill_context import model_view
+from .skill_context import SCHEMA_CHARS, model_alert, model_view
 from .model_interactions import traced_response
 from .security.redact import redact, redact_data
 from .integrations.ssh_mcp import IntegrationError
@@ -132,15 +132,21 @@ async def run(
             for row in skills
         )
     )
+    event = request.get("event") or {}
+    try:
+        # The alert worker sends the trusted event itself as the question.
+        alert_only = bool(event) and json.loads(question) == {"alert": event}
+    except (TypeError, ValueError):
+        alert_only = False
     conversation = [
         {
             "role": "user",
             "content": safe(
                 json.dumps(
                     {
-                        "question": question,
+                        **({} if alert_only else {"question": question}),
                         "context": context,
-                        "alert": request.get("event") or {},
+                        "alert": model_alert(event),
                         "service": request.get("service"),
                         "time_window": request.get("time_window"),
                         "diagnostic_type": task["diagnostic_type"],
@@ -158,10 +164,14 @@ async def run(
     totals, telemetry = {"input": 0, "output": 0, "total": 0}, []
     complete, calls, rounds = True, 0, 0
     gaps, reasons = [], []
+    # Budget limits that shaped the run; reported, but not diagnostic gaps.
+    limits_hit = []
     answer, status = "", "success"
     failure_code = None
     bridge = None
     cache = {}
+    # (provider, tool) schemas the model has already received in full.
+    delivered = set()
 
     def check():
         if tasks.cancelled(task_id):
@@ -179,6 +189,12 @@ async def run(
         }
 
     def budget():
+        hit = list(limits_hit)
+        if complete and totals["total"] > limits["tokens"]:
+            hit.append(
+                f"Token 用量 {totals['total']} 超过预算 {limits['tokens']}"
+                "（总结轮仍需发送完整上下文）"
+            )
         return {
             "limits": limits,
             "used": {
@@ -187,11 +203,13 @@ async def run(
                 "tokens": totals["total"] if complete else None,
                 "seconds": round(time.monotonic() - began, 1),
             },
-            "exhausted": bool(reasons),
+            "exhausted": bool(reasons or hit),
             "reasons": reasons,
+            "limits_hit": hit,
         }
 
     def report():
+        spent = budget()
         return {
             "answer": readable_report_answer(answer),
             "skills": summary(skills),
@@ -202,8 +220,8 @@ async def run(
             ),
             "diagnostic_type": task["diagnostic_type"],
             "limitations": list(dict.fromkeys(gaps + reasons)),
-            "budget": budget(),
-            "budget_exhausted": bool(reasons),
+            "budget": spent,
+            "budget_exhausted": spent["exhausted"],
             "model_error": failure_code,
         }
 
@@ -232,13 +250,38 @@ async def run(
                     if totals["total"] >= limits["tokens"]:
                         reasons.append("模型实际 Token 达到停止阈值，停止后续请求")
                         break
-                    final = (
-                        number == limits["rounds"] - 1
-                        or calls >= limits["calls"]
-                        or (calls > 0 and calls >= max(1, limits["calls"] - 2))
-                        or totals["total"] >= int(limits["tokens"] * 0.8)
-                        or time.monotonic() > deadline - 30
+                    stop = next(
+                        (
+                            text
+                            for hit, text in (
+                                (
+                                    number == limits["rounds"] - 1,
+                                    f"已到最后一轮（上限 {limits['rounds']} 轮），本轮只总结",
+                                ),
+                                (
+                                    calls >= limits["calls"]
+                                    or (
+                                        calls > 0
+                                        and calls >= max(1, limits["calls"] - 2)
+                                    ),
+                                    f"采集次数 {calls}/{limits['calls']} 接近上限，本轮只总结",
+                                ),
+                                (
+                                    totals["total"] >= int(limits["tokens"] * 0.8),
+                                    f"Token 用量 {totals['total']} 达到预算 80%，本轮只总结",
+                                ),
+                                (
+                                    time.monotonic() > deadline - 30,
+                                    "剩余时间不足 30 秒，本轮只总结",
+                                ),
+                            )
+                            if hit
+                        ),
+                        None,
                     )
+                    final = stop is not None
+                    if final and not limits_hit:
+                        limits_hit.append(stop)
                     if (
                         calls >= limits["calls"]
                         and "采集次数已达上限，本轮仅总结已有证据" not in reasons
@@ -322,7 +365,27 @@ async def run(
                                 signature = json.dumps(
                                     [call.name, args], sort_keys=True
                                 )
-                                if signature in cache:
+                                wanted = (
+                                    args.get("names")
+                                    if isinstance(args.get("names"), list)
+                                    else [args.get("query")]
+                                )
+                                if (
+                                    call.name == "list_mcp_tools"
+                                    and wanted
+                                    and all(
+                                        isinstance(name, str)
+                                        and (str(args.get("provider")), name)
+                                        in delivered
+                                        for name in wanted
+                                    )
+                                ):
+                                    outcome = {
+                                        "already_loaded": True,
+                                        "names": wanted,
+                                        "message": "这些工具的参数定义已在本任务中提供，请直接使用，不要重复发现",
+                                    }
+                                elif signature in cache:
                                     outcome = (
                                         {
                                             "already_loaded": True,
@@ -445,25 +508,48 @@ async def run(
                                     )
                                 )
                             )
+                        provider = (
+                            str(args.get("provider")) if isinstance(args, dict) else ""
+                        )
+                        discovery = call.name == "list_mcp_tools"
+                        limit = (
+                            SCHEMA_CHARS
+                            if discovery
+                            else min(limits["result_chars"], 4000)
+                        )
+                        if discovery and isinstance(outcome.get("tools"), list):
+                            # Never resend a schema the model already holds in full.
+                            outcome = {
+                                **outcome,
+                                "tools": [
+                                    {"name": tool["name"], "already_loaded": True}
+                                    if isinstance(tool, dict)
+                                    and "parameters" in tool
+                                    and (provider, tool.get("name")) in delivered
+                                    else tool
+                                    for tool in outcome["tools"]
+                                ],
+                            }
+                        view = model_view(
+                            provider,
+                            args.get("name", "list_tools")
+                            if isinstance(args, dict) and call.name == "call_mcp_tool"
+                            else call.name,
+                            outcome,
+                            max_chars=limit,
+                        )
+                        text = safe(json.dumps(view, ensure_ascii=False))
+                        if discovery and len(text) <= limit:
+                            delivered.update(
+                                (provider, tool.get("name"))
+                                for tool in view.get("tools", [])
+                                if isinstance(tool, dict) and "parameters" in tool
+                            )
                         conversation.append(
                             {
                                 "type": "function_call_output",
                                 "call_id": call.call_id,
-                                "output": compact_result(
-                                    safe(
-                                        json.dumps(
-                                            model_view(
-                                                args.get("provider"),
-                                                args.get("name", "list_tools")
-                                                if call.name == "call_mcp_tool"
-                                                else call.name,
-                                                outcome,
-                                            ),
-                                            ensure_ascii=False,
-                                        )
-                                    ),
-                                    min(limits["result_chars"], 4000),
-                                ),
+                                "output": compact_result(text, limit),
                             }
                         )
                 if not answer:
