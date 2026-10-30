@@ -345,17 +345,38 @@ def analysis_summary(info):
     return human_metrics(body)
 
 
-EVIDENCE_REF = re.compile(
-    r"\s*[（(]\s*E\d{1,3}(?:\s*[、,，/–\-和及与]\s*E\d{1,3})*\s*[)）]"
-    r"|(?<![A-Za-z0-9])E\d{1,3}(?![A-Za-z0-9\-])"
+# Evidence ids as models write them: "（E2）", "（见 E1、E2）", "（4.00%，E2）",
+# "（E3 返回为空）", "与 E2 的值". Hardware names such as E5-2680 are kept.
+EVIDENCE_IDS = (
+    r"(?<![A-Za-z0-9])E\d{1,3}(?:\s*[、,，/–\-和及与]\s*E\d{1,3})*(?![A-Za-z0-9\-])"
 )
+CITE_WORD = r"(?:(?:证据|见|参见|来源|依据)\s*[:：]?\s*)?"
+# Removed: a bracket holding only ids, ids closing a bracket, ids after "证据".
+EVIDENCE_REF = re.compile(
+    r"\s*[（(\[【]\s*" + CITE_WORD + EVIDENCE_IDS + r"\s*[)）\]】]"
+    r"|\s*[，,、；;]\s*" + CITE_WORD + EVIDENCE_IDS + r"(?=\s*[)）\]】])"
+    r"|(?<=证据)[ \t]*" + EVIDENCE_IDS + r"[ \t]*"
+)
+# Any other id is part of the sentence ("参考 E3"): it reads as "证据".
+BARE_EVIDENCE_REF = re.compile(r"[ \t]*" + EVIDENCE_IDS + r"[ \t]*")
+
+
+def _evidence_word(match):
+    text, start, end = match.string, match.start(), match.end()
+    spaced = [
+        0 <= at < len(text) and text[at].isascii() and text[at].isalnum()
+        for at in (start - 1, end)
+    ]
+    return (" " if spaced[0] else "") + "证据" + (" " if spaced[1] else "")
 
 
 def without_evidence_ids(text):
     """Evidence numbers only mean something next to the Web report's evidence list."""
     text = EVIDENCE_REF.sub("", str(text or ""))
-    text = re.sub(r"[ \t]+(?=[，。；：、）)])", "", text)
-    return re.sub(r"[ \t]{2,}", " ", text).strip()
+    text = BARE_EVIDENCE_REF.sub(_evidence_word, text)
+    text = re.sub(r"[ \t]+(?=[，。；：、）)])|(?<=[，。；：、（])[ \t]+", "", text)
+    # Runs of spaces left inside a line; leading indentation stays.
+    return re.sub(r"(?<=\S)[ \t]{2,}", " ", text).strip()
 
 
 def source_line(info):

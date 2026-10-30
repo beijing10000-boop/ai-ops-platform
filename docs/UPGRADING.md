@@ -1,5 +1,24 @@
 # 升级说明
 
+## v1.2.2 → v1.2.3
+
+没有数据库迁移，不改配置，Skill 不变。飞书问答回复去掉证据编号和“证据核对”清单；报告页只把实际发给模型的 Skill 列为“本次提供给模型的 Skill”；总结轮明确告诉模型不能再调用工具。在平台部署目录执行：
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://服务器IP:8088/healthz
+```
+
+healthz 应返回 version 1.2.3。验收：
+
+- 在飞书群里 @机器人问一台主机的资源情况：回复正文没有 E1、E2 这类编号，也没有“证据核对”一节；点“查看完整诊断报告”，网页报告里的编号和证据核对都还在。
+- 打开一条 Linux CPU 告警的报告：Skill 面板标题为“本次提供给模型的 Skill”，列出 platform-base、platform-linux 等适用的 Skill，Nginx、Java、Windows 等收在“本次不适用的 Skill”里。升级前的任务打开后同样按实际情况显示。
+- 对出现总结轮的任务（任务预算用完或到达最后一轮），“与大模型交互记录”最后一轮发送的消息末尾有“本轮是总结轮……”。
+
 ## v1.2.1 → v1.2.2
 
 没有数据库迁移，不改配置。主机本身不具备的采集能力（如内核未启用 PSI）改为写进“能力说明”，不再让告警分析变成“部分完成”。在平台部署目录执行：
@@ -67,7 +86,7 @@ healthz 应返回 version 1.2.0（未启用飞书接收器时去掉 `--profile f
 ### 3. 验收
 
 - 对一条 Linux CPU 负载告警点“AI 分析”：详细报告第 1 轮请求快照的 `evidence.prefetched` 里应有 `ssh_collect`（cpu、processes、pressure 同一次会话）、触发器监控项的 `history_get`（含 `alert_split`）与 `trend_get`；报告“诊断范围”显示“设备类型与路径：Linux，Zabbix 历史 + SSH 实时联合分析”；飞书卡片出现“核心证据”一节且没有证据编号。
-- 对一台 Windows 或网络设备的告警点“AI 分析”：SSH MCP 的审计里不应出现该任务的调用；报告写明“仅 Zabbix 监控数据”，本次加载的 Skill 中 platform-windows / platform-network 标记为已应用。
+- 对一台 Windows 或网络设备的告警点“AI 分析”：SSH MCP 的审计里不应出现该任务的调用；报告写明“仅 Zabbix 监控数据”，报告的“本次提供给模型的 Skill”中有 platform-windows / platform-network（v1.2.3 起显示；此前报告页没有标出）。
 - 对一台未在 SSH MCP 登记的 Linux 主机告警点“AI 分析”：报告“能力说明”写明 SSH MCP 不可用的原因，任务状态不因此变为失败。
 - 连接管理 → 工具注册表：SSH 表列出 v0.6.0 的新工具及本令牌是否已授权；“诊断测试”选一台已登记主机试跑 `ssh_diagnose_service_map`，应返回监听端口与进程的映射，SSH MCP 审计里出现对应记录，平台审计里有 `tool_probe`。
 - 回滚：v1.1.0 只认识一个平台维护的 Skill，也不接受 `types` / `devices` 元数据，所以切回旧版本前要先删除 v1.2 新增的 7 个平台 Skill（自定义 Skill 与历史任务不受影响），再切换提交并重新构建：

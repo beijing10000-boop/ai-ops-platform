@@ -39,13 +39,24 @@ def test_feishu_card_shows_conclusion_and_actions_without_evidence_ids():
     assert worker.card_summary(info) == (
         "**诊断状态**  部分完成\n**诊断结论**\n"
         "每核 5 分钟负载 1.65超过阈值 1.5，CPU 利用率 33.57%；负载来自 postgres 周期性任务。\n\n"
-        "**处理建议**\n1. 核对 postgres 定时任务\n2. 评估是否扩容 CPU，参考\n\n"
+        "**处理建议**\n1. 核对 postgres 定时任务\n2. 评估是否扩容 CPU，参考证据\n\n"
         "**分析与依据**\n可用性项由 1 变 0 的时间紧接告警时间，7 天趋势始终为 1，可排除阈值不合理。"
     )
-    # Hardware model numbers are not evidence references.
+    # Hardware model numbers are not evidence references; an id inside the
+    # sentence reads as "证据".
     assert (
-        worker.without_evidence_ids("Xeon E5-2680 上 E2 的值") == "Xeon E5-2680 上 的值"
+        worker.without_evidence_ids("Xeon E5-2680 与 E2 的值不一致")
+        == "Xeon E5-2680 与证据的值不一致"
     )
+    # Styles seen in real answers: ids closing or opening a bracket, after "证据".
+    for text, clean in (
+        ("1 秒增量 4.00%，E2）。", "1 秒增量 4.00%）。"),
+        ("监控项（E3 返回为空），也没有", "监控项（证据返回为空），也没有"),
+        ("校验（见 E1、E2）。证据 E4 显示", "校验。证据显示"),
+        ("- CPU 12.50%（E1–E3）\n  - 内存 (E4, E5)", "- CPU 12.50%\n  - 内存"),
+        ("CPU E2 90%", "CPU 证据 90%"),
+    ):
+        assert worker.without_evidence_ids(text) == clean
     clean = {
         "cause": "磁盘将满",
         "action": ["清理日志"],

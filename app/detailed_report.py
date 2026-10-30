@@ -59,6 +59,7 @@ def build_detailed_report(task_id, *, task=None):
     from .orchestrator import tasks
     from .orchestrator.tasks import decode
     from .mcp_runtime import readable_report_answer
+    from .skill_store import applied_names
 
     task = task or tasks.get(task_id, private=True)
     if task is None:
@@ -202,6 +203,14 @@ def build_detailed_report(task_id, *, task=None):
         "",
     ]
     if skills:
+        applied = applied_names(report)
+        if applied is not None:
+            parts.extend(
+                [
+                    "快照保存全部已启用的 Skill；平台按设备类型和告警类型只把适用的 Skill 发给模型。",
+                    "",
+                ]
+            )
         for index, skill in enumerate(skills, start=1):
             # `instructions` is the SKILL.md body already present under `files`.
             shown = (
@@ -209,9 +218,16 @@ def build_detailed_report(task_id, *, task=None):
                 if isinstance(skill, dict) and "SKILL.md" in (skill.get("files") or {})
                 else skill
             )
+            mark = ""
+            if applied is not None and isinstance(skill, dict):
+                mark = (
+                    "（已提供给模型）"
+                    if skill.get("name") in applied
+                    else "（本次不适用，未发送给模型）"
+                )
             parts.extend(
                 [
-                    f"### Skill {index}",
+                    f"### Skill {index}{mark}",
                     "",
                     _json_block(shown),
                     "",

@@ -108,6 +108,11 @@ def test_scope_lists_target_collection_time_windows_and_sources():
         "- Zabbix 历史查询窗口（北京时间）：2026-10-29 09:19:26 – 2026-10-29 09:34:55",
         "- 证据来源：SSH MCP 1 条、Zabbix MCP 2 条（E1–E3，详见证据与工具执行记录）",
     ]
+    # Chat replies have no evidence list to point at.
+    target = {"host_name": "db-01", "host_id": "11230"}
+    chat = evidence_check.scope(index, target, id_range=False)
+    assert chat.splitlines()[-1] == "- 证据来源：SSH MCP 1 条、Zabbix MCP 2 条"
+    assert chat.splitlines()[1] == "- 目标：db-01（Zabbix Host ID 11230）"
     assert evidence_check.scope({}, {"host_name": "db-01"}) == ""
 
 

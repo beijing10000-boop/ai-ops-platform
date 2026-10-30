@@ -23,6 +23,25 @@ from .feishu_client import reply_card, update_card
 log = logging.getLogger(__name__)
 
 
+def reply_text(report, answer):
+    """Chat reply: the conclusion and the platform's scope without evidence ids.
+
+    Ids only mean something next to the Web report's evidence list; that page,
+    linked from the reply, keeps them and the citation check (as alert cards do).
+    """
+    from .mcp_runtime import readable_report_answer
+    from .worker import without_evidence_ids
+
+    return "\n\n".join(
+        part
+        for part in (
+            without_evidence_ids(readable_report_answer(answer)),
+            report.get("chat_scope"),
+        )
+        if part
+    )
+
+
 async def execute(
     chat_id, question, message_id, sender_open_id=None, parent_id=None, root_id=None
 ):
@@ -127,7 +146,7 @@ async def execute(
             "failed": ("AI 分析未完成", "red"),
         }.get(state, ("AI 分析完成", "green"))
         report = (task or {}).get("report") or {}
-        display_result = report.get("answer") or result
+        display_result = reply_text(report, result)
         if report.get("limitations"):
             display_result += "\n\n**诊断不足与待核验**\n" + "\n".join(
                 "- " + str(item) for item in report["limitations"]

@@ -504,7 +504,7 @@ async function report(id) {
     reportProgress(t) +
     `<div class="stats"${facts ? ' style="grid-template-columns:repeat(5,minmax(0,1fr))"' : ""}><div class="stat"><div class="label">诊断状态</div><div class="value">${badge(t.status)}</div><div class="hint">${E(stageLabel(t.stage))}</div></div><div class="stat"><div class="label">主机 / 事件 ID</div><div class="value">${E(t.alert?.host_id || t.asset?.zabbix_hostid || "—")}</div><div class="hint">事件 ${E(t.event_id || "未关联")}</div></div><div class="stat"><div class="label">实际 Token / 工具调用</div><div class="value">${fmt(t.token_total)}</div><div class="hint">${fmt(t.tools)} 次采集 · 输入 ${fmt(t.token_input)} / 输出 ${fmt(t.token_output)}</div></div><div class="stat"><div class="label">执行耗时</div><div class="value">${t.duration_ms == null ? "—" : (t.duration_ms / 1000).toFixed(1) + " s"}</div><div class="hint">${date(t.created_at)}</div></div>${facts ? `<div class="stat"><div class="label">事实核对</div><div class="value">${fmt(facts.confirmed)}</div><div class="hint">已确认 ${fmt(facts.confirmed)} / 降级 ${fmt(facts.demoted)} / 推断 ${fmt(facts.probable)} / 假设 ${fmt(facts.hypotheses)}</div></div>` : ""}</div>` +
     reportBudget(t) +
-    (t.skills?.length ? panel("本次加载的 Skill", t.skills.map(row => `<p><strong>${E(row.name)}</strong> · v${row.revision} · ${row.providers.map(E).join(" / ")}</p><p class="muted small mono">SHA256 ${E(row.digest)}</p>`).join(""), "查询步骤由任务创建时保存的 Skill 决定。") : "") +
+    skillsPanel(t.skills) +
     panel(
       "告警与主机信息",
       `<p>${E(t.alert?.event_name || "手动诊断 / 连接测试")}</p><p class="muted small">主机：${E(t.asset?.name || t.alert?.host_name || "未关联")} · Zabbix Host ID：${E(t.asset?.zabbix_hostid || t.alert?.host_id || "—")}${target.ssh_host_id ? ` · SSH 资产 ID：${E(target.ssh_host_id)} · IP：${E(target.address || "—")}` : ""} · 设备类型：${E(labels[device] || "待确认")}${caps.diagnostic_path ? ` · 诊断路径：${E(DIAGNOSTIC_PATHS[caps.diagnostic_path] || caps.diagnostic_path)}` : ""}</p>`,
@@ -548,6 +548,21 @@ const CAPABILITY_STATES = {
   not_ready: ["主机未就绪", "partial"],
 };
 const EVIDENCE_KINDS = {prefetch: "预采集", model: "模型请求", retry: "重试", cache_hit: "复用缓存"};
+function skillsPanel(rows) {
+  if (!rows?.length) return "";
+  const line = row => `<p><strong>${E(row.name)}</strong> · v${E(row.revision)} · ${(row.providers || []).map(E).join(" / ")}</p><p class="muted small mono">SHA256 ${E(row.digest)}</p>`;
+  // `applied` is recorded once the task reached the model; until then only the snapshot is known.
+  if (!rows.some(row => typeof row.applied === "boolean")) {
+    return panel("任务 Skill 快照", rows.map(line).join(""), "任务创建时保存的已启用 Skill。执行时按设备类型和告警类型筛选，只把适用的 Skill 发给模型。");
+  }
+  const skipped = rows.filter(row => !row.applied);
+  return panel(
+    "本次提供给模型的 Skill",
+    rows.filter(row => row.applied).map(line).join("") +
+      (skipped.length ? `<details class="evidence"><summary>本次不适用的 Skill · ${skipped.length} 个（未发送给模型，不消耗 Token）</summary>${skipped.map(line).join("")}</details>` : ""),
+    "任务创建时保存全部已启用 Skill 的快照；预采集判定设备类型和告警类型后，只把适用的 Skill 交给模型，查询步骤由这些 Skill 决定。",
+  );
+}
 function capabilityPanel(caps) {
   if (!caps.zabbix_mcp && !caps.ssh_mcp) return "";
   const row = (key, title) => {

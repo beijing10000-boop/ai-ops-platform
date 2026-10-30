@@ -334,9 +334,13 @@ def task_detail(
     if not task:
         raise HTTPException(404, "任务不存在")
     request = task.pop("request")
-    from .skill_store import summary
+    from .skill_store import applied_names, summary
 
-    task["skills"] = summary(request.get("skills", []))
+    # The snapshot holds every enabled Skill; `applied` marks the ones the
+    # model received (device and alert-type Skills may not apply).
+    task["skills"] = summary(
+        request.get("skills", []), applied_names(task.get("report"))
+    )
     # capabilities / coverage / facts stay inside task["report"] as recorded.
     budget = (task.get("report") or {}).get("budget") or {
         "limits": request.get("limits", {}),

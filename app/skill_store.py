@@ -580,6 +580,18 @@ def summary(snapshot, applied=None):
     ]
 
 
+def applied_names(report):
+    """Names of the Skills the model received, read from a finished task's
+    report; None when the task never reached the model (queued, running).
+
+    Reports before v1.2.0 carry no `applied` flag: every Skill was sent then.
+    """
+    rows = [row for row in (report or {}).get("skills") or [] if isinstance(row, dict)]
+    if not rows:
+        return None
+    return {row.get("name") for row in rows if row.get("applied", True)}
+
+
 def export(files):
     target = io.BytesIO()
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
