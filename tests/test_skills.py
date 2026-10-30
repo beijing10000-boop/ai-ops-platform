@@ -1245,6 +1245,58 @@ def test_scope_without_any_enabled_skill_fails_explicitly(rig):
     assert "启用" in answer and not create.called
 
 
+def test_question_naming_two_hosts_ends_the_task_with_the_reason(rig, monkeypatch):
+    from app import qa_worker
+
+    session, _ = rig
+    install(providers=["ssh_mcp"])
+    create = AsyncMock()
+    ran, cards, recorded = {}, [], []
+
+    async def ask(question, context, return_usage=False, actor="system", **kwargs):
+        ran["result"] = await mcp_runtime.run(
+            "中文报告",
+            question,
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            return_usage=True,
+        )
+        return ran["result"]
+
+    async def reply_card(message_id, title, body, template="blue"):
+        return "om_progress"
+
+    async def update_card(message_id, title, body, template="green"):
+        cards.append((title, body, template))
+
+    for name, value in {
+        "ask": ask,
+        "reply_card": reply_card,
+        "update_card": update_card,
+        "record_ai_question": lambda *args, **kwargs: recorded.append(args[3]),
+        "recall": lambda *args: None,
+        "is_pending": lambda *args: False,
+        "mark_pending": lambda *args: None,
+        "clear_pending": lambda *args: None,
+        "remember": lambda *args, **kwargs: None,
+    }.items():
+        monkeypatch.setattr(qa_worker, name, value)
+    asyncio.run(
+        qa_worker.execute(
+            "oc_group", "对比 198.51.100.21 和 198.51.100.22 的 CPU", "om_q"
+        )
+    )
+    # The task ends (not left running) and both Feishu and Web say why.
+    title, body, color = cards[0]
+    assert (title, color) == ("AI 分析未完成", "red")
+    assert "一次只诊断一台主机" in body
+    task = tasks.get(ran["result"][1]["task_id"])
+    assert task["status"] == "failed" and task["error_type"] == "MultipleTargets"
+    assert "一次只诊断一台主机" in task["report"]["answer"]
+    assert recorded == ["running", "failed"]
+    # Neither host is guessed: no MCP call and no model round.
+    assert session.calls == [] and not create.called
+
+
 def test_secrets_never_reach_the_model_or_the_report(rig):
     session, config = rig
     install(providers=["ssh_mcp"])

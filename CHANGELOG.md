@@ -4,6 +4,7 @@
 
 - **代码清理（不改变行为）**：逐行审读 `app/` 全部模块。删除没有调用方的函数、常量与参数（如 `feishu_client.send_card/send_text/get_message_chat_id`、`conversation_context.recall_thread`、`platform_api.write`、`evidence_check.PATH_STATUS`、`worker.initial_info`）；合并重复实现（飞书 Open ID 列表的解析与校验 5 处合一、MCP ExceptionGroup 拆解、Zabbix 信号字典 7 处合一、敏感工具正则、审计查询、管理员授权判断）；函数内重复的 import 移到模块顶部，队列名统一引用 `orchestrator.queues`。API、飞书输出、发给模型的提示词与 JSON、数据库读写、RQ 任务路径与配置键均不变。净减少约 330 行。
 - 文档与代码对齐：去掉已不存在的“默认提示词”，预算表按 `budgets.PROFILES` 更新，飞书卡片、快速模式、WorkerLost 阈值、unknown 设备等描述按现行代码修正。
+- 问题里同时出现两个 IP 或 Host ID（如“对比 198.51.100.21 和 198.51.100.22 的 CPU”）时，任务立即结束为“失败”（`MultipleTargets`），飞书卡片“AI 分析未完成”与 Web 报告写明原因：一次只诊断一台主机，请分别提问；不查询任何主机、不调用模型。此前飞书问答的任务一直停在“执行中”，卡片只显示“分析失败，请稍后重试”；Web 诊断则以 NameError 失败，提示“请核对模型与连接配置”。
 
 ## 1.2.3 — 2026-10-30
 
