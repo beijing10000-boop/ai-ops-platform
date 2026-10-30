@@ -441,6 +441,10 @@ class ToolSchemaMismatch(ValueError):
     """The locally allowed read query cannot satisfy the remote MCP schema."""
 
 
+# A "$ref" that does not point inside the schema itself ("#/..."): never resolved.
+EXTERNAL_REF = re.compile(r'"\$ref"\s*:\s*"(?!#)')
+
+
 def _schema_accepts(property_schema, expected):
     if not isinstance(property_schema, dict):
         return False
@@ -462,7 +466,7 @@ def adapt_read_args(name, checked, schema):
     """
     if name not in READ_TOOLS:
         raise ValueError("tool not authorized")
-    if re.search(r'"\\$ref"\\s*:\\s*"(?!#)', json.dumps(schema)):
+    if EXTERNAL_REF.search(json.dumps(schema)):
         raise ValueError("external schema refs forbidden")
     if not isinstance(schema, dict) or not isinstance(
         schema.get("properties", {}), dict
@@ -493,7 +497,7 @@ def adapt_read_args(name, checked, schema):
 
 def validate_remote_schema(name, args, schema):
     # Do not resolve remote schema URLs.
-    if re.search(r'"\$ref"\s*:\s*"(?!#)', json.dumps(schema)):
+    if EXTERNAL_REF.search(json.dumps(schema)):
         raise ValueError("external schema refs forbidden")
     try:
         Draft202012Validator(schema).validate(args)

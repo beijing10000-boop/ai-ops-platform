@@ -62,6 +62,32 @@ def test_remote_schema_cannot_fetch_external_reference():
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    "ref,external",
+    [
+        ("https://example.invalid/ids.json", True),
+        ("ids.json#/$defs/ids", True),
+        ("#/$defs/ids", False),
+    ],
+)
+def test_argument_adapter_rejects_external_refs_like_the_schema_check(ref, external):
+    schema = {
+        "type": "object",
+        "$defs": {"ids": {"type": "array", "items": {"type": "string"}}},
+        "properties": {"hostids": {"$ref": ref}, "output": {"type": "array"}},
+    }
+    checked = zabbix.validate_args("host_get", {}, host_id="11848")
+    if external:
+        with pytest.raises(ValueError, match="external schema refs forbidden"):
+            zabbix.adapt_read_args("host_get", checked, schema)
+        with pytest.raises(ValueError, match="external schema refs forbidden"):
+            zabbix.validate_remote_schema("host_get", checked, schema)
+    else:
+        wire = zabbix.adapt_read_args("host_get", checked, schema)
+        zabbix.validate_remote_schema("host_get", wire, schema)
+        assert wire["hostids"] == ["11848"]
+
+
 def test_redaction_removes_credentials_before_model_submission():
     text = "Authorization: Bearer xyzsecret password=hunter2 api_key=secret123 https://u:p@example.org\n-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n-----END OPENSSH PRIVATE KEY-----"
     result = redact(text)
