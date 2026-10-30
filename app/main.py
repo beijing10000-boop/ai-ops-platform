@@ -446,21 +446,23 @@ def complete_setup(body: SetupRequest):
     with connection() as db:
         # Recheck inside write lock, so concurrent bootstrap requests cannot overwrite.
         db.execute("BEGIN IMMEDIATE")
-        present = {
-            row[0]
-            for row in db.execute(
-                "SELECT key FROM settings WHERE key IN (?,?,?,?) AND value!=''",
-                BOOTSTRAP_KEYS,
-            )
-        }
-        if len(present) == len(BOOTSTRAP_KEYS):
+
+        def configured(key):
+            # Decrypted, as setup_missing reads it: a secret cleared in the
+            # settings page is stored as the ciphertext of "" and is missing.
+            row = db.execute(
+                "SELECT value,secret FROM settings WHERE key=?", (key,)
+            ).fetchone()
+            if not row:
+                return False
+            value = cipher().decrypt(row[0].encode()).decode() if row[1] else row[0]
+            return bool(value.strip())
+
+        if all(configured(key) for key in BOOTSTRAP_KEYS):
             raise HTTPException(409, "初始化已完成")
         for key, value in entries.items():
             # Preserve pre-existing configuration during repair/migration.
-            row = db.execute(
-                "SELECT value FROM settings WHERE key=?", (key,)
-            ).fetchone()
-            if row and row[0] and key != "web_protocol":
+            if key != "web_protocol" and configured(key):
                 continue
             secret = key in SENSITIVE
             stored = cipher().encrypt(value.encode()).decode() if secret else value
