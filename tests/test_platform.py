@@ -360,6 +360,17 @@ def test_rejected_feishu_questions_are_recorded_and_counted(monkeypatch):
     assert rows["om_denied"]["completed_at"] and rows["om_busy"]["completed_at"]
 
 
+def test_legacy_mcp_test_endpoint_audits_the_caller():
+    # Zabbix MCP is not configured here: the test fails, and is still audited.
+    response = client_for().post("/api/v1/test/mcp")
+    assert response.status_code == 200 and response.json()["ok"] is False
+    with main.connection() as db:
+        actors = db.execute(
+            "SELECT actor FROM audit WHERE action='mcp_connection_test'"
+        ).fetchall()
+    assert actors == [("ou_super",)]
+
+
 def test_imported_history_cannot_be_retried():
     old, _ = tasks.create({"legacy_id": 1}, kind="legacy")
     tasks.finish(old["task_id"], {}, status="failed")

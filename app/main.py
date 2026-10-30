@@ -961,12 +961,12 @@ def runtime_status():
     return result
 
 
-@app.post("/api/v1/test/mcp", dependencies=[Depends(require_admin)])
-async def test_mcp():
+@app.post("/api/v1/test/mcp")
+async def test_mcp(identity=Depends(require_admin)):
     from .platform_api import discover
 
     # Compatibility endpoint for existing API clients, using the same safe connection test.
-    return await discover(provider="zabbix_mcp", who={"open_id": "system"})
+    return await discover(provider="zabbix_mcp", who=identity)
 
 
 @app.post("/api/v1/test/feishu")
