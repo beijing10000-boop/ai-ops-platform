@@ -1321,6 +1321,132 @@ def test_failed_and_busy_tools_are_retried_or_recorded_and_analysis_continues(
     assert "平台要求模型补充证据后再总结（1 次）" in report["budget"]["limits_hit"]
 
 
+# --- 11. A check the host cannot run (PSI off) is a capability, not a gap -------------
+
+NO_PSI = {
+    "status": "partial",
+    "exit_code": 69,
+    "summary": {"action": "pressure", "metrics": []},
+    "findings": [
+        {
+            "level": "info",
+            "metric": "collection_coverage",
+            "value": ["kernel-psi"],
+            "threshold": "complete",
+            "hint": "采集未完整完成",
+        }
+    ],
+}
+
+
+def test_host_without_psi_is_reported_as_a_capability_not_a_diagnostic_gap(
+    monkeypatch,
+):
+    # Rocky / RHEL 9 boot with PSI off: every CPU alert's collection would
+    # otherwise mark the whole analysis "partial".
+    clock = alert_clock()
+    zbx = Zabbix(
+        LINUX_HOST,
+        [item("201", "system.cpu.load[all,avg5]", 9.4)],
+        [item("202", "system.cpu.util", 35.0)],
+        [],
+        {"201": step(clock, 2.0, 9.0), "202": lambda now: 35.0},
+        {"201": (1.0, 2.0, 3.0)},
+    )
+    ssh = SSH({"ssh_diagnose_pressure": NO_PSI})
+    rig(monkeypatch, zbx, ssh)
+
+    def conclude(request):
+        cpu = prefetched(request, "ssh_collect")[0]
+        history = prefetched(request, "history_get")[0]
+        return answer(
+            json.dumps(
+                {
+                    "cause": f"负载升高（{history}），主机未启用 PSI（{cpu}）。",
+                    "action": ["核对高负载时段的任务"],
+                    "analysis": "PSI 缺失，以运行队列与 D 状态进程代替。",
+                    "evidence": [
+                        {"id": history, "quote": "after avg 9"},
+                        {"id": cpu, "quote": "kernel-psi"},
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        )
+
+    model = Model(conclude)
+    task, _ = run_alert(
+        event_for("Linux: Load average is too high", "71011", clock), model
+    )
+    report = task["report"]
+    assert ssh_calls(ssh)[1][1]["actions"] == ["cpu", "processes", "pressure"]
+    # Not a gap: the analysis is complete for what this host can provide.
+    assert task["status"] == "success" and report["limitations"] == []
+    assert report["coverage"]["failed"] == []
+    assert report["coverage"]["unavailable"] == [
+        {"tool": "ssh_collect", "reason": "主机不支持：kernel-psi"}
+    ]
+    assert "ssh_collect" in report["coverage"]["collected"]
+    assert report["capabilities"]["host_limits"] == [
+        {"tool": "ssh_collect/pressure", "missing": "kernel-psi"}
+    ]
+    # Said in the report scope, and given to the model with the prefetch.
+    assert (
+        "主机不支持的采集项：内核未启用 PSI（Rocky/RHEL 9 需启动参数 psi=1）"
+        "（ssh_collect/pressure）" in report["answer"]
+    )
+    assert opening(model.requests[0])["capabilities"]["host_limits"]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        # Timed out, truncated, another exit code, a step that never reported
+        # back, or no capability named: still evidence the task did not get.
+        {"data": {**NO_PSI, "timed_out": True}},
+        {"data": {**NO_PSI, "truncated": True}},
+        {"data": {**NO_PSI, "incomplete_reason": "stderr"}},
+        {"data": {**NO_PSI, "exit_code": 2}},
+        {"data": {**NO_PSI, "findings": []}},
+        {
+            "data": {
+                "status": "partial",
+                "summary": {
+                    "steps": [
+                        {**NO_PSI, "action": "pressure"},
+                        {"action": "cpu", "status": "partial", "findings": []},
+                    ]
+                },
+            }
+        },
+        {"data": {"status": "success", "summary": {}}},
+        {"data": {"status": "failed", "error_code": "timeout"}},
+    ],
+)
+def test_only_missing_host_prerequisites_are_host_limits(outcome):
+    from app.skill_runtime import host_limits
+
+    assert host_limits(outcome) is None
+
+
+def test_host_limits_name_the_step_and_capability():
+    from app.skill_runtime import host_limits
+
+    assert host_limits({"data": NO_PSI}) == [("", "kernel-psi")]
+    collected = {
+        "data": {
+            "status": "partial",
+            "summary": {
+                "steps": [
+                    {"action": "cpu", "status": "success", "exit_code": 0},
+                    {**NO_PSI, "action": "pressure"},
+                ]
+            },
+        }
+    }
+    assert host_limits(collected) == [("pressure", "kernel-psi")]
+
+
 def test_card_shows_checked_evidence_and_sources_without_evidence_ids():
     info = {
         "cause": "负载高由 D 状态任务造成（E3）。",

@@ -1,5 +1,20 @@
 # 升级说明
 
+## v1.2.1 → v1.2.2
+
+没有数据库迁移，不改配置。主机本身不具备的采集能力（如内核未启用 PSI）改为写进“能力说明”，不再让告警分析变成“部分完成”。在平台部署目录执行：
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://服务器IP:8088/healthz
+```
+
+healthz 应返回 version 1.2.2。第一次打开 Skill 管理页或创建任务时 platform-base 自动更新（版本号 +1）。验收：对一台未启用 PSI 的 Linux 主机（Rocky/RHEL 9 默认如此）的 CPU 负载告警点“AI 分析”，任务状态应为“成功”，报告“诊断范围 → 能力说明”出现“主机不支持的采集项：内核未启用 PSI”，证据覆盖面板有“主机不支持”一栏。需要 PSI 数据时可在主机上执行 `grubby --update-kernel=ALL --args=psi=1` 并重启。
+
 ## v1.2.0 → v1.2.1
 
 没有数据库迁移，不改配置。飞书卡片中的报告链接恢复为普通链接，点击后在系统默认浏览器中打开。在平台部署目录执行：
