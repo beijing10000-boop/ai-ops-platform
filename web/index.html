@@ -4,91 +4,118 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
-    <title>Zabbix AI Ops · 统一诊断平台</title>
-    <link rel="stylesheet" href="/assets/apple.css" />
+    <title>AI Ops · 智能运维平台</title>
+    <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg?v=1.3.0" />
+    <link rel="stylesheet" href="/assets/ui-kit.css?v=1.3.0" />
+    <link rel="stylesheet" href="/assets/app.css?v=1.3.0" />
+    <script src="/assets/ui-kit.js?v=1.3.0"></script>
+    <script defer src="/assets/experience.js?v=1.3.0"></script>
+    <script defer src="/assets/skills.js?v=1.3.0"></script>
+    <script defer src="/assets/app.js?v=1.3.0"></script>
   </head>
   <body>
-    <div id="login" class="auth-screen">
-      <section class="auth-card">
-        <div class="brand-icon">Z</div>
-        <p class="eyebrow">INTELLIGENT OPERATIONS</p>
-        <h1>Zabbix AI Ops</h1>
-        <p class="muted">连接监控、证据与处理决策。</p>
-        <a class="button primary" href="/api/v1/auth/login"
-          >使用飞书账号登录 →</a
-        >
-        <p class="muted small">仅授权成员可访问。首次部署请完成初始化。</p>
-        <a href="/setup">首次初始化</a>
-        <p id="login-error" role="alert"></p>
+    <div id="login" class="login-wrap">
+      <section class="login-card">
+        <div class="logo" data-icon="ai"></div>
+        <div class="eyebrow">飞书身份认证</div>
+        <h1>AI Ops</h1>
+        <p class="muted">连接监控、证据与处理决策的智能运维平台</p>
+        <a class="btn primary" href="/api/v1/auth/login">使用飞书账号登录</a>
+        <p class="small">仅授权成员可访问</p>
+        <a class="setup-link" href="/setup">首次部署？进入初始化向导</a>
+        <p id="login-error" class="error" role="alert" hidden></p>
       </section>
     </div>
-    <div id="app" hidden>
+    <div id="app" class="shell" hidden>
       <aside class="sidebar">
-        <a class="brand" href="#overview"
-          ><span class="brand-icon">Z</span
-          ><span
-            ><strong>Zabbix AI Ops</strong><small>统一智能运维平台</small></span
-          ></a
-        >
-        <p class="nav-caption">工作空间</p>
-        <nav id="navigation" aria-label="主导航"></nav>
-        <div class="sidebar-bottom">
-          <span class="status-dot"></span><span id="version">版本加载中</span
-          ><button
-            id="theme-toggle"
-            class="icon-button"
-            aria-label="切换深浅色主题"
-          >
-            ◐
-          </button>
+        <a class="brand" href="#overview">
+          <span class="logo" data-icon="ai"></span>
+          <span><strong>AI Ops</strong><small>智能运维平台</small></span>
+        </a>
+        <nav id="nav" class="nav" aria-label="主导航"></nav>
+        <div class="sidebar-foot">
+          <div class="service-line">
+            <span class="indicator"></span><span id="version">版本加载中</span>
+            · 北京时间
+          </div>
+          <div class="user-card">
+            <span class="avatar" id="avatar" aria-hidden="true"></span>
+            <div>
+              <strong id="username"></strong><small id="role-label"></small>
+            </div>
+            <button id="logout" class="btn subtle small" type="button">
+              退出
+            </button>
+          </div>
         </div>
       </aside>
-      <div class="workspace">
+      <button
+        class="nav-backdrop"
+        data-action="toggle-nav"
+        type="button"
+        aria-label="关闭导航"
+      ></button>
+      <main class="workspace">
         <header class="topbar">
-          <div>
-            <span class="eyebrow">OPERATIONS WORKSPACE</span>
-            <h1 id="page-title">总览</h1>
+          <div class="topbar-title">
+            <button
+              id="menu-toggle"
+              class="btn subtle icon-only"
+              data-action="toggle-nav"
+              data-icon="menu"
+              type="button"
+              aria-label="打开导航"
+              aria-expanded="false"
+            ></button>
+            <div>
+              <nav class="breadcrumb" aria-label="当前位置">
+                <span>AI Ops</span><span aria-hidden="true">/</span
+                ><span id="breadcrumb-section">工作台</span>
+              </nav>
+              <h1 id="page-title">总览</h1>
+            </div>
           </div>
-          <div class="user-bar">
-            <span class="tag" id="role-label"></span><span id="username"></span
-            ><button id="logout" class="button quiet">退出</button>
+          <div class="top-actions">
+            <button
+              class="btn subtle icon-only"
+              data-action="refresh"
+              data-icon="refresh"
+              type="button"
+              aria-label="刷新当前页面"
+              title="刷新"
+            ></button>
+            <button
+              id="theme-toggle"
+              class="btn subtle icon-only"
+              type="button"
+              aria-label="切换深浅色主题"
+            ></button>
           </div>
         </header>
-        <main id="content" tabindex="-1"></main>
-        <footer class="footer">
-          Zabbix AI Ops · 监控事实与实时证据分开记录 · 页面时间均为北京时间
-        </footer>
-      </div>
+        <section id="content" class="content" tabindex="-1"></section>
+      </main>
     </div>
-    <div id="toast" role="status" hidden></div>
-    <dialog id="editor">
+    <div id="toast" class="toast" role="status" hidden></div>
+    <dialog id="editor" aria-labelledby="editor-title">
       <form id="editor-form">
-        <div class="section-heading">
+        <div class="modal-title">
           <h2 id="editor-title"></h2>
           <button
             type="button"
-            class="icon-button"
+            class="close"
             id="close-editor"
+            data-icon="close"
             aria-label="关闭"
-          >
-            ×
-          </button>
+          ></button>
         </div>
-        <div id="editor-fields" class="form-grid"></div>
-        <div
-          id="editor-feedback"
-          class="editor-feedback"
-          role="alert"
-          hidden
-        ></div>
+        <div id="editor-fields" class="fields"></div>
+        <div id="editor-feedback" class="inline-error" role="alert" hidden></div>
         <div class="form-actions">
-          <span class="muted small" id="editor-note"></span
-          ><button type="button" class="button" data-action="validate-editor">验证填写内容</button><button class="button primary" type="submit">保存</button>
+          <button type="button" class="btn" data-action="validate-editor">
+            验证填写内容</button
+          ><button class="btn primary" type="submit">保存</button>
         </div>
       </form>
     </dialog>
-    <script defer src="/assets/experience.js"></script>
-    <script defer src="/assets/skills.js"></script>
-    <script defer src="/assets/app.js"></script>
   </body>
 </html>
