@@ -1,5 +1,10 @@
 # 更新记录
 
+## 未发布
+
+- **代码清理（不改变行为）**：逐行审读 `app/` 全部模块。删除没有调用方的函数、常量与参数（如 `feishu_client.send_card/send_text/get_message_chat_id`、`conversation_context.recall_thread`、`platform_api.write`、`evidence_check.PATH_STATUS`、`worker.initial_info`）；合并重复实现（飞书 Open ID 列表的解析与校验 5 处合一、MCP ExceptionGroup 拆解、Zabbix 信号字典 7 处合一、敏感工具正则、审计查询、管理员授权判断）；函数内重复的 import 移到模块顶部，队列名统一引用 `orchestrator.queues`。API、飞书输出、发给模型的提示词与 JSON、数据库读写、RQ 任务路径与配置键均不变。净减少约 330 行。
+- 文档与代码对齐：去掉已不存在的“默认提示词”，预算表按 `budgets.PROFILES` 更新，飞书卡片、快速模式、WorkerLost 阈值、unknown 设备等描述按现行代码修正。
+
 ## 1.2.3 — 2026-10-30
 
 - 飞书问答回复（群里 @机器人 及告警线程里的追问）不再显示证据编号（E2、E5 等），也不再附“证据核对”清单，与告警“AI 分析结果”卡片一致；“诊断范围”保留，但去掉指向证据列表的编号区间。网页报告保持完整（编号、证据核对、事实分级都在）。去编号规则同时覆盖模型实际写出的几种形式：“（E3 返回为空）”“……4.00%，E2）”“证据 E4 显示”；句中的编号（如“参考 E3”）改写为“证据”，不再留下残句。告警卡片沿用同一规则。

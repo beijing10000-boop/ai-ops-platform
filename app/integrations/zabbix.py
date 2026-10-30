@@ -1,5 +1,6 @@
 """Platform-enforced exact read allowlist, independent of MCP annotations."""
 
+import asyncio
 import json
 import re
 import time
@@ -8,6 +9,7 @@ from contextlib import asynccontextmanager
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from jsonschema import Draft202012Validator
+from jsonschema.exceptions import ValidationError
 from ..security.redact import redact
 from .ssh_mcp import client_factory, validate_endpoint
 
@@ -493,8 +495,6 @@ def validate_remote_schema(name, args, schema):
     # Do not resolve remote schema URLs.
     if re.search(r'"\$ref"\s*:\s*"(?!#)', json.dumps(schema)):
         raise ValueError("external schema refs forbidden")
-    from jsonschema.exceptions import ValidationError
-
     try:
         Draft202012Validator(schema).validate(args)
     except ValidationError as exc:
@@ -506,8 +506,6 @@ def validate_remote_schema(name, args, schema):
 
 
 async def call(session, name, args, *, schema=None, host_id=None, rows=None):
-    import asyncio
-
     checked = validate_args(name, args, host_id=host_id, rows=rows)
     if schema is not None:
         checked = adapt_read_args(name, checked, schema)
@@ -516,6 +514,30 @@ async def call(session, name, args, *, schema=None, host_id=None, rows=None):
 
 
 DEVICE_TYPES = {"linux", "windows", "vmware", "network", "other", "unknown"}
+# Words in linked template names, checked in this order per template.
+TEMPLATE_WORDS = (
+    ("windows", ("windows",)),
+    ("vmware", ("vmware", "esxi", "vcenter")),
+    ("linux", ("linux",)),
+    (
+        "network",
+        (
+            "cisco",
+            "huawei",
+            "h3c",
+            "juniper",
+            "mikrotik",
+            "fortigate",
+            "fortinet",
+            "aruba",
+            "ruijie",
+            "network generic",
+            "switch",
+            "router",
+            "snmp",
+        ),
+    ),
+)
 
 
 def infer_device(host):
@@ -626,36 +648,8 @@ def infer_device(host):
     return "unknown"
 
 
-# Words in linked template names, checked in this order per template.
-TEMPLATE_WORDS = (
-    ("windows", ("windows",)),
-    ("vmware", ("vmware", "esxi", "vcenter")),
-    ("linux", ("linux",)),
-    (
-        "network",
-        (
-            "cisco",
-            "huawei",
-            "h3c",
-            "juniper",
-            "mikrotik",
-            "fortigate",
-            "fortinet",
-            "aruba",
-            "ruijie",
-            "network generic",
-            "switch",
-            "router",
-            "snmp",
-        ),
-    ),
-)
-
-
 async def monitoring_hosts(read_setting, query="", host_id=None):
     """Read current authorized hosts directly from Zabbix; never persist an inventory."""
-    import asyncio
-
     if "host_get" not in enabled_names(read_setting):
         raise ValueError("host_get 已被禁用，无法查询监控主机")
     args = {
@@ -686,7 +680,7 @@ async def monitoring_hosts(read_setting, query="", host_id=None):
                 "host_get",
                 args,
                 schema=remote.inputSchema,
-                host_id=host_id if host_id else None,
+                host_id=host_id or None,
             )
     if response.isError:
         raise ValueError("Zabbix MCP 拒绝查询主机")

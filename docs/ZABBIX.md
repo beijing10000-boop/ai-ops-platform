@@ -26,6 +26,6 @@ event_source=0，接受 event_value=1 的问题与 0 的恢复。**所有 0–5 
 
 平台不维护本地资产或分组。AI 诊断通过 Zabbix MCP 查询可见主机，单次最多100台；可按名称或数字 Host ID 搜索。提交和执行前按精确 Host ID 查询监控，SSH MCP 独立核验映射和主机版本。主机分组/启停由 Zabbix 与 SSH MCP 各自管理。
 
-设备类型优先可信 tag `aiops.device_type`（linux/windows/vmware/network/other）或 inventory OS；无法判断为 unknown。已知非 Linux 不运行 Linux 实时检查。Linux类型明确且远端映射就绪的告警可按Host ID补查；无法确认类型或映射时只使用监控证据。
+设备类型优先可信 tag `aiops.device_type`（linux/windows/vmware/network/other），其次 inventory OS、关联模板、主机组与接口类型；无法判断为 unknown。已知非 Linux 不运行 Linux 实时检查。Linux 或 unknown 设备在远端映射就绪时按 Host ID 采集 SSH 实时证据；映射失败或 SSH MCP 判定为非 Linux 时只使用监控证据。
 
-告警分析由统一 runtime 先查主机/事件/指标和有限历史，必要时才让模型补充受限查询与 SSH。查询、调用、结果和 Token 的实际上限见 ARCHITECTURE.md，不再使用旧的双调查器。
+告警分析先由平台预采集主机、触发器事件、相关监控项与告警前后历史（Linux 主机同时采集 SSH 实时诊断），再由模型按 Skill 补查。查询、调用、结果和 Token 的实际上限见 [CONFIGURATION.md](CONFIGURATION.md) 的分析预算。

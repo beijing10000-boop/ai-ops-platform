@@ -12,7 +12,7 @@ import httpx
 from fastapi import HTTPException, Request
 from fastapi.responses import RedirectResponse, JSONResponse
 
-from .main import app, connection, read_setting
+from .main import app, connection, open_ids, read_setting
 
 log = logging.getLogger(__name__)
 COOKIE = "zabbix_ai_session"
@@ -39,36 +39,22 @@ def _redirect_uri():
     if scheme not in ("http", "https"):
         raise HTTPException(503, "访问协议必须为 http 或 https")
     host = read_setting("web_public_host").strip()
-    if host:
-        # Host is administered via authenticated settings; block path, userinfo,
-        # fragments and off-origin redirect tricks.
-        parts = urlsplit(scheme + "://" + host)
-        if (
-            not parts.hostname
-            or parts.username
-            or parts.password
-            or parts.path not in ("", "/")
-            or parts.query
-            or parts.fragment
-        ):
-            raise HTTPException(
-                503, "Web 外部地址格式无效（只允许主机名/IP和可选端口）"
-            )
-        uri = scheme + "://" + parts.netloc + "/api/v1/auth/callback"
-    else:
+    if not host:
         raise HTTPException(503, "请在 Web 后台配置外部访问主机")
-    parts = urlsplit(uri)
+    # Host is administered via authenticated settings; block path, userinfo,
+    # fragments and off-origin redirect tricks.
+    parts = urlsplit(scheme + "://" + host)
     if (
-        parts.scheme not in ("http", "https")
-        or not parts.hostname
-        or parts.path != "/api/v1/auth/callback"
-        or parts.query
-        or parts.fragment
+        not parts.hostname
         or parts.username
         or parts.password
+        or parts.path not in ("", "/")
+        or parts.query
+        or parts.fragment
     ):
-        raise HTTPException(503, "飞书重定向 URL 配置不正确")
-    return uri
+        raise HTTPException(503, "Web 外部地址格式无效（只允许主机名/IP和可选端口）")
+    # Only the validated netloc reaches the callback URL.
+    return scheme + "://" + parts.netloc + "/api/v1/auth/callback"
 
 
 def _secure_cookie():
@@ -84,8 +70,7 @@ def _credentials():
 
 
 def _admins():
-    ids = read_setting("feishu_admin_open_ids")
-    result = {x.strip() for x in ids.split(",") if x.strip()}
+    result = set(open_ids(read_setting("feishu_admin_open_ids")))
     with connection() as db:
         result.update(
             row[0] for row in db.execute("SELECT open_id FROM members WHERE enabled=1")

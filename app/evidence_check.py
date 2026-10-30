@@ -53,14 +53,13 @@ IDENTIFIER_KEYS = {
     "interfaceid",
     "groupid",
 }
-PATH_STATUS = {"确认", "推断", "假设"}
 
 
 def _numbers(text):
     return [match.group(0) for match in NUMBER.finditer(str(text))]
 
 
-def _measurements(value, key=None):
+def _measurements(value):
     """Numbers of an evidence document, skipping identifier fields.
 
     Strings keep every number they contain (a log line's "Killed process
@@ -71,12 +70,12 @@ def _measurements(value, key=None):
         for name, item in value.items():
             if str(name) in IDENTIFIER_KEYS:
                 continue
-            found.extend(_measurements(item, name))
+            found.extend(_measurements(item))
         return found
     if isinstance(value, list):
         found = []
         for item in value:
-            found.extend(_measurements(item, key))
+            found.extend(_measurements(item))
         return found
     if isinstance(value, bool) or value is None:
         return []
@@ -134,7 +133,7 @@ def _parse(answer):
     return parsed if isinstance(parsed, dict) else None
 
 
-def _check_facts(parsed, index, valid_ids):
+def _check_facts(parsed, valid_ids):
     """Structured statements: a confirmed fact needs a valid citation.
 
     Returns {confirmed, demoted, probable, hypotheses} counts and the lists the
@@ -172,9 +171,7 @@ def _check_facts(parsed, index, valid_ids):
             else:
                 groups[group].append(entry)
     return {
-        "confirmed": groups["confirmed"],
-        "probable": groups["probable"],
-        "hypotheses": groups["hypotheses"],
+        **groups,
         "demoted": demoted,
         "counts": {
             "confirmed": len(groups["confirmed"]),
@@ -188,8 +185,8 @@ def _check_facts(parsed, index, valid_ids):
 def check(answer, index):
     """Return {valid, invalid, confidence, method, facts} or None when nothing is cited.
 
-    `index` maps evidence ids to {"provider", "tool", "text", "status"} as the
-    model saw them.
+    `index` maps evidence ids to {"provider", "tool", "text", "status", "failed"}
+    as the model saw them.
     """
     parsed = _parse(answer)
     if parsed is not None and isinstance(parsed.get("evidence"), list):
@@ -201,25 +198,11 @@ def check(answer, index):
             quote = str(item.get("quote", "")).strip()[:200]
             source = index.get(ident)
             if not source:
-                invalid.append(
-                    {"id": ident, "quote": quote, "reason": "证据编号不存在"}
-                )
+                reason = "证据编号不存在"
             elif _failed(source):
-                invalid.append(
-                    {
-                        "id": ident,
-                        "quote": quote,
-                        "reason": "引用的是失败或未完成的采集结果",
-                    }
-                )
+                reason = "引用的是失败或未完成的采集结果"
             elif not _grounded(quote, source["text"]):
-                invalid.append(
-                    {
-                        "id": ident,
-                        "quote": quote,
-                        "reason": "证据中找不到引用的数值或原文",
-                    }
-                )
+                reason = "证据中找不到引用的数值或原文"
             else:
                 valid.append(
                     {
@@ -229,13 +212,15 @@ def check(answer, index):
                         "tool": source["tool"],
                     }
                 )
+                continue
+            invalid.append({"id": ident, "quote": quote, "reason": reason})
         result = {
             "method": "quote",
             "valid": valid,
             "invalid": invalid,
             "confidence": confidence(valid, invalid),
         }
-        facts = _check_facts(parsed, index, {item["id"] for item in valid})
+        facts = _check_facts(parsed, {item["id"] for item in valid})
         if facts:
             result["facts"] = facts
         return result
@@ -274,7 +259,7 @@ def check(answer, index):
     }
 
 
-SSH_STATUS = {
+STATUS_LABELS = {
     "used": "已使用",
     "available": "可用",
     "unused": "已授权但本次未调用",
@@ -350,11 +335,6 @@ def scope(index, target, capabilities=None, id_range=True):
             "- 设备类型与路径："
             + DEVICE_LABELS.get(device, str(device or "未识别"))
             + (("，" + PATH_LABELS.get(path, path)) if path else "")
-            + (
-                "（" + capabilities["path_reason"] + "）"
-                if capabilities.get("path_reason")
-                else ""
-            )
         )
     times = [item["at"] for item in index.values() if item.get("at")]
     if times:
@@ -394,7 +374,7 @@ def scope(index, target, capabilities=None, id_range=True):
         status = state.get("status")
         if status in (None, "used"):
             continue
-        text = f"{PROVIDER_LABELS[provider]}{SSH_STATUS.get(status, status)}"
+        text = f"{PROVIDER_LABELS[provider]}{STATUS_LABELS.get(status, status)}"
         if state.get("reason"):
             text += "：" + str(state["reason"])
         notes.append(text)

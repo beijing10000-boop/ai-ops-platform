@@ -445,7 +445,7 @@ curl -f http://127.0.0.1:8088/healthz
 
 备份目录包含敏感加密数据库与密钥，限制权限并移至受控备份系统；若以前使用 `.env` 中的 `APP_ENCRYPTION_KEY`，同时保留原部署参数。备份不要放入 Git。`--remove-orphans` 清理已移除的 host-key-worker 容器，不删除数据卷。升级过程不会更改独立 SSH MCP 或 Zabbix MCP。
 
-登录 Web，进入连接管理，保留原 Zabbix MCP，配置并验证 SSH MCP；复查系统配置中的 AI 模型、预算、默认提示词和飞书参数。旧自定义提示词保留；需要新默认词时在系统配置 → AI 配置点击“恢复默认提示词”后保存。
+登录 Web，进入连接管理，保留原 Zabbix MCP，配置并验证 SSH MCP；复查系统配置中的 AI 模型、预算和飞书参数，并在 Skill 管理确认各场景有启用的 Skill（诊断规则不再通过提示词配置）。
 
 验证通过后启动飞书：
 

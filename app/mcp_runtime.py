@@ -6,6 +6,7 @@ disabled all of them; such tasks fail explicitly instead of using a fixed flow.
 """
 
 import json
+import re
 
 from .main import read_setting
 from .diagnostics.playbooks import classify
@@ -83,8 +84,6 @@ def readable_report_answer(raw):
 
     text = str(raw or "").strip()
     if text.startswith("```"):
-        import re
-
         text = re.sub(r"^\x60\x60\x60(?:json)?\s*|\s*\x60\x60\x60$", "", text).strip()
     try:
         result = json.loads(text)
@@ -173,7 +172,6 @@ async def run(
     return_usage=False,
     task_id=None,
     event=None,
-    profile_name=None,
     follow_up=False,
     actor="system",
 ):
@@ -189,9 +187,7 @@ async def run(
         if not task:
             raise ValueError("任务不存在")
     else:
-        task, created = create_task(
-            question, event, profile_name, actor, follow_up=follow_up
-        )
+        task, created = create_task(question, event, actor=actor, follow_up=follow_up)
         if not created:
             raise tasks.AlreadyRunning("此事件已有分析任务，请查看现有任务")
         task = tasks.get(task["task_id"], private=True)

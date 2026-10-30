@@ -3,11 +3,19 @@
 import hashlib
 import json
 import logging
+import re
 import sqlite3
 import uuid
 from ..platform_db import row_dict
+from . import queues
 
 log = logging.getLogger(__name__)
+# Log-like tool names: the sensitivity of a tool whose catalog entry does not
+# say, and of evidence saved without _meta (records before v1.2). Sensitive
+# evidence is hidden without logs.read.
+SENSITIVE_TOOL = re.compile(
+    r"(logs?|journal|syslog|kernel|errors|oom|nginx|java|jvm|service_detail|triage|collect)"
+)
 
 
 class Cancelled(RuntimeError):
@@ -244,22 +252,8 @@ def evidence(task_id, provider, tool, payload, duration_ms=0):
 
 
 def evidence_page(task_id, include_logs=False):
-    import re
     from ..main import connection
 
-    # Records before v1.2 carry no _meta; their log tools are known by name.
-    legacy = {
-        "logs",
-        "kernel",
-        "ssh_diagnose_logs",
-        "ssh_diagnose_kernel",
-        "ssh_diagnose_system_errors",
-        "ssh_diagnose_oom",
-        "ssh_triage",
-    }
-    log_like = re.compile(
-        r"(logs?|journal|syslog|kernel|errors|oom|nginx|java|jvm|service_detail|triage|collect)"
-    )
     with connection() as db:
         cur = db.execute(
             "SELECT * FROM diagnostic_evidence WHERE task_id=? ORDER BY id LIMIT 200",
@@ -270,10 +264,8 @@ def evidence_page(task_id, include_logs=False):
         row["payload"] = decode(row["payload"])
         meta = row["payload"].get("_meta") if isinstance(row["payload"], dict) else None
         meta = meta if isinstance(meta, dict) else {}
-        sensitive = (
-            meta.get("sensitive") is True
-            or row["tool"] in legacy
-            or bool(log_like.search(str(row["tool"] or "")))
+        sensitive = meta.get("sensitive") is True or bool(
+            SENSITIVE_TOOL.search(str(row["tool"] or ""))
         )
         if sensitive and not include_logs:
             payload = row["payload"]
@@ -425,7 +417,7 @@ def enqueue(task_id):
 
     try:
         Queue(
-            "ai-diagnostics",
+            queues.DIAGNOSTICS,
             connection=Redis.from_url(
                 REDIS_URL, socket_connect_timeout=2, socket_timeout=3
             ),

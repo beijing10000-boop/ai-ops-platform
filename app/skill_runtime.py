@@ -11,7 +11,6 @@ from datetime import datetime
 import json
 import re
 import time
-from zoneinfo import ZoneInfo
 
 from openai import AsyncOpenAI, APIConnectionError, APIStatusError
 from .ai_reliability import (
@@ -22,21 +21,21 @@ from .ai_reliability import (
 )
 from .orchestrator import tasks
 from .orchestrator.budgets import with_defaults
-from .skill_mcp import SkillMCP
-from .skill_store import summary
+from .skill_mcp import SkillMCP, root_cause
 from .evidence_check import (
     check as check_citations,
     render as render_citations,
     scope as render_scope,
 )
 from .skill_context import (
+    BEIJING,
     SCHEMA_CHARS,
     derive_signals,
     fit_definitions,
     model_alert,
     model_view,
 )
-from .skill_store import applies, prefetch_plan, scope_of
+from .skill_store import applies, prefetch_plan, scope_of, summary
 from .model_interactions import traced_response
 from .security.redact import redact, redact_data
 from .integrations.ssh_mcp import IntegrationError
@@ -77,7 +76,6 @@ def function(name, description, properties, required):
     }
 
 
-BEIJING = ZoneInfo("Asia/Shanghai")
 # Prefetched Zabbix history: ±30 min around the alert, a 7-day hourly baseline,
 # whole windows in pages of 1000 rows instead of the model's 120-row page.
 ALERT_WINDOW, BASELINE_DAYS, HISTORY_ROWS, HISTORY_PAGES = 1800, 7, 1000, 3
@@ -87,9 +85,6 @@ TRANSIENT_CODES = {"busy", "timeout"}
 CAPABILITY_NAME = re.compile(r"[A-Za-z0-9_.-]{1,40}")
 # ssh_collect steps that need the systemd unit (SSH MCP rejects them without).
 SERVICE_STEPS = {"service", "logs"}
-SENSITIVE_TOOL = re.compile(
-    r"(logs?|journal|syslog|kernel|errors|oom|nginx|java|jvm|service_detail|triage|collect)"
-)
 # Keys that are constants or metadata: a 7-day trend of them says nothing.
 CONSTANT_KEYS = re.compile(r"^(system\.cpu\.num|system\.hw|system\.sw|agent\.version)")
 NON_LINUX = {"windows", "network", "vmware", "other"}
@@ -105,10 +100,7 @@ async def unwrapped():
     try:
         yield
     except BaseExceptionGroup as group:
-        exc = group
-        while isinstance(exc, BaseExceptionGroup) and len(exc.exceptions) == 1:
-            exc = exc.exceptions[0]
-        raise exc from None
+        raise root_cause(group) from None
 
 
 def event_clock(event, now):
@@ -241,10 +233,7 @@ def fill_arguments(schema, base, *, clock, now, service=None):
         if not service:
             return None
         args["service"] = service
-    missing = required - set(args)
-    if missing:
-        return None
-    return args
+    return None if required - set(args) else args
 
 
 def host_limits(outcome):
@@ -373,9 +362,12 @@ def related_token(keys):
         index = SNMP_INDEX.match(first)
         if index:
             tokens.append("." + index.group(1) + "]")
-        elif first.casefold() not in GENERIC_PARAMS and 2 <= len(first) <= 60:
-            if "{" not in first:
-                tokens.append(first)
+        elif (
+            first.casefold() not in GENERIC_PARAMS
+            and 2 <= len(first) <= 60
+            and "{" not in first
+        ):
+            tokens.append(first)
     distinct = list(dict.fromkeys(tokens))
     return distinct[0] if len(distinct) == 1 else None
 
@@ -385,7 +377,7 @@ def is_sensitive(provider, tool, entry=None):
         return False
     if isinstance(entry, dict) and "sensitive" in entry:
         return bool(entry["sensitive"])
-    return bool(SENSITIVE_TOOL.search(str(tool)))
+    return bool(tasks.SENSITIVE_TOOL.search(str(tool)))
 
 
 async def run(
@@ -465,6 +457,10 @@ async def run(
             return [clean(item) for item in value]
         return safe(value) if isinstance(value, str) else value
 
+    def error_text(exc, readable=(ValueError, IntegrationError)):
+        """Our own errors keep their message; anything else only its class."""
+        return safe(str(exc) if isinstance(exc, readable) else type(exc).__name__)
+
     def build_instructions(applied):
         return (
             CORE
@@ -497,7 +493,7 @@ async def run(
         "service": request.get("service"),
         "time_window": request.get("time_window"),
         "diagnostic_type": diagnostic_type,
-        "current_time": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
+        "current_time": datetime.now(BEIJING).isoformat(),
         "current_timestamp": now,
         "budget": limits,
     }
@@ -628,16 +624,16 @@ async def run(
             if str(outcome.get("error")) not in limits_hit:
                 limits_hit.append(str(outcome.get("error")))
             return
-        limits = host_limits(outcome)
-        if limits:
+        lacking = host_limits(outcome)
+        if lacking:
             # A prerequisite the host lacks: reported under 能力说明, not as
             # evidence this task failed to collect (re-running cannot fix it).
-            names = list(dict.fromkeys(name for _, name in limits))
+            names = list(dict.fromkeys(name for _, name in lacking))
             coverage["unavailable"].append(
                 {"tool": str(label), "reason": "主机不支持：" + "、".join(names)}
             )
             known = capabilities.setdefault("host_limits", [])
-            for step, name in limits:
+            for step, name in lacking:
                 entry = {
                     "tool": str(label) + ("/" + step if step else ""),
                     "missing": name,
@@ -679,16 +675,11 @@ async def run(
         except (tasks.Cancelled, asyncio.CancelledError):
             raise
         except Exception as exc:
-            return {
-                "error": safe(
-                    str(exc)
-                    if isinstance(exc, (ValueError, IntegrationError))
-                    else type(exc).__name__
-                )
-            }
+            return {"error": error_text(exc)}
 
-    async def execute(provider, native, arguments, rows=None, kind="prefetch"):
-        """One MCP tool call: counted, recorded as evidence, errors kept as data.
+    async def execute(provider, native, arguments, rows=None):
+        """One platform (prefetch) MCP call: counted, recorded as evidence,
+        errors kept as data.
 
         A busy or timed-out SSH call is retried once; the platform fans out
         several diagnostics of one host at a time and the service queues them.
@@ -696,6 +687,7 @@ async def run(
         nonlocal calls
         calls += 1
         started = time.monotonic()
+        kind = "prefetch"
         outcome = clean(await call_bridge(provider, native, arguments, rows))
         if (
             provider == "ssh_mcp"
@@ -714,11 +706,7 @@ async def run(
         except (tasks.Cancelled, asyncio.CancelledError):
             raise
         except Exception as exc:
-            reason = safe(
-                str(exc)
-                if isinstance(exc, (ValueError, IntegrationError, TimeoutError))
-                else type(exc).__name__
-            )
+            reason = error_text(exc, (ValueError, IntegrationError, TimeoutError))
             state = capabilities[provider]
             if state.get("status") in (None, "not_applicable", "available"):
                 state.update(
@@ -743,12 +731,13 @@ async def run(
             sort_keys=True,
         )
 
-    async def collect(jobs, room, kind="prefetch"):
-        """Run prefetch jobs concurrently; cache successes for the model."""
+    async def collect(jobs, room):
+        """Run prefetch jobs concurrently; cache successes for the model.
+
+        A job is (provider, tool, arguments) with an optional row cap.
+        """
         jobs = jobs[: max(0, room - calls)]
-        results = await asyncio.gather(
-            *(execute(*job[:3], *job[3:4], kind=kind) for job in jobs)
-        )
+        results = await asyncio.gather(*(execute(*job) for job in jobs))
         stage = []
         for (provider, native, arguments, *_), (outcome, ident) in zip(jobs, results):
             stage.append((native, arguments, outcome))
@@ -1450,13 +1439,7 @@ async def run(
         except (tasks.Cancelled, asyncio.CancelledError):
             raise
         except Exception as exc:
-            outcome = {
-                "error": safe(
-                    str(exc)
-                    if isinstance(exc, (ValueError, IntegrationError))
-                    else type(exc).__name__
-                )
-            }
+            outcome = {"error": error_text(exc)}
             native = "list_tools" if kind == "discover" else job[2].get("name", "?")
         return clean(outcome), native, started
 
@@ -1485,11 +1468,11 @@ async def run(
             for signature, job in pending.items()
         }
         if running:
-            await asyncio.gather(*running.values(), return_exceptions=False)
+            await asyncio.gather(*running.values())
         recorded = {}
         for call, args, outcome, job in prepared:
             evidence_id = None
-            provider = str(args.get("provider")) if isinstance(args, dict) else ""
+            provider = str(args.get("provider"))
             discovery = call.name == "list_mcp_tools"
             repeated = False
             if job and job[0] == "cached":
@@ -1525,7 +1508,7 @@ async def run(
                         cache[job[3]] = outcome
             label = (
                 args.get("name", call.name)
-                if isinstance(args, dict) and call.name == "call_mcp_tool"
+                if call.name == "call_mcp_tool"
                 else call.name
             )
             if not repeated and not (job and job[0] == "cached"):

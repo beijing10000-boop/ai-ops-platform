@@ -62,17 +62,18 @@ async def request_response(
         try:
             return await client.responses.create(timeout=timeout, **kwargs)
         except (APITimeoutError, APIConnectionError, APIStatusError) as exc:
+            # Timeouts are connection errors; 4xx other than 429 are not transient.
             transient = isinstance(exc, APIConnectionError) or (
                 isinstance(exc, APIStatusError)
                 and (exc.status_code == 429 or exc.status_code >= 500)
             )
+            # Never a second retry, nor one without time left for it.
             if (
                 not transient
                 or attempt
                 or deadline - time.monotonic() - reserve_seconds < 25
             ):
                 raise
-            # Do not retry cancelled tasks, non-transient 4xx errors, or without time.
             await asyncio.sleep(1)
     raise RuntimeError("unreachable")
 
