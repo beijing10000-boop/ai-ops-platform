@@ -318,16 +318,6 @@ def report_url(info):
     return scheme + "://" + parts.netloc + "/#report/" + task_id
 
 
-def in_feishu(url):
-    """AppLink that opens the page inside the Feishu client (built-in browser,
-    a separate window on PC) instead of handing it to the system browser."""
-    from urllib.parse import quote
-
-    return "https://applink.feishu.cn/client/web_url/open?mode=window&url=" + quote(
-        url, safe=""
-    )
-
-
 def analysis_summary(info):
     """Use the complete canonical report; transport handles byte-size segmentation."""
     from .mcp_runtime import readable_report_answer
@@ -714,7 +704,7 @@ def make_card(event, info=None, *, analysis=False, mute_info=None):
                                 "content": "查看完整诊断报告",
                             },
                             "type": "default",
-                            "url": in_feishu(detail_url),
+                            "url": detail_url,
                         }
                     ],
                 }
@@ -968,7 +958,7 @@ async def handle_alert(event):
                 f"近 {reused['hours']} 小时内同一主机、同一触发器已完成 AI 分析"
                 f"（{reused['completed']}），近 24 小时共 {reused['occurrences']} 次告警，"
                 "本次不重复分析。"
-                + (f"[查看该次报告]({in_feishu(url)})。" if url else "")
+                + (f"[查看该次报告]({url})。" if url else "")
                 + "需要重新分析可点击“AI分析”。"
             )
         elif budget and budget[0] >= budget[1]:
@@ -1171,7 +1161,7 @@ async def analyze_on_demand(event, message_id, chat_id=None, task_id=None):
         card = card_summary(result)
         detail_url = report_url(result)
         if detail_url:
-            card += "\n\n[查看完整诊断报告](" + in_feishu(detail_url) + ")"
+            card += "\n\n[查看完整诊断报告](" + detail_url + ")"
         from .mcp_runtime import format_usage
 
         card += "\n\n---\n" + format_usage(

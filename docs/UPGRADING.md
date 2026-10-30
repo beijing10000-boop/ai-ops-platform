@@ -1,5 +1,20 @@
 # 升级说明
 
+## v1.2.0 → v1.2.1
+
+没有数据库迁移，不改配置。飞书卡片中的报告链接恢复为普通链接，点击后在系统默认浏览器中打开。在平台部署目录执行：
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://服务器IP:8088/healthz
+```
+
+healthz 应返回 version 1.2.1（未启用飞书接收器时去掉 `--profile feishu`）。验收：对一条告警点“AI 分析”，点卡片上的“查看完整诊断报告”，报告页应在系统默认浏览器中打开。升级前已经发出的卡片仍带旧链接，点击时仍在飞书内置浏览器打开。从 v1.1.0 升级时先按下一节升级到 v1.2.0（含 SSH MCP v0.6.0），本节命令相同，只需执行一次。
+
 ## v1.1.0 → v1.2.0
 
 没有数据库迁移。先升级 SSH MCP 到 v0.6.0，再升级平台；顺序反过来也能运行，只是新工具（Nginx、系统日志、Java、服务详情、单会话多项采集）在 SSH MCP 升级前不可用，报告的“证据覆盖”会把它们列为跳过项并注明原因。

@@ -108,12 +108,23 @@ def test_feishu_card_shows_conclusion_and_actions_without_evidence_ids():
     assert "下列仅为" not in text and "分析结果需要人工复核" not in text
 
 
-def test_report_links_open_inside_the_feishu_client():
-    url = "http://192.0.2.10:8088/#report/0123456789abcdef0123456789abcdef"
-    assert worker.in_feishu(url) == (
-        "https://applink.feishu.cn/client/web_url/open?mode=window&url="
-        "http%3A%2F%2F192.0.2.10%3A8088%2F%23report%2F0123456789abcdef0123456789abcdef"
-    )
+def test_report_links_are_plain_urls_for_the_default_browser(monkeypatch):
+    # v1.2.1: the button carries the report URL itself, so Feishu hands it to
+    # the system browser (the v1.0.4 AppLink opened Feishu's built-in browser).
+    settings = {"web_protocol": "http", "web_public_host": "192.0.2.10:8088"}
+    monkeypatch.setattr(worker, "read_setting", lambda key: settings.get(key, ""))
+    task_id = "0123456789abcdef0123456789abcdef"
+    event = {"event_id": "6056240", "severity": "4", "event_value": "1"}
+    info = {"cause": "CPU 排队", "action": "核对进程", "_task_id": task_id}
+    card = worker.make_card(event, info, analysis=True)
+    [button] = [
+        action
+        for element in card["elements"]
+        for action in element.get("actions", [])
+        if action.get("text", {}).get("content") == "查看完整诊断报告"
+    ]
+    assert button["url"] == "http://192.0.2.10:8088/#report/" + task_id
+    assert "applink" not in str(card)
 
 
 def test_card_keeps_complete_report_without_fixed_character_truncation():

@@ -117,7 +117,7 @@ async def execute(
             actor=sender_open_id or "feishu",
             **({"event": verified_event} if verified_event else {}),
         )
-        from .worker import in_feishu, report_url
+        from .worker import report_url
         from .orchestrator import tasks
 
         task = tasks.get(usage.get("task_id")) if usage.get("task_id") else None
@@ -136,7 +136,7 @@ async def execute(
             display_result += f"\n\n执行耗时：{task['duration_ms'] / 1000:.1f} 秒"
         url = report_url({"_token_usage": usage})
         if url:
-            display_result += "\n\n[查看完整诊断报告](" + in_feishu(url) + ")"
+            display_result += "\n\n[查看完整诊断报告](" + url + ")"
         display_result += "\n\n---\n" + format_usage(usage)
         record_ai_question(
             "feishu",
