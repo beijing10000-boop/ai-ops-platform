@@ -750,6 +750,51 @@ def test_manual_analysis_progress_updates_and_context_for_both_states(monkeypatc
         assert "CPU趋势连续上升" in saved[-1][4]
 
 
+def test_alert_origin_kept_for_follow_ups_has_real_line_breaks(monkeypatch):
+    from app import feishu_client, conversation_context
+
+    async def analyze(event, task_id=None):
+        return {"cause": "负载较高", "action": "检查进程", "analysis": "CPU趋势上升"}
+
+    async def reply(message_id, title, detail):
+        return "om_progress"
+
+    async def update(message_id, title, detail, template="green"):
+        pass
+
+    saved = []
+    monkeypatch.setattr(worker, "analyze", analyze)
+    monkeypatch.setattr(feishu_client, "reply_card", reply)
+    monkeypatch.setattr(feishu_client, "update_card", update)
+    monkeypatch.setattr(
+        conversation_context,
+        "remember",
+        lambda *args, **kwargs: saved.append(kwargs["parent_context"]),
+    )
+    monkeypatch.setattr(conversation_context, "mark_pending", lambda *args: None)
+    monkeypatch.setattr(conversation_context, "clear_pending", lambda *args: None)
+    event = {
+        "event_id": "773312",
+        "severity": "2",
+        "event_value": "1",
+        "event_name": "CPU high",
+        "host_name": "node1",
+        "host_ip": "198.51.100.21",
+    }
+    asyncio.run(
+        worker.analyze_on_demand(event, "om_original", "oc_group", "task-origin")
+    )
+    card = worker.make_card(event)
+    assert saved[-1]["origin"] == (
+        card["header"]["title"]["content"]
+        + "\n"
+        + card["elements"][0]["text"]["content"]
+    )
+    # The text a follow-up question in the alert thread hands to the model.
+    context = conversation_context.format_context({**saved[-1], "turns": []})
+    assert "\\n" not in context
+
+
 def test_recovery_replies_to_matching_chat_messages(monkeypatch):
     from app import feishu_client
     from app.main import connection

@@ -1177,7 +1177,7 @@ async def analyze_on_demand(event, message_id, chat_id=None, task_id=None):
                 source_card = make_card(event)
                 original = (
                     str(source_card["header"]["title"]["content"])
-                    + "\\n"
+                    + "\n"
                     + str(source_card["elements"][0]["text"]["content"])
                 )
                 remember(
