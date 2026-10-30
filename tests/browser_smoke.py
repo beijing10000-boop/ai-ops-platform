@@ -11,6 +11,9 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from app.orchestrator.budgets import PROFILES  # noqa: E402
+
 OUT = ROOT / "docs/screenshots"
 OUT.mkdir(exist_ok=True)
 # Failed runs must not upload the checked-in results of an older successful run.
@@ -505,8 +508,9 @@ try:
         page.locator('[data-action="report"]').first.click()
         page.get_by_text("证据与工具执行记录", exact=True).wait_for()
         assert page.locator(".report-answer h3").count() == 3
+        # The seeded task keeps the default standard budget it was created with.
         assert (
-            "12"
+            str(PROFILES["standard"]["calls"])
             in page.get_by_role("heading", name="分析预算", exact=True)
             .locator("xpath=ancestor::section[1]")
             .inner_text()

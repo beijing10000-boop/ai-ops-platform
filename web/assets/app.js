@@ -129,8 +129,7 @@ const badge = (s) =>
   `<span class="tag ${E(s)}">${E(labels[s] || s || "—")}</span>`;
 const sourceLabel = value => ({web: "Web 诊断", alert: "告警分析", qa: "监控问答", feishu: "飞书", ui_test: "界面测试"}[value] || value);
 function stageLabel(value) {
-  if (String(value).startsWith("ssh_mcp:")) return "SSH 采集中 · " + ({resolve: "核验主机", cpu: "CPU", memory: "内存", processes: "进程", memory_processes: "内存进程", disk: "磁盘", directory: "目录占用", io: "磁盘 IO", network: "网络", sockets: "连接", system: "系统", service: "服务", logs: "日志", kernel: "内核"}[value.split(":")[1]] || "补充证据");
-  return labels[value] || ({collecting: "收集证据", zabbix_history: "查询监控历史", ai_reasoning: "AI 分析中", skill_analysis: "按 Skill 分析查询步骤", skill_prefetch: "按 Skill 预采集证据",skill_ssh_mcp: "正在查询后台 MCP 服务并进行分析", skill_zabbix_mcp: "正在查询后台 MCP 服务并进行分析", retired: "旧任务已停用"}[value]) || value || "等待执行";
+  return labels[value] || ({collecting: "收集证据", ai_reasoning: "AI 分析中", skill_analysis: "按 Skill 分析查询步骤", skill_prefetch: "按 Skill 预采集证据", skill_ssh_mcp: "正在查询后台 MCP 服务并进行分析", skill_zabbix_mcp: "正在查询后台 MCP 服务并进行分析", retired: "旧任务已停用"}[value]) || value || "等待执行";
 }
 const btn = (action, text, id = "", kind = "", disabled = false) =>
   `<button type="button" class="button ${kind}" data-action="${action}" data-id="${E(id)}" ${disabled ? "disabled" : ""}>${text}</button>`;
@@ -239,6 +238,8 @@ const PLAY = {
   disk: "磁盘容量",
   io: "IO 性能",
   service: "服务异常",
+  nginx: "Nginx / Web 异常",
+  java: "Java / JVM 异常",
   network: "网络异常",
   system: "系统异常",
   unreachable: "主机不可达",
@@ -276,11 +277,11 @@ async function diagnostics() {
   const options = await api(P + "/diagnostic-options");
   return (
     intro(
-      "输入问题发起诊断。启用 Skill 后按指引选择后台服务，可直接查询已登记的 SSH 主机 IP，也可选择监控主机或关联告警。",
+      "新建诊断须选择监控主机或关联告警；按已登记的 SSH 主机 IP 直接查询，请使用下方监控问答。查询来源和步骤由已启用的 Skill 决定。",
     ) +
     panel(
       "新建诊断",
-      `<form id="diagnostic-form">${state.selectedEvent ? `<div class="notice context-banner"><div><strong>正在分析告警 ${E(state.selectedEvent)}</strong><p>${E(state.selectedEventTitle || "以告警中记录的主机为诊断目标。")}</p></div>${btn("clear-event", "取消关联", "", "small")}</div>` : ""}<div class="form-grid"><div class="field wide"><span>查询监控主机</span><div class="toolbar"><input id="host-search" aria-label="搜索 Zabbix 主机" placeholder="输入主机名称或 Zabbix Host ID">${btn("search-hosts", "查询 Zabbix 主机")}</div><small id="host-search-result" role="status">直接从 Zabbix MCP 读取主机，无需在平台登记资产。</small></div>${field("zabbix_hostid", "诊断主机", "", "text", "可选。按 Skill 查询明确 SSH IP 时可不选择；选择 Host ID 或关联告警时，以该主机为准。", [["", "未选择主机"], ...state.hostRows.map(h => [h.zabbix_hostid, h.name + " · Host ID " + h.zabbix_hostid + " · " + (labels[h.device_type] || h.device_type)])])}${field("event_id", "告警事件 ID", state.selectedEvent || "", "text", "可选，必须是平台已经接收的事件。")}${field("diagnostic_type", "诊断类型", "auto", "text", "", [["auto", "自动识别告警类型"], ...Object.entries(PLAY)])}${field(
+      `<form id="diagnostic-form">${state.selectedEvent ? `<div class="notice context-banner"><div><strong>正在分析告警 ${E(state.selectedEvent)}</strong><p>${E(state.selectedEventTitle || "以告警中记录的主机为诊断目标。")}</p></div>${btn("clear-event", "取消关联", "", "small")}</div>` : ""}<div class="form-grid"><div class="field wide"><span>查询监控主机</span><div class="toolbar"><input id="host-search" data-host-query aria-label="搜索 Zabbix 主机" placeholder="输入主机名称或 Zabbix Host ID">${btn("search-hosts", "查询 Zabbix 主机")}</div><small id="host-search-result" data-host-result role="status">直接从 Zabbix MCP 读取主机，无需在平台登记资产。</small></div>${field("zabbix_hostid", "诊断主机", "", "text", "必须选择监控主机或告警事件；按 IP 直查请用监控问答。选择 Host ID 或关联告警时，以该主机为准。", [["", "未选择主机"], ...state.hostRows.map(h => [h.zabbix_hostid, h.name + " · Host ID " + h.zabbix_hostid + " · " + (labels[h.device_type] || h.device_type)])])}${field("event_id", "告警事件 ID", state.selectedEvent || "", "text", "可选，必须是平台已经接收的事件。")}${field("diagnostic_type", "诊断类型", "auto", "text", "", [["auto", "自动识别告警类型"], ...Object.entries(PLAY)])}${field(
         "profile",
         "分析模式",
         options.default_profile,
@@ -299,31 +300,90 @@ async function diagnostics() {
     )
   );
 }
-async function diagnosticTools() {
-  const data = await api(P + "/tools");
+const RISKS = {low: ["低风险", ""], medium: ["中风险", "partial"], high: ["高风险", "failed"]};
+function riskTag(risk) {
+  const [text, tone] = RISKS[risk] || ["未标注", ""];
+  return `<span class="tag ${tone}">${text}</span>`;
+}
+function authorizationTag(tool) {
+  if (tool.authorized === true) return '<span class="tag success">已授权</span>';
+  if (tool.authorized === false) return '<span class="tag">未授权</span><small>在 SSH MCP 控制台为客户端开启</small>';
+  return '<span class="tag partial">未确认</span><small>SSH MCP 未提供工具目录，调用时由服务端校验</small>';
+}
+function sshToolRows(tools) {
+  return tools.map(t => {
+    const params = (t.params || []).map(p => E(p.name) + (p.required ? "*" : "")).join(", ");
+    const text = t.question || t.description || "—";
+    const details = [
+      t.extension ? "v0.6 扩展工具" : "",
+      t.standard_only ? "仅支持标准（直连）模式主机" : "",
+      t.estimated_seconds ? `预计约 ${t.estimated_seconds} 秒` : "",
+      ...(t.notes || []),
+    ].filter(Boolean);
+    return `<tr><td><span class="mono">${E(t.name)}</span><small>${E([t.title, t.category || "未分类"].filter(Boolean).join(" · "))}</small></td><td class="mono">${params || '<span class="muted">—</span>'}</td><td>${riskTag(t.risk)}${t.sensitive ? "<small>日志 / 命令行类，正文需 logs.read</small>" : ""}</td><td>${authorizationTag(t)}</td><td title="${E(t.description)}">${E(text.length > 160 ? text.slice(0, 159) + "…" : text)}${details.map(x => `<small>${E(x)}</small>`).join("")}</td></tr>`;
+  }).join("");
+}
+function probeChoices(tools) {
+  return tools.filter(t => (t.name.startsWith("ssh_test_connection") || t.name.startsWith("ssh_diagnose_")) && t.authorized !== false && !(t.params || []).some(p => p.required))
+    .sort((a, b) => (b.name === "ssh_test_connection") - (a.name === "ssh_test_connection") || a.name.localeCompare(b.name));
+}
+function probeForm(tools) {
+  const choices = probeChoices(tools);
+  const heading = '<h3 class="subsection-heading">诊断测试</h3>';
+  if (!choices.length) return heading + '<p class="muted small">SSH MCP 工具目录不可用，或没有除主机外无必填参数的已授权工具，暂不能执行诊断测试。</p>';
+  return heading + `<form id="probe-form"><p class="muted small">按 Zabbix Host ID 解析 SSH 资产后调用一次所选只读工具，仅传 host_id 与 revision；不创建诊断任务、不调用 AI，操作记入审计（tool_probe）。</p><div class="form-grid"><div class="field wide"><span>查询监控主机</span><div class="toolbar"><input data-host-query aria-label="搜索测试主机" placeholder="输入主机名称或 Zabbix Host ID">${btn("search-hosts", "查询 Zabbix 主机")}</div><small data-host-result role="status">从 Zabbix MCP 读取主机；也可在右侧直接填写 Host ID。</small></div>${field("zabbix_hostid", "监控主机", "", "text", "", [["", "未选择主机"], ...state.hostRows.map(h => [h.zabbix_hostid, h.name + " · Host ID " + h.zabbix_hostid + " · " + (labels[h.device_type] || h.device_type)])])}${field("manual_hostid", "或直接填写 Host ID", "", "text", "数字 Zabbix Host ID；填写后优先于左侧选择。")}${field("tool", "诊断工具", choices[0].name, "text", "仅列出已授权、除主机外没有必填参数的只读工具；需要服务名或路径的工具请在 AI 诊断中由 Skill 调用。", choices.map(t => [t.name, t.name + (t.title ? " · " + t.title : "")]))}</div><div class="form-actions"><button class="button primary" type="submit">执行诊断测试</button></div><p class="muted small" role="status" data-probe-status></p><div class="evidence" data-probe-output hidden><pre></pre></div></form>`;
+}
+async function runProbe(form, data) {
+  const status = form.querySelector("[data-probe-status]"), output = form.querySelector("[data-probe-output]");
+  const show = (text, tone = "") => { status.textContent = text; status.className = tone ? "notice " + tone : "muted small"; };
+  const hostid = String(data.manual_hostid || "").trim() || data.zabbix_hostid || "";
+  if (!/^[0-9]{1,32}$/.test(hostid)) { show("请选择监控主机或填写数字 Zabbix Host ID。", "error"); return; }
+  show("正在解析主机并调用 " + data.tool + "，最长 60 秒…");
+  output.hidden = true;
+  try {
+    const r = await api(P + "/tools/probe", "POST", {provider: "ssh_mcp", tool: data.tool, zabbix_hostid: hostid});
+    if (!form.isConnected) return;
+    show(r.ok ? `诊断测试完成：${r.status}，SSH 资产 ${r.ssh_host_id}` : "诊断测试未成功：" + (r.error || r.error_code || r.status), r.ok ? "" : "warn");
+    output.querySelector("pre").textContent = JSON.stringify({status: r.status, error_code: r.error_code, error: r.error, duration_ms: r.duration_ms, ssh_host_id: r.ssh_host_id, summary: r.summary, findings: r.findings}, null, 2);
+    output.hidden = false;
+  } catch (err) {
+    if (form.isConnected) show("诊断测试未执行：" + err.message, "error");
+  }
+}
+async function diagnosticTools(refresh = false) {
+  const data = await api(P + "/tools" + (refresh ? "?refresh=true" : ""));
+  const zabbix = data.tools.filter(t => t.provider === "zabbix_mcp"), ssh = data.tools.filter(t => t.provider === "ssh_mcp");
+  const checked = data.ssh_checked_at ? `目录读取于 ${date(data.ssh_checked_at)}${data.ssh_cached ? "（缓存，60 秒内复用）" : ""}` : "";
+  const sshNotes = (ssh.length ? "" : `<div class="notice warn">SSH MCP 工具目录不可用：${E(data.ssh_mcp_error || "未返回可用工具")}</div>`) +
+    (data.ssh_catalog_error ? `<div class="notice warn">${E(data.ssh_catalog_error)}；授权状态无法确认，实际调用仍由 SSH MCP 校验。</div>` : "");
   return panel(
     "诊断工具",
     intro(
-      "检测使用已保存的 MCP 连接。平台固定白名单独立生效；远端自称只读或动态发现都不能扩大授权。",
-      can("settings.manage") ? btn("discover", "检测 MCP 工具") : "",
+      "注册表实时读取 SSH MCP 目录并按本平台令牌标注授权；Zabbix 工具受平台固定白名单约束。远端自称只读或动态发现都不能扩大授权。",
+      btn("refresh-tools", "刷新目录") + (can("settings.manage") ? btn("discover", "检测 MCP 工具") : ""),
     ) +
       "<h3>工具注册表</h3>" +
+      `<h4 class="subsection-heading">SSH MCP · Linux 实时诊断（${ssh.length}）</h4><p class="muted small">${E(checked || "未读取 SSH MCP 目录")} · 带 * 的参数为必填；Windows、网络设备等非 Linux 主机只走 Zabbix。</p>` +
+      sshNotes +
+      (ssh.length ? table(["工具 / 分类", "参数", "风险", "授权状态", "说明"], sshToolRows(ssh)) : "") +
+      `<h4 class="subsection-heading">Zabbix MCP · 监控数据（${zabbix.length}）</h4>` +
       table(
         ["工具 / 提供方", "适用设备", "风险 / 超时", "状态", "说明"],
-        data.tools
+        zabbix
           .map(
             (t) =>
               `<tr><td><span class="mono">${E(t.name)}</span><small>${E(t.provider)} · ${E(t.required_scope)}</small></td><td>${E(t.device_types.map((x) => labels[x] || x).join(" / "))}</td><td>${E(t.risk)} · ${t.timeout}s<small>输出 ≤ ${fmt(t.max_output_chars)} 字符</small></td><td>${badge(t.enabled ? "已启用" : "已禁用")}</td><td>${E(t.description)}</td></tr>`,
           )
           .join(""),
       ) +
+      (can("settings.manage") ? probeForm(ssh) : "") +
       "<h3 class=\"subsection-heading\">诊断类型</h3>" +
       table(
         ["问题类型", "相关监控数据", "诊断边界"],
         Object.entries(data.playbooks)
           .map(
             ([key, p]) =>
-              `<tr><td>${E(p.label)}</td><td class="mono">${E(p.metrics.join(", "))}</td><td class="muted small">${E(p.limitation)}</td></tr>`,
+              `<tr><td>${E(p.label)}</td><td class="mono">${E((p.metrics || []).join(", "))}</td><td class="muted small">${E(p.limitation)}</td></tr>`,
           )
           .join(""),
       ),
@@ -424,6 +484,9 @@ async function report(id) {
   }
   if (location.hash === "#report/" + id) state.currentTask = t;
   const target = t.report?.target || {};
+  const caps = t.report?.capabilities && typeof t.report.capabilities === "object" ? t.report.capabilities : {};
+  const device = caps.device_type && caps.device_type !== "unknown" ? caps.device_type : t.report?.device_type || t.asset?.device_type;
+  const facts = t.report?.facts && typeof t.report.facts === "object" ? t.report.facts : null;
   return (
     intro(
       `任务 ${E(t.task_id)} · trace_id ${E(t.trace_id)}`,
@@ -439,13 +502,14 @@ async function report(id) {
         (can("logs.read") ? btn("download-detailed-report", "下载详细报告", id) : "") + btn("refresh", "刷新"),
     ) +
     reportProgress(t) +
-    `<div class="stats"><div class="stat"><div class="label">诊断状态</div><div class="value">${badge(t.status)}</div><div class="hint">${E(stageLabel(t.stage))}</div></div><div class="stat"><div class="label">主机 / 事件 ID</div><div class="value">${E(t.alert?.host_id || t.asset?.zabbix_hostid || "—")}</div><div class="hint">事件 ${E(t.event_id || "未关联")}</div></div><div class="stat"><div class="label">实际 Token / 工具调用</div><div class="value">${fmt(t.token_total)}</div><div class="hint">${fmt(t.tools)} 次采集 · 输入 ${fmt(t.token_input)} / 输出 ${fmt(t.token_output)}</div></div><div class="stat"><div class="label">执行耗时</div><div class="value">${t.duration_ms == null ? "—" : (t.duration_ms / 1000).toFixed(1) + " s"}</div><div class="hint">${date(t.created_at)}</div></div></div>` +
+    `<div class="stats"${facts ? ' style="grid-template-columns:repeat(5,minmax(0,1fr))"' : ""}><div class="stat"><div class="label">诊断状态</div><div class="value">${badge(t.status)}</div><div class="hint">${E(stageLabel(t.stage))}</div></div><div class="stat"><div class="label">主机 / 事件 ID</div><div class="value">${E(t.alert?.host_id || t.asset?.zabbix_hostid || "—")}</div><div class="hint">事件 ${E(t.event_id || "未关联")}</div></div><div class="stat"><div class="label">实际 Token / 工具调用</div><div class="value">${fmt(t.token_total)}</div><div class="hint">${fmt(t.tools)} 次采集 · 输入 ${fmt(t.token_input)} / 输出 ${fmt(t.token_output)}</div></div><div class="stat"><div class="label">执行耗时</div><div class="value">${t.duration_ms == null ? "—" : (t.duration_ms / 1000).toFixed(1) + " s"}</div><div class="hint">${date(t.created_at)}</div></div>${facts ? `<div class="stat"><div class="label">事实核对</div><div class="value">${fmt(facts.confirmed)}</div><div class="hint">已确认 ${fmt(facts.confirmed)} / 降级 ${fmt(facts.demoted)} / 推断 ${fmt(facts.probable)} / 假设 ${fmt(facts.hypotheses)}</div></div>` : ""}</div>` +
     reportBudget(t) +
     (t.skills?.length ? panel("本次加载的 Skill", t.skills.map(row => `<p><strong>${E(row.name)}</strong> · v${row.revision} · ${row.providers.map(E).join(" / ")}</p><p class="muted small mono">SHA256 ${E(row.digest)}</p>`).join(""), "查询步骤由任务创建时保存的 Skill 决定。") : "") +
     panel(
       "告警与主机信息",
-      `<p>${E(t.alert?.event_name || "手动诊断 / 连接测试")}</p><p class="muted small">主机：${E(t.asset?.name || t.alert?.host_name || "未关联")} · Zabbix Host ID：${E(t.asset?.zabbix_hostid || t.alert?.host_id || "—")}${target.ssh_host_id ? ` · SSH 资产 ID：${E(target.ssh_host_id)} · IP：${E(target.address || "—")}` : ""} · 类型：${E(labels[t.report?.device_type || t.asset?.device_type] || "待确认")}</p>`,
+      `<p>${E(t.alert?.event_name || "手动诊断 / 连接测试")}</p><p class="muted small">主机：${E(t.asset?.name || t.alert?.host_name || "未关联")} · Zabbix Host ID：${E(t.asset?.zabbix_hostid || t.alert?.host_id || "—")}${target.ssh_host_id ? ` · SSH 资产 ID：${E(target.ssh_host_id)} · IP：${E(target.address || "—")}` : ""} · 设备类型：${E(labels[device] || "待确认")}${caps.diagnostic_path ? ` · 诊断路径：${E(DIAGNOSTIC_PATHS[caps.diagnostic_path] || caps.diagnostic_path)}` : ""}</p>`,
     ) +
+    capabilityPanel(caps) +
     panel(
       "AI 诊断结论 · 分析推断",
       `<div class="notice">监控和 SSH 事实在下方按来源记录。AI 总结需结合时间窗口与原始证据核验。</div><div class="report-answer">${OpsUI.answer(reportAnswer(t))}</div>`,
@@ -458,13 +522,79 @@ async function report(id) {
             .join(""),
         )
       : "") +
+    coveragePanel(t.report?.coverage) +
     panel(
       "诊断时间线",
       `<div class="timeline"><div>任务创建<small>${date(t.created_at)}</small></div>${t.started_at ? `<div>开始执行<small>${date(t.started_at)}</small></div>` : ""}${t.evidence.map((e) => `<div>${E(e.provider)} · ${E(e.tool)} ${badge(e.status)}<small>${date(e.collected_at)} · ${e.duration_ms} ms</small></div>`).join("")}${t.completed_at ? `<div>任务结束<small>${date(t.completed_at)}</small></div>` : ""}</div>`,
     ) +
     modelInteractionsPanel(modelHistory) +
-    `<div class="panel"><div class="section-heading"><div><h2>证据与工具执行记录</h2><p class="muted small">Zabbix 为监控证据；SSH 为采集当时快照。日志内容需要独立权限。</p></div>${can("logs.read") ? btn("toggle-logs", state.includeLogs ? "隐藏原始日志" : "读取日志证据", id) : ""}</div>${t.evidence.length ? t.evidence.map((e) => `<details class="evidence" data-evidence="${E(e.id)}"><summary>${t.report?.evidence_ids?.[e.id] ? `<strong>${E(t.report.evidence_ids[e.id])}</strong> ` : ""}${E(e.provider)} / ${E(e.tool)} ${badge(e.status)} · ${date(e.collected_at)}</summary><pre>${E(JSON.stringify(e.payload, null, 2))}</pre></details>`).join("") : '<div class="empty">暂无采集证据</div>'}</div>`
+    `<div class="panel"><div class="section-heading"><div><h2>证据与工具执行记录</h2><p class="muted small">Zabbix 为监控证据；SSH 为采集当时快照。日志内容需要独立权限。</p></div>${can("logs.read") ? btn("toggle-logs", state.includeLogs ? "隐藏原始日志" : "读取日志证据", id) : ""}</div>${t.evidence.length ? t.evidence.map((e) => {
+      const meta = e.payload?._meta && typeof e.payload._meta === "object" ? e.payload._meta : {};
+      const ident = t.report?.evidence_ids?.[e.id] || meta.evidence_id;
+      const args = argumentSummary(meta.arguments);
+      return `<details class="evidence" data-evidence="${E(e.id)}"><summary>${ident ? `<strong>${E(ident)}</strong> ` : ""}${E(e.provider)} / ${E(e.tool)} ${badge(e.status)} · ${date(e.collected_at)}${EVIDENCE_KINDS[meta.kind] ? " · " + EVIDENCE_KINDS[meta.kind] : ""}${args ? ` · <span class="mono">${E(args)}</span>` : ""}</summary><pre>${E(JSON.stringify(e.payload, null, 2))}</pre></details>`;
+    }).join("") : '<div class="empty">暂无采集证据</div>'}</div>`
   );
+}
+const DIAGNOSTIC_PATHS = {"zabbix+ssh": "Zabbix + SSH 联合", "zabbix-only": "仅 Zabbix", "ssh-only": "仅 SSH", none: "无可用数据源"};
+const CAPABILITY_STATES = {
+  used: ["已使用", "success"],
+  available: ["可用", ""],
+  unused: ["已授权（本次未调用）", ""],
+  unavailable: ["不可用", "partial"],
+  disabled: ["未启用", ""],
+  unreachable: ["连接失败", "failed"],
+  not_applicable: ["不适用", ""],
+  not_ready: ["主机未就绪", "partial"],
+};
+const EVIDENCE_KINDS = {prefetch: "预采集", model: "模型请求", retry: "重试", cache_hit: "复用缓存"};
+function capabilityPanel(caps) {
+  if (!caps.zabbix_mcp && !caps.ssh_mcp) return "";
+  const row = (key, title) => {
+    const state = caps[key] && typeof caps[key] === "object" ? caps[key] : {};
+    const [text, tone] = CAPABILITY_STATES[state.status] || [state.status || "未记录", ""];
+    return `<div class="health-row"><div><strong>${title}</strong><p>${E(state.reason || "—")}${state.error_code ? ` · <span class="mono">${E(state.error_code)}</span>` : ""}</p></div><span class="tag ${tone}">${E(text)}</span></div>`;
+  };
+  const denied = Array.isArray(caps.unauthorized_tools) ? caps.unauthorized_tools : [];
+  return panel(
+    "证据来源与能力",
+    row("zabbix_mcp", "Zabbix MCP · 监控历史") + row("ssh_mcp", "SSH MCP · Linux 实时诊断") +
+      (denied.length ? `<p class="notice warn footnote">本令牌未授权的 SSH 工具：<span class="mono">${denied.map(E).join("、")}</span>。需要时在 SSH MCP 控制台为平台客户端开启。</p>` : ""),
+    `设备类型：${E(labels[caps.device_type] || caps.device_type || "待确认")} · 诊断路径：${E(DIAGNOSTIC_PATHS[caps.diagnostic_path] || caps.diagnostic_path || "未记录")}。Windows、网络设备等非 Linux 主机只走 Zabbix。`,
+  );
+}
+function coveragePanel(coverage) {
+  if (!coverage || typeof coverage !== "object") return "";
+  const list = key => Array.isArray(coverage[key]) ? coverage[key] : [];
+  const name = item => typeof item === "string" ? item : item?.tool || "—";
+  const counted = items => {
+    const counts = new Map();
+    items.forEach(item => counts.set(name(item), (counts.get(name(item)) || 0) + 1));
+    return [...counts].map(([tool, n]) => `<span class="tag mono">${E(tool)}${n > 1 ? " ×" + n : ""}</span>`).join(" ");
+  };
+  const reasoned = items => items.map(item => `<div><span class="mono">${E(name(item))}</span>${item?.reason ? `<small>${E(item.reason)}</small>` : ""}</div>`).join("");
+  const rows = [["计划采集", list("planned"), counted], ["已采集", list("collected"), counted], ["失败", list("failed"), reasoned], ["跳过", list("skipped"), reasoned]];
+  if (rows.every(([, items]) => !items.length)) return "";
+  return panel(
+    "证据覆盖",
+    table(["类别", "采集项"], rows.map(([label, items, render]) => `<tr><td>${label}<small>${items.length} 项</small></td><td>${items.length ? render(items) : '<span class="muted">—</span>'}</td></tr>`).join("")),
+    "按平台记录的计划、已采集、失败与跳过项；失败和跳过附原因。",
+  );
+}
+function argumentSummary(args) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return "";
+  const skip = new Set(["output", "expected_revision", "detail", "sortfield", "sortorder", "searchByAny", "searchWildcardsEnabled", "countOutput", "time_from", "time_till", "since", "until"]);
+  const when = v => typeof v === "number" ? new Date(v * 1000).toLocaleString("zh-CN", {timeZone: "Asia/Shanghai", hour12: false}) : String(v);
+  const value = v => Array.isArray(v) ? (v.length > 3 ? v.slice(0, 3).join(",") + "…共" + v.length + "项" : v.join(",")) : v && typeof v === "object" ? JSON.stringify(v) : String(v);
+  const parts = [["time_from", "time_till"], ["since", "until"]]
+    .filter(([from, till]) => args[from] != null || args[till] != null)
+    .map(([from, till]) => `${args[from] != null ? when(args[from]) : "…"} ~ ${args[till] != null ? when(args[till]) : "现在"}`);
+  for (const [key, v] of Object.entries(args)) {
+    if (skip.has(key) || key.startsWith("select") || v == null || v === "") continue;
+    parts.push(key + "=" + value(v));
+  }
+  const text = parts.join(", ");
+  return text.length > 180 ? text.slice(0, 179) + "…" : text;
 }
 function reportBudget(task) {
   const budget = task.budget || task.report?.budget;
@@ -473,10 +603,21 @@ function reportBudget(task) {
   const usage = [
     ["采集次数", `${fmt(used.calls ?? task.tools)} / ${fmt(limits.calls)}`],
     ["模型轮次", `${fmt(used.rounds)} / ${fmt(limits.rounds)}`],
-    ["实际 Token / 停止阈值", `${fmt(task.token_total)} / ${fmt(limits.tokens)}`],
+    // The budget counts input + output minus prompt-cache hits (v1.2 reports
+    // carry it as billed_tokens); older reports only have the raw total.
+    typeof used.billed_tokens === "number"
+      ? ["计入预算的 Token / 停止阈值", `${fmt(used.billed_tokens)} / ${fmt(limits.tokens)}`]
+      : ["实际 Token / 停止阈值", `${fmt(task.token_total)} / ${fmt(limits.tokens)}`],
+    ...(typeof used.billed_tokens === "number" ? [["实际 Token（含缓存命中）", fmt(task.token_total)]] : []),
     ["耗时 / 时间上限", `${used.seconds ?? (task.duration_ms == null ? "—" : (task.duration_ms / 1000).toFixed(1))} / ${limits.seconds} 秒`],
+    // Where the time went (v1.2 reports): model rounds, MCP calls, prefetch.
+    ...[["其中模型请求", used.model_ms], ["其中 MCP 调用", used.mcp_ms], ["其中预采集", used.prefetch_ms]]
+      .filter(([, ms]) => typeof ms === "number")
+      .map(([label, ms]) => [label, (ms / 1000).toFixed(1) + " 秒"]),
   ];
-  return panel("分析预算", `<p>${E(labels[task.profile] || task.profile)} · 使用任务创建时的配置</p>` + table(["预算项", "已使用 / 上限"], usage.map(([label, value]) => `<tr><td>${E(label)}</td><td>${E(value)}</td></tr>`).join("")) + (budget.reasons || []).map(reason => `<p class="notice">${E(reason)}</p>`).join("") + `<p class="muted small">包含 Zabbix 查询、SSH 主机解析及每个诊断动作。预算耗尽时跳过后续采集；Token 阈值用于停止后续请求。</p>` + (can("settings.manage") ? btn("go-page", "配置分析预算", "settings/ai") : ""));
+  const reasons = budget.reasons || [];
+  const hits = (budget.limits_hit || []).filter(item => !reasons.includes(item));
+  return panel("分析预算", `<p>${E(labels[task.profile] || task.profile)} · 使用任务创建时的配置</p>` + table(["预算项", "已使用 / 上限"], usage.map(([label, value]) => `<tr><td>${E(label)}</td><td>${E(value)}</td></tr>`).join("")) + reasons.map(reason => `<p class="notice">${E(reason)}</p>`).join("") + hits.map(item => `<p class="notice">预算限制：${E(item)}</p>`).join("") + `<p class="muted small">包含 Zabbix 查询、SSH 主机解析及每个诊断动作。预算耗尽时跳过后续采集；Token 阈值用于停止后续请求。预算限制说明运行受到的约束，不是诊断缺口。</p>` + (can("settings.manage") ? btn("go-page", "配置分析预算", "settings/ai") : ""));
 }
 function reportAnswer(task) {
   return readableReportAnswer(task.report?.answer || task.report?.message || (task.status === "failed" ? "任务未能完成。请结合下方状态说明排查后重试。" : ["queued", "running"].includes(task.status) ? "正在收集证据并分析，完成后将在这里显示结论。" : "未返回分析结论，请查看采集证据和诊断不足。"));
@@ -909,10 +1050,11 @@ document.addEventListener("click", async (event) => {
     } else if (action === "new-member" || action === "edit-member")
       await openEditor("member", id);
     else if (action === "search-hosts") {
-      const form = b.closest("form"), output = form.querySelector("#host-search-result");
+      // Shared by the diagnostic form and the connection page's diagnostic test.
+      const form = b.closest("form"), output = form.querySelector("[data-host-result]");
       output.textContent = "正在从 Zabbix MCP 查询…";
       try {
-        const response = await api(P + "/hosts?q=" + encodeURIComponent(form.querySelector("#host-search").value.trim()));
+        const response = await api(P + "/hosts?q=" + encodeURIComponent(form.querySelector("[data-host-query]").value.trim()));
         if (!output.isConnected) return;
         state.hostRows = response.items;
         form.elements.zabbix_hostid.innerHTML = '<option value="">请选择监控主机</option>' + state.hostRows.map(h => `<option value="${E(h.zabbix_hostid)}">${E(h.name)} · Host ID ${E(h.zabbix_hostid)} · ${E(labels[h.device_type] || h.device_type)}</option>`).join("");
@@ -925,7 +1067,12 @@ document.addEventListener("click", async (event) => {
       go("diagnostics");
     } else if (action === "discover") {
       const results = await Promise.all(["zabbix_mcp", "ssh_mcp"].map(provider => api(P + "/tools/discover?provider=" + provider, "POST")));
-      toast(results.map(r => `${r.provider}：${r.ok ? "连接成功，" + r.authorized_tools.length + " 个工具" : "失败，" + r.detail}`).join("；"));
+      const names = list => list.slice(0, 8).join("、") + (list.length > 8 ? " 等" : "");
+      toast(results.map(r => `${r.provider}：${r.ok ? `连接成功，共 ${r.authorized_tools.length} 个授权工具${r.authorized_tools.length ? "：" + names(r.authorized_tools) : ""}` : "失败，" + r.detail}`).join("；"));
+    } else if (action === "refresh-tools") {
+      const html = await diagnosticTools(true);
+      const section = document.getElementById("connection-tools");
+      if (section) { section.outerHTML = html; toast("已重新读取 SSH MCP 工具目录"); }
     } else if (action === "runtime-status") {
       const output = $("#runtime-result"); output.textContent = "正在检查服务…";
       const result = await api("/api/v1/status");
@@ -1005,6 +1152,7 @@ document.addEventListener("submit", async (event) => {
       "diagnostic-form",
       "ask-form",
       "mute-form",
+      "probe-form",
       "zabbix_mcp-form",
       "ssh_mcp-form",
     ].includes(form.id) && !form.classList.contains("settings-form")
@@ -1045,6 +1193,8 @@ document.addEventListener("submit", async (event) => {
     } else if (form.id === "diagnostic-form") {
       const t = await api(P + "/tasks", "POST", data);
       go("report/" + t.task_id);
+    } else if (form.id === "probe-form") {
+      await runProbe(form, data);
     } else {
       const { type, id } = state.editor;
       let path,

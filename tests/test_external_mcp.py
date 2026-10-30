@@ -34,8 +34,10 @@ def server(provider):
 
     @mcp.tool(annotations=annotations)
     def ssh_resolve_host(zabbix_hostid: str) -> dict:
+        if zabbix_hostid == "13":
+            raise ValueError("remote refused the lookup")
         if zabbix_hostid != "10":
-            return {"status": "failed"}
+            return {"status": "failed", "error_code": "mapping_unresolved"}
         return {
             "status": "success",
             "zabbix_hostid": "10",
@@ -53,21 +55,6 @@ def server(provider):
             "status": "success",
             "job_id": "fixture-job",
             "output": "current CPU evidence",
-        }
-
-    @mcp.tool(annotations=annotations)
-    def ssh_diagnose_directory_usage(
-        host_id: int, root: str = "/data", expected_revision: int | None = None
-    ) -> dict:
-        assert expected_revision == 3
-        return {
-            "host_id": host_id,
-            "action": "directory",
-            "status": "success",
-            "data": {
-                "root": root,
-                "top_directories": [{"directory": root + "/app", "bytes": 1024}],
-            },
         }
 
     @mcp.tool()
@@ -103,10 +90,11 @@ def server(provider):
     )
     thread.start()
     try:
-        for _ in range(100):
+        # Generous: a loaded Windows box can take many seconds to start uvicorn.
+        for _ in range(1200):
             if service.started:
                 break
-            time.sleep(0.02)
+            time.sleep(0.025)
         else:
             raise RuntimeError("fixture MCP failed to start")
         yield "http://127.0.0.1:" + str(port) + "/mcp", token, requests
@@ -132,26 +120,19 @@ def test_two_real_mcp_connections_keep_tokens_bindings_and_failures_separate():
                     ssh_url, ssh_token, allow_http=True, timeout=5
                 ) as adapter:
                     binding = await adapter.resolve("10")
-                    assert binding.host_id == 92 and binding.revision == 3
-                    result = await adapter.diagnose(binding, "cpu")
-                    assert (
-                        result["provider"] == "ssh_mcp"
-                        and result["job_id"] == "fixture-job"
-                    )
-                    directory = await adapter.diagnose(
-                        binding, "directory", directory_root="/data"
-                    )
-                    assert directory["data"]["root"] == "/data"
-                    assert (
-                        directory["data"]["top_directories"][0]["directory"]
-                        == "/data/app"
-                    )
-                    stale = await adapter.diagnose(
-                        ssh_mcp.HostBinding("10", 92, 2), "cpu"
-                    )
-                    assert stale["status"] == "failed"
+                    assert binding == ssh_mcp.HostBinding("10", 92, 3)
+                    # A failed or missing mapping never yields a binding.
                     with pytest.raises(ssh_mcp.IntegrationError, match="映射"):
                         await adapter.resolve("999")
+                    # A remote tool error is reported, not raised as a traceback.
+                    with pytest.raises(ssh_mcp.IntegrationError, match="拒绝工具调用"):
+                        await adapter.resolve("13")
+                    # Only exact numeric Host IDs reach the remote service.
+                    sent = len(ssh_requests)
+                    for bad in ("10;id", "", "１０"):
+                        with pytest.raises(ssh_mcp.IntegrationError, match="数字"):
+                            await adapter.resolve(bad)
+                    assert len(ssh_requests) == sent
             with pytest.raises(Exception):
                 async with ssh_mcp.connect(
                     ssh_url, z_token, allow_http=True, timeout=3
@@ -161,6 +142,22 @@ def test_two_real_mcp_connections_keep_tokens_bindings_and_failures_separate():
         asyncio.run(run())
         assert set(z_requests) == {"Bearer " + z_token}
         assert "Bearer " + ssh_token in ssh_requests
+
+
+def test_adapter_rejects_invalid_endpoint_and_token_before_connecting():
+    async def run(url, token):
+        async with ssh_mcp.connect(url, token, timeout=5):
+            pytest.fail("invalid SSH MCP configuration must not connect")
+
+    for url, token in (
+        ("http://user:pass@127.0.0.1/mcp", "fixture"),
+        ("https://127.0.0.1/other", "fixture"),
+        ("http://127.0.0.1/mcp", "fixture"),  # plain HTTP needs explicit opt-in
+        ("https://127.0.0.1/mcp", "with space"),
+        ("https://127.0.0.1/mcp", ""),
+    ):
+        with pytest.raises(ssh_mcp.IntegrationError):
+            asyncio.run(run(url, token))
 
 
 def test_http_client_never_forwards_tokens_through_redirects_or_environment_proxies(

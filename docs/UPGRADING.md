@@ -1,5 +1,55 @@
 # 升级说明
 
+## v1.1.0 → v1.2.0
+
+没有数据库迁移。先升级 SSH MCP 到 v0.6.0，再升级平台；顺序反过来也能运行，只是新工具（Nginx、系统日志、Java、服务详情、单会话多项采集）在 SSH MCP 升级前不可用，报告的“证据覆盖”会把它们列为跳过项并注明原因。
+
+### 1. SSH MCP 升级到 v0.6.0
+
+```bash
+cd /data/ssh-mcp-server
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose up -d --build --wait --wait-timeout 180
+curl -fsS http://服务器IP:9099/healthz
+```
+
+应返回 0.6.0（`WEB_BIND_IP` 设成服务器地址时 curl 用该地址）。启动时服务会给已持有 `logs` 动作的客户端令牌自动补上 nginx、nginx_access、syslog、java、service_detail，持有 `log_errors` 的补上 syslog，持有 `sockets` 或 `service` 的补上 service_map（写审计 `mcp_client_actions_extended`）；`ssh_collect` 只要令牌拥有任一可组合的固定动作就可用。`jvm`（jcmd/jstat，有安全点开销）需要在 SSH MCP Web → 系统配置 → MCP 接入里点“编辑权限”手动勾选。诊断账号要在 systemd-journal 或 adm 组（或使用 root）才能读到完整系统日志，否则报告会标注“日志访问受限”。
+
+### 2. 平台升级到 v1.2.0
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://服务器IP:8088/healthz
+```
+
+healthz 应返回 version 1.2.0（未启用飞书接收器时去掉 `--profile feishu`）。第一次打开 Skill 管理页或创建任务时，platform-base 自动更新，并新增 platform-linux、platform-windows、platform-network、platform-nginx、platform-java、platform-service、platform-syslog 七个平台维护的 Skill（默认启用，可单独停用）。使用“替代”模式自定义 Skill 的场景仍然只加载自定义 Skill，行为不变。
+
+预算：默认值调整为 quick 3 轮 / 8 次 / 90 秒、standard 5 轮 / 16 次 / 180 秒、deep 8 轮 / 24 次 / 300 秒，并新增 `follow_up_calls`（预采集之后模型至少还能补查的次数）与 `extension_rounds`（有采集失败时可追加的轮次）。在 AI 配置里自定义过预算的项保持原值、未填的项使用新默认值；如果 standard 的 `seconds` 仍是 110，建议改为 180。Token 预算口径不变（总量减缓存命中）；`list_mcp_tools` 取工具参数结构不再计入采集次数，预采集计入。
+
+工具目录缓存：平台每个进程缓存 MCP 工具目录 60 秒。在 SSH MCP 里改了平台客户端的动作授权后，到平台 连接管理 → 工具注册表 点“刷新目录”，所有 worker 的下一个任务就会使用新授权。
+
+### 3. 验收
+
+- 对一条 Linux CPU 负载告警点“AI 分析”：详细报告第 1 轮请求快照的 `evidence.prefetched` 里应有 `ssh_collect`（cpu、processes、pressure 同一次会话）、触发器监控项的 `history_get`（含 `alert_split`）与 `trend_get`；报告“诊断范围”显示“设备类型与路径：Linux，Zabbix 历史 + SSH 实时联合分析”；飞书卡片出现“核心证据”一节且没有证据编号。
+- 对一台 Windows 或网络设备的告警点“AI 分析”：SSH MCP 的审计里不应出现该任务的调用；报告写明“仅 Zabbix 监控数据”，本次加载的 Skill 中 platform-windows / platform-network 标记为已应用。
+- 对一台未在 SSH MCP 登记的 Linux 主机告警点“AI 分析”：报告“能力说明”写明 SSH MCP 不可用的原因，任务状态不因此变为失败。
+- 连接管理 → 工具注册表：SSH 表列出 v0.6.0 的新工具及本令牌是否已授权；“诊断测试”选一台已登记主机试跑 `ssh_diagnose_service_map`，应返回监听端口与进程的映射，SSH MCP 审计里出现对应记录，平台审计里有 `tool_probe`。
+- 回滚：v1.1.0 只认识一个平台维护的 Skill，也不接受 `types` / `devices` 元数据，所以切回旧版本前要先删除 v1.2 新增的 7 个平台 Skill（自定义 Skill 与历史任务不受影响），再切换提交并重新构建：
+
+```bash
+docker compose exec -T web python -c "import sqlite3; db=sqlite3.connect('/app/data/app.sqlite3'); print(db.execute(\"DELETE FROM platform_skills WHERE managed=1 AND name!='platform-base'\").rowcount); db.commit()"
+git switch --detach <v1.1.0 的提交>
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+```
+
+  v1.2 创建的任务报告在旧版本中仍可打开，新增字段会被忽略。
+
 ## v1.0.x → v1.1.0
 
 v1.0.1 到 v1.1.0 都没有数据库迁移，从 v1.0.0 或任一 v1.0.x 升级都按“v1.0.0 → v1.0.1”一节的命令执行一次，healthz 应返回 version 1.1.0。升级后到 系统配置 → AI 配置，把“深度思考”改为“关闭”，先点“验证模型连接”确认返回“AI连接成功”，再保存；之后的分析每轮明显变快。升级后第一次打开 Skill 管理页或创建任务时 platform-base 自动更新（版本号 +1）。

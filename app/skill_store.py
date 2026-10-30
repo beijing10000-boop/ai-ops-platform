@@ -24,6 +24,20 @@ PROVIDERS = {"ssh_mcp", "zabbix_mcp"}
 # A custom Skill either replaces the platform base Skill or is loaded with it.
 MODES = {"standalone", "supplement"}
 BASE_NAME = "platform-base"
+# Platform-maintained Skills, refreshed on upgrade. Device and alert-type
+# Skills declare `devices` / `types`; the runtime gives the model only those
+# that apply to the task, so a CPU alert does not carry the Nginx playbook.
+MANAGED = {
+    "platform-base": 50,
+    "platform-linux": 55,
+    "platform-windows": 55,
+    "platform-network": 55,
+    "platform-service": 60,
+    "platform-syslog": 60,
+    "platform-nginx": 65,
+    "platform-java": 65,
+}
+DEVICES = {"linux", "windows", "network", "vmware", "other", "unknown"}
 TEMPLATES = Path(__file__).parent / "skill_templates"
 
 
@@ -58,9 +72,13 @@ def parse_document(text):
     except (yaml.YAMLError, ValueError) as exc:
         raise ValueError("Skill 元数据格式无效") from exc
     if not isinstance(meta, dict) or not (
-        {"name", "description"} <= set(meta) <= {"name", "description", "prefetch"}
+        {"name", "description"}
+        <= set(meta)
+        <= {"name", "description", "prefetch", "types", "devices"}
     ):
-        raise ValueError("Skill 元数据只支持 name、description 和可选的 prefetch")
+        raise ValueError(
+            "Skill 元数据只支持 name、description 和可选的 prefetch、types、devices"
+        )
     name, description = meta["name"], meta["description"]
     if (
         not isinstance(name, str)
@@ -77,16 +95,57 @@ def parse_document(text):
         "description": description.strip(),
         "instructions": match[2].strip(),
         "prefetch": validate_prefetch(meta.get("prefetch", [])),
+        **applicability(meta),
     }
 
 
-# SSH tools that need more than host_id/revision cannot be pre-collected.
+def applicability(meta):
+    """Optional `types` (diagnostic types) and `devices` a Skill is limited to."""
+    from .diagnostics.playbooks import PLAYBOOKS
+
+    result = {}
+    for key, allowed, label in (
+        ("types", set(PLAYBOOKS), "诊断类型"),
+        ("devices", DEVICES, "设备类型"),
+    ):
+        if key not in meta:
+            continue
+        value = meta[key]
+        if (
+            not isinstance(value, list)
+            or not 1 <= len(value) <= 12
+            or any(not isinstance(item, str) for item in value)
+            or set(value) - allowed - {"*"}
+        ):
+            raise ValueError(f"Skill {key} 须为{label}列表或 *")
+        result[key] = list(dict.fromkeys(value))
+    return result
+
+
+def applies(skill, diagnostic_type=None, device=None):
+    """Whether a loaded Skill's guidance belongs to this task.
+
+    Skills without `types` / `devices` (every custom Skill so far) apply to
+    every task; a value of None means "not known yet" and matches.
+    """
+    types = skill.get("types") or ["*"]
+    devices = skill.get("devices") or ["*"]
+    return (diagnostic_type is None or "*" in types or diagnostic_type in types) and (
+        device is None or "*" in devices or device in devices
+    )
+
+
+# SSH tools whose required argument the platform cannot derive from a task
+# (a directory root or a JVM pid) cannot be pre-collected. `service` tools can:
+# the Web form or the alert's trigger items may name the unit.
 PARAMETRIZED_SSH = {
-    "ssh_diagnose_service",
-    "ssh_diagnose_logs",
     "ssh_diagnose_directory_usage",
+    "ssh_diagnose_jvm",
 }
-ITEM_KEY = re.compile(r"[A-Za-z0-9_.,\[\]*/-]{1,80}")
+SSH_TOOL = re.compile(r"ssh_diagnose_[a-z_]{1,40}|ssh_collect")
+# Item key fragments or `*` patterns; Windows performance counters need spaces,
+# backslashes, quotes, % and parentheses (perf_counter_en["\System\..."]).
+ITEM_KEY = re.compile(r'[A-Za-z0-9_.,\[\]*/ \\"%():#-]{1,120}')
 
 
 def validate_prefetch(rules):
@@ -131,13 +190,12 @@ def validate_prefetch(rules):
             raise ValueError("prefetch scopes 须为 alert、qa、web")
         if not lists["types"] or set(lists["types"]) - set(PLAYBOOKS) - {"*"}:
             raise ValueError("prefetch types 须为诊断类型或 *")
-        if len(lists["ssh"]) > 4 or any(
-            not re.fullmatch(r"ssh_diagnose_[a-z_]{1,40}", tool)
-            or tool in PARAMETRIZED_SSH
+        if len(lists["ssh"]) > 6 or any(
+            not SSH_TOOL.fullmatch(tool) or tool in PARAMETRIZED_SSH
             for tool in lists["ssh"]
         ):
             raise ValueError(
-                "prefetch ssh 只能是无需额外参数的 ssh_diagnose_* 工具（最多 4 个）"
+                "prefetch ssh 只能是平台能自行填参的 ssh_diagnose_* 工具（最多 6 个）"
             )
         if any(
             not ITEM_KEY.fullmatch(key)
@@ -145,8 +203,7 @@ def validate_prefetch(rules):
         ):
             raise ValueError("prefetch zabbix_items、history 须为监控项 key 片段或模式")
         if len(lists["schemas"]) > 4 or any(
-            tool not in READ_TOOLS
-            and not re.fullmatch(r"ssh_diagnose_[a-z_]{1,40}", tool)
+            tool not in READ_TOOLS and not SSH_TOOL.fullmatch(tool)
             for tool in lists["schemas"]
         ):
             raise ValueError("prefetch schemas 须为已开放的工具名（最多 4 个）")
@@ -168,19 +225,20 @@ def document(name, description, instructions, prefetch=None):
 
 
 def scope_of(request, source):
-    return (
-        "alert"
-        if (request.get("event") or {}).get("event_id")
-        else "qa"
-        if source in {"qa", "feishu"}
-        else "web"
-    )
+    """alert: the trusted alert itself; qa: chat questions, including follow-ups
+    in an alert thread; web: the diagnosis form."""
+    event = request.get("event") or {}
+    if event.get("event_id") and not request.get("follow_up"):
+        return "alert"
+    return "qa" if source in {"qa", "feishu"} else "web"
 
 
-def prefetch_plan(skills, scope, diagnostic_type):
+def prefetch_plan(skills, scope, diagnostic_type, device=None):
     """Merge the loaded Skills' matching rules, higher priority first, no repeats."""
     plan = {"ssh": [], "zabbix_items": [], "history": [], "schemas": []}
     for skill in skills:
+        if not applies(skill, diagnostic_type, device):
+            continue
         for rule in skill.get("prefetch") or []:
             if scope in rule["scopes"] and (
                 diagnostic_type in rule["types"] or "*" in rule["types"]
@@ -188,7 +246,7 @@ def prefetch_plan(skills, scope, diagnostic_type):
                 for key in plan:
                     # Snapshots taken before `history` existed have no such key.
                     plan[key].extend(x for x in rule.get(key, []) if x not in plan[key])
-    plan["ssh"] = plan["ssh"][:4]
+    plan["ssh"] = plan["ssh"][:6]
     plan["schemas"] = plan["schemas"][:4]
     plan["zabbix_items"] = plan["zabbix_items"][:8]
     plan["history"] = plan["history"][:8]
@@ -268,46 +326,64 @@ def template_files(name):
 
 
 @cache
-def base_package():
-    files = template_files(BASE_NAME)
+def managed_package(name):
+    files = template_files(name)
     return {**parse_document(files["SKILL.md"]), "files": files}
 
 
-def ensure_base(db):
-    """Install the platform base Skill, or refresh it when the bundled copy changed.
+def base_package():
+    return managed_package(BASE_NAME)
 
-    Admin choices (enabled, scopes, providers, priority) survive refreshes.
+
+def ensure_base(db):
+    """Install the platform-maintained Skills, or refresh those whose bundled
+    copy changed. Admin choices (enabled, scopes, providers, priority) survive
+    refreshes; a Skill the admin disabled stays disabled.
     """
-    package = base_package()
-    wanted = digest(package["files"])
-    row = db.execute("SELECT id,digest FROM platform_skills WHERE managed=1").fetchone()
-    if row and row[1] == wanted:
-        return
-    if row:
-        db.execute(
-            "UPDATE platform_skills SET description=?,digest=?,bundle=?,revision=revision+1,"
-            "updated_by='platform',updated_at=CURRENT_TIMESTAMP WHERE id=? AND digest!=?",
-            (package["description"], wanted, encode(package["files"]), row[0], wanted),
-        )
-        return
-    try:
-        db.execute(
-            "INSERT INTO platform_skills(id,name,description,enabled,priority,scopes,"
-            "providers,digest,bundle,updated_by,managed,mode) "
-            "VALUES (?,?,?,1,50,?,?,?,?,'platform',1,'base')",
-            (
-                uuid.uuid4().hex,
-                BASE_NAME,
-                package["description"],
-                json.dumps(sorted(SCOPES)),
-                json.dumps(sorted(PROVIDERS)),
-                wanted,
-                encode(package["files"]),
-            ),
-        )
-    except sqlite3.IntegrityError:
-        # Another worker installed it first, or a custom Skill took the name.
-        log.info("PLATFORM_BASE_SKILL_NOT_INSTALLED name_taken_or_race")
+    for name, priority in MANAGED.items():
+        package = managed_package(name)
+        wanted = digest(package["files"])
+        row = db.execute(
+            "SELECT id,digest,managed FROM platform_skills WHERE name=?", (name,)
+        ).fetchone()
+        if row and not row[2]:
+            # A custom Skill already uses the name; never overwrite it.
+            log.info("PLATFORM_SKILL_NOT_INSTALLED name_taken name=%s", name)
+            continue
+        if row and row[1] == wanted:
+            continue
+        if row:
+            db.execute(
+                "UPDATE platform_skills SET description=?,digest=?,bundle=?,revision=revision+1,"
+                "updated_by='platform',updated_at=CURRENT_TIMESTAMP WHERE id=? AND digest!=?",
+                (
+                    package["description"],
+                    wanted,
+                    encode(package["files"]),
+                    row[0],
+                    wanted,
+                ),
+            )
+            continue
+        try:
+            db.execute(
+                "INSERT INTO platform_skills(id,name,description,enabled,priority,scopes,"
+                "providers,digest,bundle,updated_by,managed,mode) "
+                "VALUES (?,?,?,1,?,?,?,?,?,'platform',1,'base')",
+                (
+                    uuid.uuid4().hex,
+                    name,
+                    package["description"],
+                    priority,
+                    json.dumps(sorted(SCOPES)),
+                    json.dumps(sorted(PROVIDERS)),
+                    wanted,
+                    encode(package["files"]),
+                ),
+            )
+        except sqlite3.IntegrityError:
+            # Another worker installed it first.
+            log.info("PLATFORM_SKILL_NOT_INSTALLED race name=%s", name)
 
 
 def encode(files):
@@ -344,7 +420,18 @@ def rows(include_content=False):
         if include_content:
             row.update(parse_document(files["SKILL.md"]))
             row["files"] = files
+        else:
+            row.update(_applicability_of(row["digest"], files["SKILL.md"]))
     return values
+
+
+@cache
+def _applicability_of(digest_value, text):
+    try:
+        parsed = parse_document(text)
+    except ValueError:
+        return {}
+    return {key: parsed[key] for key in ("types", "devices") if key in parsed}
 
 
 def get(ident):
@@ -385,9 +472,10 @@ def save(
         old = db.execute(
             "SELECT id,managed FROM platform_skills WHERE name=?", (package["name"],)
         ).fetchone()
-        if (old and old[1]) or (not old and package["name"] == BASE_NAME):
+        if (old and old[1]) or (not old and package["name"] in MANAGED):
             raise HTTPException(
-                409, "platform-base 由平台维护，请用其他名称导入自定义 Skill"
+                409,
+                package["name"] + " 由平台维护，请用其他名称导入自定义 Skill",
             )
         if old and not replace:
             raise HTTPException(409, "同名 Skill 已存在，请明确选择更新")
@@ -455,6 +543,10 @@ def snapshot(request, source):
     # "supplement" Skills load alongside it (higher priority first).
     if any(not row["managed"] and row["mode"] == "standalone" for row in selected):
         selected = [row for row in selected if not row["managed"]]
+    elif not any(row["managed"] and row["name"] == BASE_NAME for row in selected):
+        # Device and alert-type Skills extend the base Skill's procedure; with
+        # the base disabled (or not serving this scope) they are not loaded.
+        selected = [row for row in selected if not row["managed"]]
     if sum(len(row["files"]["SKILL.md"].encode()) for row in selected) > 128000:
         raise HTTPException(
             422, "本场景启用的 Skill 正文合计超过 128 KB，请停用无关 Skill"
@@ -462,20 +554,27 @@ def snapshot(request, source):
     return selected
 
 
-def summary(snapshot):
+def summary(snapshot, applied=None):
+    """Report rows for the Skills a task loaded; `applied` marks which of them
+    the model actually received (device/type Skills may not apply)."""
     return [
         {
-            key: row.get(key)
-            for key in (
-                "id",
-                "name",
-                "description",
-                "revision",
-                "digest",
-                "providers",
-                "managed",
-                "mode",
-            )
+            **{
+                key: row.get(key)
+                for key in (
+                    "id",
+                    "name",
+                    "description",
+                    "revision",
+                    "digest",
+                    "providers",
+                    "managed",
+                    "mode",
+                    "types",
+                    "devices",
+                )
+            },
+            **({"applied": row.get("name") in applied} if applied is not None else {}),
         }
         for row in snapshot
     ]

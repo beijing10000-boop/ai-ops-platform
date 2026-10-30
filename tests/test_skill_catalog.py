@@ -9,7 +9,12 @@ import pytest
 from mcp.types import Tool, ToolAnnotations
 
 from app.integrations import ssh_mcp
-from app.skill_mcp import SkillMCP, authorized_ssh_tools
+from app.skill_mcp import (
+    EPOCH_SETTING,
+    SkillMCP,
+    authorized_ssh_tools,
+    clear_catalog_cache,
+)
 
 CONFIG = {
     "ssh_mcp_enabled": "true",
@@ -51,6 +56,8 @@ class Session:
 
 
 def visible(monkeypatch, catalog):
+    # Each call stands for a different server state: no per-process cache.
+    clear_catalog_cache()
     session = Session(catalog)
 
     @asynccontextmanager
@@ -95,6 +102,35 @@ def test_unauthorized_diagnostics_are_hidden_but_resolvers_stay(monkeypatch):
     }
     # Older servers return only action ids.
     assert "ssh_diagnose_mounts" in visible(monkeypatch, [{"id": "mount_health"}])
+
+
+def test_catalog_is_reused_across_tasks_until_the_epoch_changes(monkeypatch):
+    settings = dict(CONFIG)
+    grants = {"value": [{"id": "cpu", "tool": "ssh_diagnose_cpu"}]}
+
+    @asynccontextmanager
+    async def connect(*args, **kwargs):
+        yield SimpleNamespace(session=Session(grants["value"]))
+
+    monkeypatch.setattr(ssh_mcp, "configured", connect)
+
+    async def tools():
+        async with SkillMCP(
+            lambda key: settings.get(key, ""),
+            ["ssh_mcp"],
+            deadline=time.monotonic() + 20,
+        ) as bridge:
+            return set(await bridge.catalog("ssh_mcp"))
+
+    clear_catalog_cache()
+    assert "ssh_diagnose_cpu" in asyncio.run(tools())
+    # The next task of this process reuses the catalog (a session still opens).
+    grants["value"] = [{"id": "pressure", "tool": "ssh_diagnose_pressure"}]
+    assert "ssh_diagnose_cpu" in asyncio.run(tools())
+    # "刷新目录" in the console bumps the epoch: every worker re-reads.
+    settings[EPOCH_SETTING] = "2"
+    refreshed = asyncio.run(tools())
+    assert "ssh_diagnose_pressure" in refreshed and "ssh_diagnose_cpu" not in refreshed
 
 
 @pytest.mark.parametrize("catalog", [RuntimeError("down"), []])

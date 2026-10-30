@@ -125,21 +125,40 @@ def format_usage(usage, *, duration_ms=None):
     )
 
 
-def create_task(question, event=None, profile_name=None, actor="system"):
-    """Create the queued task run() would create, so a queue can hold it first."""
+def create_task(
+    question, event=None, profile_name=None, actor="system", follow_up=False
+):
+    """Create the queued task run() would create, so a queue can hold it first.
+
+    A follow-up question in an alert thread keeps the alert's host as its
+    target but is a chat question: classified by what was asked, filed as
+    `qa` (not an automatic alert analysis) and not tied to the event id.
+    """
     event = event or {}
     try:
         directory = directory_request(question)
     except ValueError:
         directory = None
+    if directory:
+        kind = "disk"
+    elif follow_up:
+        kind = classify(question)
+        if kind == "bottleneck":
+            kind = classify(event.get("event_name") or question)
+    else:
+        kind = classify(event.get("event_name") or question)
     return tasks.create(
-        {"event": event, "question": question[:4000]},
-        source="alert" if event else "qa",
+        {
+            "event": event,
+            "question": question[:4000],
+            **({"follow_up": True} if follow_up else {}),
+        },
+        source="qa" if follow_up or not event else "alert",
         actor=actor,
-        event_id=str(event["event_id"]) if event.get("event_id") else None,
-        diagnostic_type="disk"
-        if directory
-        else classify(event.get("event_name") or question),
+        event_id=str(event["event_id"])
+        if event.get("event_id") and not follow_up
+        else None,
+        diagnostic_type=kind,
         profile=profile_name or read_setting("ai_analysis_profile") or "standard",
     )
 
@@ -155,6 +174,8 @@ async def run(
     task_id=None,
     event=None,
     profile_name=None,
+    follow_up=False,
+    actor="system",
 ):
     # Accept structured alert metadata only from the trusted caller, never from question text.
     event = event or {}
@@ -168,7 +189,9 @@ async def run(
         if not task:
             raise ValueError("任务不存在")
     else:
-        task, created = create_task(question, event, profile_name)
+        task, created = create_task(
+            question, event, profile_name, actor, follow_up=follow_up
+        )
         if not created:
             raise tasks.AlreadyRunning("此事件已有分析任务，请查看现有任务")
         task = tasks.get(task["task_id"], private=True)

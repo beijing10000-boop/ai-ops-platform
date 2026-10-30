@@ -18,24 +18,6 @@ import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
-TOOLS = {
-    action: "ssh_diagnose_" + action
-    for action in (
-        "cpu",
-        "memory",
-        "processes",
-        "memory_processes",
-        "disk",
-        "io",
-        "network",
-        "sockets",
-        "system",
-        "service",
-        "logs",
-        "kernel",
-    )
-}
-TOOLS["directory"] = "ssh_diagnose_directory_usage"
 SERVICE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$")
 
 
@@ -51,6 +33,8 @@ class HostBinding:
 
 
 class SSHMCPAdapter:
+    """Preflight host-binding checks; Skills run diagnostics via app.skill_mcp."""
+
     def __init__(self, session: ClientSession, timeout: float = 90):
         self.session = session
         self.timeout = timeout
@@ -98,61 +82,6 @@ class SSHMCPAdapter:
         ):
             raise IntegrationError("SSH 主机映射缺失、重复、未就绪或不在授权范围内")
         return HostBinding(zabbix_hostid, data["host_id"], data["revision"])
-
-    async def diagnose(
-        self,
-        binding: HostBinding,
-        action: str,
-        *,
-        service: str | None = None,
-        minutes: int = 30,
-        directory_root: str | None = None,
-    ) -> dict:
-        if action not in TOOLS:
-            raise IntegrationError("不支持的 SSH 诊断动作")
-        if type(minutes) is not int or not 1 <= minutes <= 120:
-            raise IntegrationError("时间范围必须为 1–120 分钟")
-        args = {"host_id": binding.host_id, "expected_revision": binding.revision}
-        if action == "directory":
-            from ..diagnostics.targets import validate_directory
-
-            args["root"] = validate_directory(directory_root)
-        elif directory_root is not None:
-            raise IntegrationError("该动作不接受目录参数")
-        if action in {"service", "logs"}:
-            if not isinstance(service, str) or not SERVICE.fullmatch(service):
-                raise IntegrationError("需要管理员授权的合法服务名")
-            args["service"] = service
-        elif service is not None:
-            raise IntegrationError("该动作不接受服务参数")
-        if action in {"logs", "kernel"}:
-            args["minutes"] = minutes
-        data = await self._call(TOOLS[action], args)
-        if (
-            data.get("host_id") != binding.host_id
-            or data.get("action") != action
-            or data.get("status") not in {"success", "partial", "failed", "cancelled"}
-        ):
-            raise IntegrationError("SSH MCP 返回的主机、动作或状态不匹配")
-        if action == "directory" and data.get("status") == "success":
-            summary = data.get("summary")
-            analysis = data.get("data") or (
-                summary.get("analysis") if isinstance(summary, dict) else None
-            )
-            if (
-                not isinstance(analysis, dict)
-                or analysis.get("root") != args["root"]
-                or not isinstance(analysis.get("top_directories"), list)
-            ):
-                raise IntegrationError(
-                    "SSH MCP 未返回匹配的目录占用结构；请检查版本及 directory 动作授权"
-                )
-        return {
-            **data,
-            "provider": "ssh_mcp",
-            "zabbix_hostid": binding.zabbix_hostid,
-            "host_revision": binding.revision,
-        }
 
 
 @asynccontextmanager

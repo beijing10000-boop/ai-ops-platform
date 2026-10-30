@@ -187,6 +187,10 @@ async def verify(ident: str, who=Depends(require("settings.manage"))):
     referenced = set(
         re.findall(r"`((?:ssh_[a-z_]+|[a-z]+_get))`", "\n".join(row["files"].values()))
     )
+    # Tools named only in prefetch rules must exist too.
+    for rule in row.get("prefetch") or []:
+        referenced.update(rule.get("ssh", []))
+        referenced.update(rule.get("schemas", []))
     results = []
     async with SkillMCP(
         read_setting, row["providers"], deadline=time.monotonic() + 35

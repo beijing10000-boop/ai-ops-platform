@@ -18,7 +18,9 @@ def configure_frontend(monkeypatch):
 
 def test_alert_output_contract_remains_program_controlled():
     value = worker.alert_instructions()
-    assert "host_groups,cause,action,analysis,human_required" in value
+    assert "host_groups,cause,action,analysis,findings,human_required" in value
+    # Facts are graded; unreferenced "confirmed" facts are demoted by the platform.
+    assert "confirmed" in value and "hypotheses" in value
     assert "完整中文结论" in value
     assert "先查询 Zabbix" not in value
 

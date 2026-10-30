@@ -80,6 +80,7 @@ PARAMS = {
         "selectHostGroups",
         "selectInventory",
         "selectTags",
+        "selectParentTemplates",
     },
     "hostgroup_get": {"groupids"},
     "hostinterface_get": {"hostids", "interfaceids"},
@@ -119,6 +120,7 @@ SELECTS = {
     "selectHostGroups": ["groupid", "name"],
     "selectInventory": ["os", "type"],
     "selectTags": ["tag", "value"],
+    "selectParentTemplates": ["templateid", "name"],
     "selectHosts": ["hostid", "host", "name"],
     "selectItems": FIELDS["item_get"],
 }
@@ -559,27 +561,95 @@ def infer_device(host):
         if any(w in os_name for w in words):
             return kind
 
+    # Linked templates name the platform the host is monitored as
+    # ("Linux by Zabbix agent", "Windows by Zabbix agent", "Cisco IOS by SNMP").
+    templates = host.get("parentTemplates")
+    if isinstance(templates, list):
+        kinds = set()
+        for item in templates:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").casefold()
+            # First match per template: "Linux by SNMP" is Linux, not network.
+            kind = next(
+                (
+                    kind
+                    for kind, words in TEMPLATE_WORDS
+                    if any(w in name for w in words)
+                ),
+                None,
+            )
+            if kind:
+                kinds.add(kind)
+        platforms = kinds & {"linux", "windows", "vmware"}
+        if len(platforms) == 1:
+            return next(iter(platforms))
+        if not platforms and kinds == {"network"}:
+            return "network"
+
     # Zabbix host.get exposes the selected host groups as "hostgroups".
     # Accept older/alternative "groups" only if it is structured group data.
     groups = host.get("hostgroups")
     if not isinstance(groups, list):
         groups = host.get("groups")
-    if not isinstance(groups, list):
-        return "unknown"
-    names = {
-        " ".join(str(group.get("name") or "").strip().casefold().split())
-        for group in groups
-        if isinstance(group, dict)
-    }
-    # Exact names only: an arbitrary group such as "Not Linux" does not
-    # establish a safe SSH device classification.
-    known_groups = {
-        "linux": {"linux", "linux servers", "linux hosts", "linux server"},
-        "windows": {"windows", "windows servers", "windows hosts"},
-        "vmware": {"vmware", "vmware hosts", "vmware servers", "esxi", "vcenter"},
-    }
-    matches = {kind for kind, aliases in known_groups.items() if names & aliases}
-    return next(iter(matches)) if len(matches) == 1 else "unknown"
+    if isinstance(groups, list):
+        names = {
+            " ".join(str(group.get("name") or "").strip().casefold().split())
+            for group in groups
+            if isinstance(group, dict)
+        }
+        # Exact names only: an arbitrary group such as "Not Linux" does not
+        # establish a safe SSH device classification.
+        known_groups = {
+            "linux": {"linux", "linux servers", "linux hosts", "linux server"},
+            "windows": {"windows", "windows servers", "windows hosts"},
+            "vmware": {"vmware", "vmware hosts", "vmware servers", "esxi", "vcenter"},
+            "network": {"network", "network devices", "switches", "routers"},
+        }
+        matches = {kind for kind, aliases in known_groups.items() if names & aliases}
+        if len(matches) == 1:
+            return next(iter(matches))
+        if len(matches) > 1:
+            return "unknown"
+
+    # A host monitored only through SNMP interfaces is a network device
+    # (switch, router, firewall, AP controller), not an SSH target.
+    interfaces = host.get("interfaces")
+    if isinstance(interfaces, list) and interfaces:
+        kinds = {
+            str(item.get("type"))
+            for item in interfaces
+            if isinstance(item, dict) and item.get("type") is not None
+        }
+        if kinds == {"2"}:
+            return "network"
+    return "unknown"
+
+
+# Words in linked template names, checked in this order per template.
+TEMPLATE_WORDS = (
+    ("windows", ("windows",)),
+    ("vmware", ("vmware", "esxi", "vcenter")),
+    ("linux", ("linux",)),
+    (
+        "network",
+        (
+            "cisco",
+            "huawei",
+            "h3c",
+            "juniper",
+            "mikrotik",
+            "fortigate",
+            "fortinet",
+            "aruba",
+            "ruijie",
+            "network generic",
+            "switch",
+            "router",
+            "snmp",
+        ),
+    ),
+)
 
 
 async def monitoring_hosts(read_setting, query="", host_id=None):
