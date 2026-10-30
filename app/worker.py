@@ -16,17 +16,65 @@ log = logging.getLogger(__name__)
 # Immutable Feishu card output contract; diagnostic policy lives in enabled Skills.
 ALERT_OUTPUT_CONTRACT = (
     "告警卡片要求只输出 JSON 对象，必须包含 "
-    "host_groups,cause,action,analysis,human_required 字段，另加 evidence 数组。"
+    "host_groups,cause,action,analysis,findings,human_required 字段，另加 evidence 数组。"
     "cause 写完整中文结论（100–200 字）：证据充分的直接成因和主要依据，关键数值后注明证据编号（E2）；"
     "action 为处理建议数组，按影响与风险排序，每项一句；"
     "analysis 写证据之间的关联、排除项和尚未证实的方向（200–400 字）。"
+    "findings 为对象："
+    '{"confirmed":[{"statement":"已确认的事实","evidence":["E2"]}],'
+    '"probable":[{"statement":"高可信推断","evidence":["E3"]}],'
+    '"hypotheses":[{"statement":"待验证假设","verify":"可以怎样验证"}]}；'
+    "confirmed 只放有证据编号直接证明的事实，probable 放有证据支持但未直接证实的推断，"
+    "hypotheses 放尚无证据的可能原因；平台会把没有有效引用的 confirmed 降为推断。"
     "证据编号只以括号附在句末或数值后，如（E2），不要把编号当作句子的主语或宾语；"
     "目标、时间范围、告警字段、各证据数值和诊断不足由平台渲染，不要复述。"
     "evidence 每项为 "
-    '{"id":"E2","quote":"从该证据原样摘录的关键数值或原文"}；'
+    '{"id":"E2","quote":"从该证据原样摘录的关键数值或原文"}，列出支撑结论的 2–6 条关键证据；'
     "平台会核对 quote 是否真的出现在对应证据中，并据此评定可信度。"
     "无证据时明确写未知，不能编造事实。"
 )
+# Plain names for the evidence lines of the Feishu card.
+TOOL_LABELS = {
+    "history_get": "监控历史",
+    "trend_get": "7 天趋势",
+    "item_get": "监控项",
+    "event_get": "告警事件",
+    "problem_get": "当前问题",
+    "trigger_get": "触发器",
+    "host_get": "主机信息",
+    "ssh_collect": "实时采集",
+    "ssh_diagnose_cpu": "CPU 负载",
+    "ssh_diagnose_processes": "进程排行",
+    "ssh_diagnose_memory": "内存",
+    "ssh_diagnose_memory_processes": "内存进程排行",
+    "ssh_diagnose_pressure": "资源压力",
+    "ssh_diagnose_disk": "磁盘",
+    "ssh_diagnose_io": "磁盘 I/O",
+    "ssh_diagnose_network": "网络接口",
+    "ssh_diagnose_sockets": "端口与连接",
+    "ssh_diagnose_tcp_states": "TCP 状态",
+    "ssh_diagnose_oom": "OOM 记录",
+    "ssh_diagnose_syslog": "系统日志",
+    "ssh_diagnose_system_errors": "系统日志",
+    "ssh_diagnose_kernel": "内核日志",
+    "ssh_diagnose_logs": "服务日志",
+    "ssh_diagnose_service": "服务状态",
+    "ssh_diagnose_service_detail": "服务详情",
+    "ssh_diagnose_service_map": "端口归属",
+    "ssh_diagnose_failed_services": "失败服务",
+    "ssh_diagnose_nginx": "Nginx 状态",
+    "ssh_diagnose_nginx_access": "Nginx 访问日志",
+    "ssh_diagnose_java": "Java 进程",
+    "ssh_diagnose_jvm": "JVM",
+    "ssh_diagnose_system": "系统信息",
+}
+DEVICE_NAMES = {
+    "linux": "Linux",
+    "windows": "Windows",
+    "network": "网络设备",
+    "vmware": "VMware",
+    "other": "其它设备",
+}
 COLORS = {
     "0": "grey",
     "1": "blue",
@@ -100,10 +148,15 @@ async def analyze(event, task_id=None):
         from .orchestrator import tasks
 
         task = tasks.get(data["_task_id"]) or {}
+        report = task.get("report") or {}
         data["_diagnostic_status"] = task.get("status")
-        data["_report_answer"] = (task.get("report") or {}).get("answer")
-        data["_limitations"] = (task.get("report") or {}).get("limitations", [])
+        data["_report_answer"] = report.get("answer")
+        data["_limitations"] = report.get("limitations", [])
         data["_duration_ms"] = task.get("duration_ms")
+        citations = report.get("citations") or {}
+        data["_evidence"] = list(citations.get("valid") or [])[:6]
+        data["_confidence"] = citations.get("confidence")
+        data["_capabilities"] = report.get("capabilities") or {}
     return data
 
 
@@ -315,12 +368,54 @@ def without_evidence_ids(text):
     return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
-def card_summary(info):
-    """Feishu card body: conclusion, actions and (as room allows) the analysis,
-    plus the status when not clean.
+def source_line(info):
+    """Which data sources the conclusion rests on, and which were unavailable."""
+    caps = info.get("_capabilities") or {}
+    path = caps.get("diagnostic_path")
+    if not path:
+        return ""
+    device = DEVICE_NAMES.get(caps.get("device_type"))
+    ssh = caps.get("ssh_mcp") or {}
+    text = {
+        "zabbix+ssh": "Zabbix 历史 + SSH 实时",
+        "zabbix-only": "仅 Zabbix 监控数据",
+        "ssh-only": "仅 SSH 实时数据",
+        "none": "未取得监控或实时数据",
+    }.get(path, "")
+    if path == "zabbix-only" and ssh.get("status") not in (None, "used", "available"):
+        reason = str(ssh.get("reason") or "").strip()
+        if ssh.get("status") == "not_applicable" and device:
+            reason = f"{device} 不做 SSH 诊断"
+        if reason:
+            text += "（" + clipped(reason, 40) + "）"
+    elif device:
+        text += "（" + device + "）"
+    confidence = info.get("_confidence")
+    return text + (f" · 依据可信度 {confidence}" if confidence else "")
 
-    Scope, citation check and limitations stay on the Web report the card
-    links to; the conversation context keeps the full analysis_summary().
+
+def evidence_lines(info, limit=4):
+    """The checked citations as short plain lines, without evidence ids."""
+    lines = []
+    for item in info.get("_evidence") or []:
+        if not isinstance(item, dict) or not str(item.get("quote") or "").strip():
+            continue
+        label = TOOL_LABELS.get(str(item.get("tool")), str(item.get("tool") or ""))
+        source = "SSH" if item.get("provider") == "ssh_mcp" else "Zabbix"
+        quote = clipped(without_evidence_ids(str(item["quote"])), 70)
+        lines.append(f"· {source} {label}：{quote}")
+        if len(lines) == limit:
+            break
+    return lines
+
+
+def card_summary(info):
+    """Feishu card body: conclusion, the key checked evidence with the data
+    sources, actions and (as room allows) the analysis, plus the status when
+    not clean.
+
+    Scope, the full citation check and limitations stay on the Web report the
+    card links to; the conversation context keeps the full analysis_summary().
     """
     from .mcp_runtime import numbered
     from .report_presentation import human_metrics
@@ -346,6 +441,13 @@ def card_summary(info):
         if cause != full:
             cause += "（详见完整报告）"
         budget = CARD_CHARS - len(cause)
+        lines += ["**诊断结论**", cause or "未知"]
+        proof = evidence_lines(info)
+        sources = source_line(info)
+        if proof or sources:
+            lines += ["", "**核心证据**" + (f"  {sources}" if sources else "")]
+            lines += proof or ["未取得通过核对的证据引用，结论请在完整报告中核验。"]
+            budget -= len(sources) + sum(len(line) for line in proof or [""]) + 8
         actions = [
             line.strip()
             for line in without_evidence_ids(numbered(info.get("action"))).split("\n")
@@ -359,7 +461,7 @@ def card_summary(info):
                 break
             kept.append(clipped(item, max(budget, 40)))
             budget -= len(kept[-1])
-        lines += ["**诊断结论**", cause or "未知", "", "**处理建议**"]
+        lines += ["", "**处理建议**"]
         lines += kept or ["无"]
         analysis = without_evidence_ids(numbered(info.get("analysis")))
         if analysis and budget >= ANALYSIS_MIN:
@@ -370,8 +472,8 @@ def card_summary(info):
     return human_metrics("\n".join(lines))
 
 
-# Body text of the card: conclusion first, actions next, the analysis takes
-# what is left; with its headings the card stays within ~1000 characters.
+# Body text of the card: conclusion first, the key evidence and actions next,
+# the analysis takes what is left; with headings it stays within ~1000 characters.
 CARD_CHARS, CAUSE_CHARS, ACTION_ROWS, ANALYSIS_MIN = 1000, 400, 8, 80
 
 
@@ -778,6 +880,12 @@ def store_alert_usage(event, usage):
         )
 
 
+def ai_state(info):
+    """Alert-list AI status from the diagnosis itself, not from card delivery."""
+    status = (info or {}).get("_diagnostic_status")
+    return {"partial": "partial", "failed": "failed"}.get(status, "success")
+
+
 def update_event(event, **states):
     from .main import connection
 
@@ -959,7 +1067,7 @@ async def handle_alert_analysis(event, task_id=None):
             event=event,
             analysis_info=analysis,
         )
-        update_event(event, ai_status="success")
+        update_event(event, ai_status=ai_state(analysis))
     except Exception:
         update_event(event, ai_status="failed")
         log.exception("AI_ANALYSIS_DELIVERY_FAILED event_id=%s", event.get("event_id"))
@@ -1132,7 +1240,7 @@ async def analyze_on_demand(event, message_id, chat_id=None, task_id=None):
             log.exception("ALERT_AI_CONTEXT_SAVE_FAILED event_id=%s", event_id)
         if chat_id:
             clear_pending(chat_id, progress_id)
-        update_event(event, ai_status="success")
+        update_event(event, ai_status=ai_state(result))
         return {"diagnosed": True, "event_id": event_id, "reply_id": progress_id}
     except Exception:
         if chat_id:

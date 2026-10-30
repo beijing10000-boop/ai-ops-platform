@@ -8,6 +8,7 @@ import pytest
 from app import main
 from app.integrations import ssh_mcp
 from app.orchestrator import tasks
+from app.orchestrator.budgets import PROFILES
 from tests.test_platform import client_for
 
 
@@ -45,7 +46,7 @@ def test_diagnostic_prompts_are_replaced_by_skill_and_legacy_values_preserved():
             == 422
         )
     assert "prompts" not in options
-    assert options["profiles"]["standard"]["calls"] == 12
+    assert options["profiles"]["standard"]["calls"] == PROFILES["standard"]["calls"]
     assert "host_get" in options["tools"]
     with main.connection() as db:
         assert (

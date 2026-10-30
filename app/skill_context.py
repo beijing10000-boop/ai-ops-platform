@@ -22,6 +22,31 @@ SAMPLE_SIZES = (8, 4, 2, 0)
 RECORD_LIMITS = (20, 10, 5)
 PROCESS_ROWS = 15
 UNRESOLVED_MACRO = re.compile(r"\{[$#]?[A-Z][A-Z0-9_.]*\}")
+# Lists inside SSH results that may be shortened for the model, longest first
+# (the stored evidence keeps every row).
+SSH_LIST_KEYS = (
+    "entries",
+    "samples",
+    "lines",
+    "rows",
+    "matched",
+    "units",
+    "listening",
+    "listeners",
+    "top_processes",
+    "history",
+    "timeline",
+    "codes",
+    "processes",
+    "uris",
+    "ips",
+    "uas",
+    "top_messages",
+    "top_requests",
+    "top_clients",
+    "top_upstreams",
+    "xx_flags",
+)
 
 
 def _positive(value):
@@ -70,6 +95,55 @@ def _fits(value, max_chars):
     return max_chars is None or len(json.dumps(value, ensure_ascii=False)) <= max_chars
 
 
+def _shrink_lists(value, keep):
+    """Copy of ``value`` with every listed list cut to ``keep`` items and a note."""
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if key in SSH_LIST_KEYS and isinstance(item, list) and len(item) > keep:
+                result[key] = [_shrink_lists(x, keep) for x in item[:keep]]
+                result[key + "_omitted"] = len(item) - keep
+            elif key in SSH_LIST_KEYS and isinstance(item, dict):
+                result[key] = {
+                    k: (v[:keep] if isinstance(v, list) and len(v) > keep else v)
+                    for k, v in item.items()
+                }
+            else:
+                result[key] = _shrink_lists(item, keep)
+        return result
+    if isinstance(value, list):
+        return [_shrink_lists(x, keep) for x in value]
+    return value
+
+
+def ssh_view(outcome, max_chars):
+    """SSH results keep their structure: drop raw text, then shorten lists.
+
+    A JSON document cut in the middle cannot be cited; the model gets whole
+    findings/summary objects with shortened lists and an ``_omitted`` count.
+    """
+    view = trimmed_processes(outcome)
+    if _fits(view, max_chars):
+        return view
+    data = view.get("data") if isinstance(view, dict) else None
+    if isinstance(data, dict) and ("output" in data or "stderr" in data):
+        view = {
+            **view,
+            "data": {k: v for k, v in data.items() if k not in ("output", "stderr")},
+        }
+        view["data"]["output_note"] = "原文已省略，完整内容在任务证据中"
+        if _fits(view, max_chars):
+            return view
+    for keep in (20, 10, 5, 3, 1):
+        shorter = _shrink_lists(view, keep)
+        if _fits(shorter, max_chars):
+            shorter["view_note"] = "列表已按模型视图上限截短；完整证据在任务记录中"
+            return shorter
+    shorter = _shrink_lists(view, 1)
+    shorter["view_note"] = "列表已按模型视图上限截短；完整证据在任务记录中"
+    return shorter
+
+
 def _numbers(records, fields):
     """Summarize only finite numeric measurements, not arbitrary text fields."""
     stats = {}
@@ -97,24 +171,75 @@ def _numbers(records, fields):
     return stats
 
 
-def _series(itemid, rows, metrics, size):
-    """Statistics cover every row; ``size`` evenly spaced samples keep the endpoints."""
+def _clock(row):
+    try:
+        return int(row.get("clock"))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _local(stamp):
+    return datetime.fromtimestamp(stamp, BEIJING).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _segment(rows, metric):
+    values = _numbers(rows, (metric,)).get(metric)
+    if not values:
+        return None
+    clocks = [c for c in (_clock(r) for r in rows) if c is not None]
+    return {
+        "count": values["numeric_count"],
+        "min": values["min"],
+        "avg": values["avg"],
+        "max": values["max"],
+        **({"from": _local(min(clocks)), "to": _local(max(clocks))} if clocks else {}),
+    }
+
+
+def _series(itemid, rows, metrics, size, event_clock=None):
+    """Statistics cover every row; ``size`` evenly spaced samples keep the endpoints.
+
+    With the alert moment the series is also split into before/after segments,
+    so the model can state whether the value rose at the alert or earlier.
+    """
     last = len(rows) - 1
     picks = (
         sorted({0, last} | {round(i * last / (size - 1)) for i in range(size)})
         if size >= 2
         else []
     )
-    sample = [
-        {key: value for key, value in rows[i].items() if key != "itemid"} for i in picks
-    ]
-    return {
+    sample = []
+    for i in picks:
+        row = {key: value for key, value in rows[i].items() if key != "itemid"}
+        clock = _clock(rows[i])
+        if clock is not None:
+            row["local_time"] = _local(clock)
+        sample.append(row)
+    result = {
         "itemid": itemid,
         "record_count": len(rows),
         "numeric_summary": _numbers(rows, metrics),
         "sample_records": sample,
         "sample_only": len(sample) < len(rows),
     }
+    clocks = [c for c in (_clock(r) for r in rows) if c is not None]
+    if clocks:
+        result["covered"] = {"from": _local(min(clocks)), "to": _local(max(clocks))}
+    if event_clock and metrics == ("value",) and clocks:
+        before = [r for r in rows if (_clock(r) or 0) < event_clock]
+        after = [r for r in rows if (_clock(r) or 0) >= event_clock]
+        segments = {
+            "alert_at": _local(event_clock),
+            "before": _segment(before, "value"),
+            "after": _segment(after, "value"),
+        }
+        nearest = min(rows, key=lambda r: abs((_clock(r) or 0) - event_clock))
+        segments["at_alert"] = {
+            "value": nearest.get("value"),
+            "local_time": _local(_clock(nearest)),
+        }
+        result["alert_split"] = segments
+    return result
 
 
 def fit_definitions(outcome, max_chars=SCHEMA_CHARS):
@@ -138,7 +263,7 @@ def fit_definitions(outcome, max_chars=SCHEMA_CHARS):
     }
 
 
-def model_view(provider, tool, outcome, max_chars=None):
+def model_view(provider, tool, outcome, max_chars=None, event_clock=None):
     """Remove duplicate text/records and summarize large history arrays.
 
     Samples must be labelled as partial; do not treat samples as a complete
@@ -149,7 +274,7 @@ def model_view(provider, tool, outcome, max_chars=None):
     if tool == "list_mcp_tools":
         return fit_definitions(outcome, max_chars or SCHEMA_CHARS)
     if provider == "ssh_mcp":
-        return trimmed_processes(outcome)
+        return ssh_view(outcome, max_chars)
     if (
         provider != "zabbix_mcp"
         or not isinstance(outcome, dict)
@@ -177,9 +302,11 @@ def model_view(provider, tool, outcome, max_chars=None):
         result["note"] = (
             "统计值由本次完整采集记录计算，样本并非全部历史点；完整证据在任务记录中"
         )
+        if outcome.get("limit_reached"):
+            result["note"] += "；本次返回达到行数上限，covered 为实际覆盖区间"
         for size in SAMPLE_SIZES:
             result["series"] = [
-                _series(itemid, rows, metrics, size)
+                _series(itemid, rows, metrics, size, event_clock)
                 for itemid, rows in list(groups.items())[:8]
             ]
             if _fits(result, max_chars):
@@ -197,7 +324,139 @@ def model_view(provider, tool, outcome, max_chars=None):
     return result
 
 
-def derive_signals(collected):
+def _ratio_signal(evidence_id, metric, value, hint, level="warning"):
+    return {
+        "source": "zabbix_mcp",
+        "evidence_id": evidence_id,
+        "level": level,
+        "metric": metric,
+        "value": value,
+        "hint": hint,
+    }
+
+
+def _history_signals(collected, event_clock):
+    """Alert window versus 7-day baseline and before/after the alert moment."""
+    signals = []
+    history = {}
+    trend = {}
+    for provider, tool, outcome, evidence_id in collected:
+        if provider != "zabbix_mcp" or not isinstance(outcome, dict):
+            continue
+        if outcome.get("is_error"):
+            continue
+        for row in outcome.get("records") or []:
+            if not isinstance(row, dict):
+                continue
+            ident = str(row.get("itemid", ""))
+            if tool == "history_get":
+                history.setdefault(ident, {"rows": [], "evidence_id": evidence_id})
+                history[ident]["rows"].append(row)
+            elif tool == "trend_get":
+                trend.setdefault(ident, {"rows": [], "evidence_id": evidence_id})
+                trend[ident]["rows"].append(row)
+    for ident, item in history.items():
+        rows = item["rows"]
+        window = _numbers(rows, ("value",)).get("value")
+        if not window or window["numeric_count"] < 3:
+            continue
+        base = _numbers(trend.get(ident, {}).get("rows", []), ("value_avg",)).get(
+            "value_avg"
+        )
+        if base and base["avg"] > 0 and window["avg"] / base["avg"] >= 1.5:
+            signals.append(
+                _ratio_signal(
+                    item["evidence_id"],
+                    "alert_vs_baseline",
+                    {
+                        "itemid": ident,
+                        "window_avg": round(window["avg"], 4),
+                        "baseline_avg": round(base["avg"], 4),
+                        "ratio": round(window["avg"] / base["avg"], 2),
+                    },
+                    f"监控项 {ident} 告警窗口均值是近 7 天小时均值的 {window['avg'] / base['avg']:.1f} 倍：属于突发升高而非常态",
+                )
+            )
+        elif base and base["avg"] > 0 and window["avg"] / base["avg"] <= 1.1:
+            signals.append(
+                _ratio_signal(
+                    item["evidence_id"],
+                    "alert_vs_baseline",
+                    {
+                        "itemid": ident,
+                        "window_avg": round(window["avg"], 4),
+                        "baseline_avg": round(base["avg"], 4),
+                        "ratio": round(window["avg"] / base["avg"], 2),
+                    },
+                    f"监控项 {ident} 告警窗口均值与近 7 天基线接近（{window['avg'] / base['avg']:.2f} 倍）：长期处于该水平，更可能是容量或阈值问题",
+                    level="info",
+                )
+            )
+        if event_clock:
+            before = _segment(
+                [r for r in rows if (_clock(r) or 0) < event_clock], "value"
+            )
+            after = _segment(
+                [r for r in rows if (_clock(r) or 0) >= event_clock], "value"
+            )
+            if before and after and before["count"] >= 2 and after["count"] >= 2:
+                if before["avg"] > 0 and after["avg"] / before["avg"] >= 1.5:
+                    signals.append(
+                        _ratio_signal(
+                            item["evidence_id"],
+                            "rise_at_alert",
+                            {
+                                "itemid": ident,
+                                "before_avg": round(before["avg"], 4),
+                                "after_avg": round(after["avg"], 4),
+                            },
+                            f"监控项 {ident} 告警后均值是告警前的 {after['avg'] / before['avg']:.1f} 倍：异常在告警时刻附近开始",
+                            level="info",
+                        )
+                    )
+                elif before["max"] > 0 and before["avg"] >= 0.9 * after["avg"]:
+                    signals.append(
+                        _ratio_signal(
+                            item["evidence_id"],
+                            "elevated_before_alert",
+                            {
+                                "itemid": ident,
+                                "before_avg": round(before["avg"], 4),
+                                "after_avg": round(after["avg"], 4),
+                            },
+                            f"监控项 {ident} 告警前 30 分钟已处于相近水平：问题早于告警时刻出现，触发只是跨过阈值",
+                            level="info",
+                        )
+                    )
+    return signals
+
+
+def _event_signals(collected, event_clock):
+    for provider, tool, outcome, evidence_id in collected:
+        if provider != "zabbix_mcp" or tool != "event_get":
+            continue
+        if not isinstance(outcome, dict) or outcome.get("is_error"):
+            continue
+        problems = [
+            row
+            for row in outcome.get("records") or []
+            if isinstance(row, dict) and str(row.get("value")) == "1"
+        ]
+        if len(problems) >= 3:
+            return [
+                {
+                    "source": "zabbix_mcp",
+                    "evidence_id": evidence_id,
+                    "level": "warning",
+                    "metric": "recurrence",
+                    "value": {"problem_events_24h": len(problems)},
+                    "hint": f"该触发器近 24 小时触发了 {len(problems)} 次：反复抖动或阈值贴近常态，应核对基线与阈值而不只是本次峰值",
+                }
+            ]
+    return []
+
+
+def derive_signals(collected, event_clock=None):
     """Deterministic cross-checks over prefetched evidence for the model.
 
     `collected` holds (provider, tool, raw outcome, evidence id). Uses the raw
@@ -235,6 +494,11 @@ def derive_signals(collected):
                                     "hint",
                                 )
                             },
+                            **(
+                                {"source_action": finding["source_action"]}
+                                if finding.get("source_action")
+                                else {}
+                            ),
                         }
                     )
 
@@ -299,7 +563,36 @@ def derive_signals(collected):
                 "hint": "Zabbix 最新值：每核 5 分钟负载偏高但 CPU 利用率不高，负载可能来自 D 状态任务或宿主机 CPU 争抢，而不是计算繁忙",
             }
         )
-    return signals[:10]
+    for key, (value, evidence_id) in latest.items():
+        try:
+            figure = float(value)
+        except (TypeError, ValueError):
+            continue
+        if key.startswith("vm.memory.utilization") and figure >= 90:
+            signals.append(
+                {
+                    "source": "zabbix_mcp",
+                    "evidence_id": evidence_id,
+                    "level": "warning",
+                    "metric": "memory_utilization",
+                    "value": {"key": key, "percent": round(figure, 2)},
+                    "hint": "Zabbix 最新内存利用率已超过 90%：核对 RSS 排行、Swap 与 OOM 记录",
+                }
+            )
+        elif key.startswith("vfs.fs") and "pused" in key and figure >= 90:
+            signals.append(
+                {
+                    "source": "zabbix_mcp",
+                    "evidence_id": evidence_id,
+                    "level": "warning",
+                    "metric": "filesystem_utilization",
+                    "value": {"key": key, "percent": round(figure, 2)},
+                    "hint": "文件系统使用率超过 90%：核对增长来源与目录占用",
+                }
+            )
+    signals.extend(_history_signals(collected, event_clock))
+    signals.extend(_event_signals(collected, event_clock))
+    return signals[:14]
 
 
 def model_alert(event):

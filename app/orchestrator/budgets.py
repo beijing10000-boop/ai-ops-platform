@@ -1,32 +1,42 @@
 import json
 from fastapi import HTTPException
 
+# rounds/calls/tokens/seconds bound the whole task. Prefetch counts against
+# `calls` but the model always keeps `follow_up_calls` for its own queries, and
+# `extension_rounds` extra rounds may be granted when the last round left
+# evidence gaps (failed tools) that time still allows to close.
 PROFILES = {
     "quick": {
-        "rounds": 2,
-        "calls": 4,
-        "per_round": 3,
-        "result_chars": 2000,
-        "seconds": 65,
-        "tokens": 12000,
+        "rounds": 3,
+        "calls": 8,
+        "per_round": 4,
+        "result_chars": 2500,
+        "seconds": 90,
+        "tokens": 16000,
+        "follow_up_calls": 3,
+        "extension_rounds": 0,
     },
     "standard": {
-        "rounds": 4,
-        "calls": 12,
-        "per_round": 4,
+        "rounds": 5,
+        "calls": 16,
+        "per_round": 6,
         "result_chars": 4000,
         # Thinking models spend 15–40 s a round and the summary round sends the
         # whole context; 110 s only fitted three rounds.
         "seconds": 180,
-        "tokens": 24000,
+        "tokens": 32000,
+        "follow_up_calls": 5,
+        "extension_rounds": 1,
     },
     "deep": {
-        "rounds": 6,
-        "calls": 16,
+        "rounds": 8,
+        "calls": 24,
         "per_round": 8,
         "result_chars": 6000,
-        "seconds": 240,
-        "tokens": 48000,
+        "seconds": 300,
+        "tokens": 64000,
+        "follow_up_calls": 8,
+        "extension_rounds": 2,
     },
 }
 RANGES = {
@@ -36,6 +46,8 @@ RANGES = {
     "result_chars": (500, None),
     "seconds": (20, None),
     "tokens": (2000, None),
+    "follow_up_calls": (0, None),
+    "extension_rounds": (0, 4),
 }
 
 
@@ -83,3 +95,12 @@ def profile(name, read_setting):
     validate_settings({"ai_profile_budgets": raw})
     limits.update(json.loads(raw).get(name, {}))
     return limits
+
+
+def with_defaults(limits):
+    """Fill keys a task saved before they existed (v1.2 follow-up / extension)."""
+    base = PROFILES["standard"]
+    return {
+        **{key: base[key] for key in ("follow_up_calls", "extension_rounds")},
+        **(limits or {}),
+    }

@@ -2,6 +2,7 @@
 
 import asyncio
 from contextlib import AsyncExitStack
+import hashlib
 import json
 import time
 
@@ -14,15 +15,57 @@ SSH_META = {
     "ssh_resolve_host",
     "ssh_resolve_target",
 }
+# Read-only SSH tools outside the ssh_diagnose_* family.
+SSH_EXTRA = {"ssh_test_connection", "ssh_triage", "ssh_collect"}
 # SSH MCP action ids whose tool name is not ssh_diagnose_<id> (servers before
 # v0.5.0 do not return the `tool` field in ssh_list_tool_catalog).
 ACTION_TOOLS = {
     "connection": "ssh_test_connection",
     "triage": "ssh_triage",
+    "collect": "ssh_collect",
     "directory": "ssh_diagnose_directory_usage",
     "mount_health": "ssh_diagnose_mounts",
     "log_errors": "ssh_diagnose_system_errors",
 }
+# Fixed actions an ssh_collect session can bundle (SSH MCP v0.6.0); used when
+# the catalog does not list the collector's own parameter choices.
+COLLECTABLE = frozenset(
+    {
+        "cpu",
+        "memory",
+        "processes",
+        "memory_processes",
+        "pressure",
+        "resource_limits",
+        "disk",
+        "io",
+        "mount_health",
+        "block_devices",
+        "network",
+        "sockets",
+        "tcp_states",
+        "system",
+        "health",
+        "capabilities",
+        "failed_services",
+        "service_inventory",
+        "timers",
+        "time_sync",
+        "containers",
+        "container_stats",
+        "security_status",
+        "kernel",
+        "log_errors",
+        "oom",
+    }
+)
+# Tool lists and the token's authorized catalog per MCP configuration, shared
+# by the tasks of one worker process. A session is still opened per task.
+# "刷新目录" in the Web console bumps the `mcp_catalog_epoch` setting, so every
+# worker process sees new grants at its next task, not after the TTL.
+CATALOG_TTL = 60
+EPOCH_SETTING = "mcp_catalog_epoch"
+_CATALOGS = {}
 
 
 def authorized_ssh_tools(entries):
@@ -45,14 +88,27 @@ def ssh_allowed(tool):
         annotations
         and annotations.readOnlyHint is True
         and annotations.destructiveHint is False
-        and (
-            tool.name in SSH_META | {"ssh_test_connection", "ssh_triage"}
-            or tool.name.startswith("ssh_diagnose_")
-        )
+        and (tool.name in SSH_META | SSH_EXTRA or tool.name.startswith("ssh_diagnose_"))
         and not set(tool.inputSchema.get("properties", {}))
         & {"command", "commands", "script", "shell", "url", "address"}
         - ({"address"} if tool.name == "ssh_resolve_target" else set())
     )
+
+
+def _cache_key(provider, configuration):
+    material = json.dumps([provider, list(configuration)], default=str)
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+def _root(exc):
+    """The single exception an anyio task group wrapped, for a readable reason."""
+    while isinstance(exc, BaseExceptionGroup) and len(exc.exceptions) == 1:
+        exc = exc.exceptions[0]
+    return exc
+
+
+def clear_catalog_cache():
+    _CATALOGS.clear()
 
 
 def payload(response):
@@ -85,6 +141,11 @@ class SkillMCP:
         self.monitoring_hostids = set()
         self.target_metadata = {}
         self.configuration = {p: self.config(p) for p in self.providers}
+        # SSH MCP catalog entries of this token by tool name, and the read-only
+        # tools the server offers that the token may not run.
+        self.ssh_catalog = {}
+        self.hidden_ssh_tools = set()
+        self.failures = {}
 
     def config(self, provider):
         keys = (
@@ -111,48 +172,93 @@ class SkillMCP:
 
     async def catalog(self, provider):
         self.check(provider)
+        if provider in self.failures:
+            # One connection attempt per task: a dead or disabled MCP must not
+            # cost every later tool call another connect timeout.
+            raise self.failures[provider]
         if provider not in self.sessions:
-            async with asyncio.timeout(
-                min(20, max(0.1, self.deadline - time.monotonic()))
-            ):
-                if provider == "ssh_mcp":
-                    adapter = await self.stack.enter_async_context(
-                        ssh_mcp.configured(self.read_setting)
+            try:
+                await self._open(provider)
+            except Exception as exc:
+                root = _root(exc)
+                self.failures[provider] = (
+                    root
+                    if isinstance(root, (ValueError, ssh_mcp.IntegrationError))
+                    else ssh_mcp.IntegrationError(
+                        ("SSH MCP" if provider == "ssh_mcp" else "Zabbix MCP")
+                        + " 连接失败："
+                        + type(root).__name__
                     )
-                    session = adapter.session
-                else:
-                    session = await self.stack.enter_async_context(
-                        zabbix.connect(self.read_setting)
-                    )
-                self.sessions[provider] = session
-                tools, cursor, seen = {}, None, set()
-                for _ in range(20):
-                    result = (
-                        await session.list_tools(cursor=cursor)
-                        if cursor
-                        else await session.list_tools()
-                    )
-                    for tool in result.tools:
-                        if (
-                            ssh_allowed(tool)
-                            if provider == "ssh_mcp"
-                            else tool.name in zabbix.enabled_names(self.read_setting)
-                        ):
-                            tools[tool.name] = tool
-                    cursor = getattr(result, "nextCursor", None)
-                    if not cursor:
-                        break
-                    if cursor in seen:
-                        raise ValueError("MCP 工具分页重复")
-                    seen.add(cursor)
-                else:
-                    raise ValueError("MCP 工具分页超过限制")
-                if provider == "ssh_mcp" and "ssh_list_tool_catalog" in tools:
-                    tools = await self.authorized(session, tools)
-                self.tools[provider] = tools
+                )
+                raise self.failures[provider] from None
         if provider not in self.tools:
             raise ValueError("MCP 工具发现失败，请创建新任务重试")
         return self.tools[provider]
+
+    async def _open(self, provider):
+        async with asyncio.timeout(min(20, max(0.1, self.deadline - time.monotonic()))):
+            if provider == "ssh_mcp":
+                adapter = await self.stack.enter_async_context(
+                    ssh_mcp.configured(self.read_setting)
+                )
+                session = adapter.session
+            else:
+                session = await self.stack.enter_async_context(
+                    zabbix.connect(self.read_setting)
+                )
+            self.sessions[provider] = session
+            key = _cache_key(
+                provider,
+                [
+                    *self.configuration[provider],
+                    self.read_setting(EPOCH_SETTING),
+                    *(
+                        sorted(zabbix.enabled_names(self.read_setting))
+                        if provider == "zabbix_mcp"
+                        else []
+                    ),
+                ],
+            )
+            cached = _CATALOGS.get(key)
+            if cached and time.monotonic() - cached["at"] < CATALOG_TTL:
+                self.tools[provider] = dict(cached["tools"])
+                if provider == "ssh_mcp":
+                    self.ssh_catalog = dict(cached["entries"])
+                    self.hidden_ssh_tools = set(cached["hidden"])
+                return
+            tools, cursor, seen = {}, None, set()
+            for _ in range(20):
+                result = (
+                    await session.list_tools(cursor=cursor)
+                    if cursor
+                    else await session.list_tools()
+                )
+                for tool in result.tools:
+                    if (
+                        ssh_allowed(tool)
+                        if provider == "ssh_mcp"
+                        else tool.name in zabbix.enabled_names(self.read_setting)
+                    ):
+                        tools[tool.name] = tool
+                cursor = getattr(result, "nextCursor", None)
+                if not cursor:
+                    break
+                if cursor in seen:
+                    raise ValueError("MCP 工具分页重复")
+                seen.add(cursor)
+            else:
+                raise ValueError("MCP 工具分页超过限制")
+            if provider == "ssh_mcp" and "ssh_list_tool_catalog" in tools:
+                tools = await self.authorized(session, tools)
+            self.tools[provider] = tools
+            _CATALOGS[key] = {
+                "at": time.monotonic(),
+                "tools": dict(tools),
+                "entries": dict(self.ssh_catalog) if provider == "ssh_mcp" else {},
+                "hidden": set(self.hidden_ssh_tools)
+                if provider == "ssh_mcp"
+                else set(),
+            }
 
     async def authorized(self, session, tools):
         """Hide diagnostics this token may not run, so the model never plans them.
@@ -163,17 +269,73 @@ class SkillMCP:
         """
         try:
             response = await session.call_tool("ssh_list_tool_catalog", {})
-            allowed = (
-                None if response.isError else authorized_ssh_tools(payload(response))
-            )
+            entries = None if response.isError else payload(response)
+            allowed = authorized_ssh_tools(entries) if entries is not None else None
         except Exception:
-            allowed = None
+            entries, allowed = None, None
         if not allowed:
             return tools
+        for entry in entries if isinstance(entries, list) else []:
+            if isinstance(entry, dict) and isinstance(entry.get("id"), str):
+                name = entry.get("tool") or ACTION_TOOLS.get(
+                    entry["id"], "ssh_diagnose_" + entry["id"]
+                )
+                self.ssh_catalog[name] = entry
+        self.hidden_ssh_tools = {
+            name for name in tools if name not in SSH_META and name not in allowed
+        }
         return {
             name: tool
             for name, tool in tools.items()
             if name in SSH_META or name in allowed
+        }
+
+    def ssh_entry(self, name):
+        """The SSH MCP catalog entry of a tool (params, risk, sensitive) or None."""
+        return self.ssh_catalog.get(name)
+
+    def ssh_action(self, name):
+        """SSH MCP action id behind a tool name."""
+        entry = self.ssh_catalog.get(name)
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str):
+            return entry["id"]
+        reverse = {tool: action for action, tool in ACTION_TOOLS.items()}
+        if name in reverse:
+            return reverse[name]
+        return name.removeprefix("ssh_diagnose_")
+
+    def collectable_actions(self):
+        """Fixed actions an ssh_collect call may bundle for this token."""
+        entry = self.ssh_catalog.get("ssh_collect")
+        choices = None
+        if isinstance(entry, dict):
+            for param in entry.get("params") or []:
+                if isinstance(param, dict) and param.get("name") == "actions":
+                    choices = param.get("choices")
+        allowed = set(choices) if isinstance(choices, list) else set(COLLECTABLE)
+        if self.ssh_catalog:
+            granted = {
+                entry["id"]
+                for entry in self.ssh_catalog.values()
+                if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+            }
+            allowed &= granted
+        return allowed
+
+    def unauthorized_tools(self):
+        return sorted(self.hidden_ssh_tools)
+
+    def note_device(self, host_id, row):
+        """Record the verified Zabbix host for the report, from a prefetch host_get."""
+        if not isinstance(row, dict) or str(row.get("hostid", "")) != str(host_id):
+            return
+        self.target_metadata = {
+            **self.target_metadata,
+            "host_id": str(host_id),
+            "host_name": row.get("name")
+            or row.get("host")
+            or self.target_metadata.get("host_name"),
+            "device_type": zabbix.infer_device(row),
         }
 
     async def definitions(self, provider, query=""):

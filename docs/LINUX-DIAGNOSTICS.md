@@ -10,7 +10,7 @@
 
 “验证连接”会实际握手并检查 `ssh_resolve_host` 工具；缺少时提示升级。该检查不能代替远端版本确认，也不能证明目标主机可达。应同时核对 SSH MCP 自身展示的运行版本及部署的发行记录；实际诊断还会验证主机关联、授权与 `expected_revision`。
 
-诊断类型（CPU、内存、磁盘、IO、服务、网络、系统、不可达、瓶颈、日志）只用于任务分类；采集哪些动作由 Skill 决定。服务与日志需要合法服务名。IP 连接与流量等其它能力在独立 SSH MCP 使用；平台不复制其管理与执行实现。
+诊断类型（CPU、内存、磁盘、IO、服务、Nginx/Web、Java/JVM、网络、系统、不可达、瓶颈、日志）只用于任务分类；采集哪些动作由 Skill 决定。服务与日志需要合法服务名。IP 连接与流量等其它能力在独立 SSH MCP 使用；平台不复制其管理与执行实现。
 
 飞书或 Web 问答可直接写“看下 198.51.100.21 这台机器 /data 目录下的空间占用率，列出 5 层”。平台先通过 `hostinterface_get` 按接口 IP 精确查询，取得 Host ID，再用 `host_get(hostids)` 读取主机组、标签、OS；不再向 `host_get` 传入不被 initMAX 接受的 `filter.ip`。无对应接口时可按完整可见名称精确核验，只有唯一精确匹配并确认为 Linux 才进入 SSH 关联。也支持明确的 `Host ID：11600`。多目标、近似匹配、重复 IP、类型未知或 SSH 映射失败时不猜测目标。主机信息写入报告，避免问答报告错误显示“未关联”。
 
@@ -21,3 +21,26 @@ SSH 实时证据按 Skill 指引采集，受授权、次数与时间预算限制
 Windows、网络设备及 VMware 保留监控分析，不发送 Linux 诊断。没有实时证据时报告明确说明不足。
 
 报告中的 `logs.read` 控制查看日志正文，不是 SSH 工具执行权限。日志默认隐藏；有权限时点击“读取日志证据”。隐藏时仍显示安全的预算/授权失败分类。SSH 客户端动作授权与目标 Linux 日志权限在独立 SSH MCP 管理。
+
+## v1.2 新增 SSH 工具与设备类型路径
+
+SSH MCP v0.6.0 新增以下只读工具。每个工具对应一个动作，平台客户端令牌须在 SSH MCP 控制台获授该动作；未授权的工具不会进入模型可用目录，连接管理 → 诊断工具的注册表会标为“未授权”，报告“证据来源与能力”也会列出。
+
+| 工具 | 用途 | 说明 |
+| --- | --- | --- |
+| `ssh_diagnose_nginx` | Nginx 配置、日志路径、进程/端口/systemd 状态，近期 error.log 级别分布与上游超时、连接失败等线索 | 日志类 |
+| `ssh_diagnose_nginx_access` | 远端聚合访问日志：状态码分布，错误请求 TOP URL/IP/UA，每分钟趋势，响应时间统计 | 日志类；只读文件尾部有限字节，可选 path、status、keyword |
+| `ssh_diagnose_syslog` | 按时间窗口读系统日志（优先 journalctl，回退 messages/syslog 等），按级别、单元计数并给出代表行 | 日志类 |
+| `ssh_diagnose_java` | 盘点 Java 进程：PID、内存、线程、JAR/主类、堆参数、日志位置 | 命令行参数自动脱敏 |
+| `ssh_diagnose_jvm` | 对指定 PID 执行有界 jcmd/jstat 探针（堆、GC） | 需要 pid；中等开销，高峰期谨慎 |
+| `ssh_diagnose_service_detail` | 指定 systemd 服务的状态、退出码、重启记录、端口与近期日志 | 需要 service |
+| `ssh_diagnose_service_map` | 监听端口 → 进程 → systemd 单元或容器的映射 | |
+| `ssh_collect` | 一次 SSH 会话内顺序执行 1–6 个固定诊断 | 每个步骤分别校验授权 |
+
+日志、命令行类工具（目录中 `sensitive` 为 true，或名称属于日志类）的证据正文同样需要 `logs.read` 才能查看。连接管理 → 诊断工具读取的是实时目录（缓存 60 秒，可点“刷新目录”），显示每个工具的参数（`*` 为必填）、风险等级和授权状态；有配置权限的管理员可用“诊断测试”对一台监控主机调用一次 `ssh_test_connection` 或无需额外参数的 `ssh_diagnose_*` 工具，只传 host_id 与 revision，不创建诊断任务，操作记入审计。
+
+设备类型决定诊断路径：
+
+- Linux 主机，SSH MCP 可用且 Host ID 映射就绪：Zabbix + SSH 联合诊断。
+- Windows、网络设备、VMware 等非 Linux 主机：仅 Zabbix，不发送 SSH 诊断。
+- Linux 主机但 SSH MCP 未启用、不可达、映射未就绪或缺少授权：降级为仅 Zabbix，原因写入报告“证据来源与能力”面板（SSH MCP 状态、原因与错误码），不会把缺失的实时证据当作正常。

@@ -3,8 +3,19 @@
 import os
 import tempfile
 from cryptography.fernet import Fernet
+import pytest
 
 os.environ.setdefault("APP_ENCRYPTION_KEY", Fernet.generate_key().decode())
 os.environ.setdefault("ADMIN_API_TOKEN", "test-admin")
 os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="zabbix-ai-ops-test-"))
 os.environ["ALLOW_LEGACY_ADMIN_TOKEN"] = "true"
+
+
+@pytest.fixture(autouse=True)
+def _fresh_mcp_catalogs():
+    """Each test fakes its own MCP servers; never reuse another test's catalog."""
+    from app import skill_mcp
+
+    skill_mcp.clear_catalog_cache()
+    yield
+    skill_mcp.clear_catalog_cache()

@@ -114,14 +114,18 @@ async def execute(
             question,
             context,
             return_usage=True,
+            actor=sender_open_id or "feishu",
             **({"event": verified_event} if verified_event else {}),
         )
         from .worker import in_feishu, report_url
         from .orchestrator import tasks
 
         task = tasks.get(usage.get("task_id")) if usage.get("task_id") else None
-        partial = bool(task and task["status"] == "partial")
-        title = "AI 分析结果 · 部分完成" if partial else "AI 分析完成"
+        state = (task or {}).get("status")
+        title, color = {
+            "partial": ("AI 分析结果 · 部分完成", "orange"),
+            "failed": ("AI 分析未完成", "red"),
+        }.get(state, ("AI 分析完成", "green"))
         report = (task or {}).get("report") or {}
         display_result = report.get("answer") or result
         if report.get("limitations"):
@@ -134,12 +138,16 @@ async def execute(
         if url:
             display_result += "\n\n[查看完整诊断报告](" + in_feishu(url) + ")"
         display_result += "\n\n---\n" + format_usage(usage)
-        record_ai_question("feishu", message_id, question, "success", token_usage=usage)
+        record_ai_question(
+            "feishu",
+            message_id,
+            question,
+            "failed" if state == "failed" else "success",
+            token_usage=usage,
+        )
         if progress_id:
             try:
-                await update_card(
-                    progress_id, title, display_result, "orange" if partial else "green"
-                )
+                await update_card(progress_id, title, display_result, color)
                 remember(
                     chat_id,
                     message_id,
@@ -153,9 +161,7 @@ async def execute(
                 return
             except Exception:
                 log.exception("FEISHU_CARD_UPDATE_FAILED message_id=%s", message_id)
-        fallback_id = await reply_card(
-            message_id, title, display_result, "orange" if partial else "green"
-        )
+        fallback_id = await reply_card(message_id, title, display_result, color)
         remember(
             chat_id,
             message_id,

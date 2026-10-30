@@ -3,8 +3,14 @@ from app.orchestrator.budgets import PROFILES
 
 
 def test_default_standard_profile():
-    assert PROFILES["standard"]["rounds"] == 4
-    assert PROFILES["standard"]["calls"] == 12
+    # v1.2: prefetch (trigger items, events, history, baseline, SSH) counts
+    # against `calls`, and the model keeps `follow_up_calls` after it.
+    assert PROFILES["standard"]["rounds"] == 5
+    assert PROFILES["standard"]["calls"] == 16
+    assert PROFILES["standard"]["seconds"] == 180
+    for name in ("quick", "standard", "deep"):
+        limits = PROFILES[name]
+        assert 0 < limits["follow_up_calls"] < limits["calls"]
     assert (
         PROFILES["quick"]["calls"]
         < PROFILES["standard"]["calls"]

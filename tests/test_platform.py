@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 from app import main, feishu_auth, diagnostic_worker
 from app.orchestrator import tasks
+from app.orchestrator.budgets import PROFILES
 
 
 @pytest.fixture(autouse=True)
@@ -141,7 +142,8 @@ def test_hidden_kernel_error_retains_budget_reason_without_exposing_raw_logs():
     assert payload["restricted"] and "采集预算不足" in payload["failure_reason"]
     assert "不代表工具调用被拒绝" in payload["message"]
     assert "sensitive-kernel-content" not in json.dumps(data)
-    assert data["budget"]["limits"]["calls"] == 12
+    assert data["budget"]["limits"]["calls"] == PROFILES["standard"]["calls"]
+    assert data["budget"]["limits_hit"] == []
 
 
 def test_qa_report_exposes_verified_host_and_original_budget_snapshot():
@@ -164,7 +166,8 @@ def test_qa_report_exposes_verified_host_and_original_budget_snapshot():
         data["alert"]["host_id"] == "11600"
         and data["alert"]["host_name"] == "198.51.100.21"
     )
-    assert data["budget"]["limits"]["calls"] == 12
+    # The snapshot saved at creation, not the later override of 24.
+    assert data["budget"]["limits"]["calls"] == PROFILES["standard"]["calls"] != 24
 
 
 def test_cancellation_and_retry_create_independent_trace(monkeypatch):

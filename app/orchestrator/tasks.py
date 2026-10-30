@@ -244,8 +244,22 @@ def evidence(task_id, provider, tool, payload, duration_ms=0):
 
 
 def evidence_page(task_id, include_logs=False):
+    import re
     from ..main import connection
 
+    # Records before v1.2 carry no _meta; their log tools are known by name.
+    legacy = {
+        "logs",
+        "kernel",
+        "ssh_diagnose_logs",
+        "ssh_diagnose_kernel",
+        "ssh_diagnose_system_errors",
+        "ssh_diagnose_oom",
+        "ssh_triage",
+    }
+    log_like = re.compile(
+        r"(logs?|journal|syslog|kernel|errors|oom|nginx|java|jvm|service_detail|triage|collect)"
+    )
     with connection() as db:
         cur = db.execute(
             "SELECT * FROM diagnostic_evidence WHERE task_id=? ORDER BY id LIMIT 200",
@@ -254,19 +268,14 @@ def evidence_page(task_id, include_logs=False):
         rows = [row_dict(row, cur) for row in cur.fetchall()]
     for row in rows:
         row["payload"] = decode(row["payload"])
-        if (
-            row["tool"]
-            in {
-                "logs",
-                "kernel",
-                "ssh_diagnose_logs",
-                "ssh_diagnose_kernel",
-                "ssh_diagnose_system_errors",
-                "ssh_diagnose_oom",
-                "ssh_triage",
-            }
-            and not include_logs
-        ):
+        meta = row["payload"].get("_meta") if isinstance(row["payload"], dict) else None
+        meta = meta if isinstance(meta, dict) else {}
+        sensitive = (
+            meta.get("sensitive") is True
+            or row["tool"] in legacy
+            or bool(log_like.search(str(row["tool"] or "")))
+        )
+        if sensitive and not include_logs:
             payload = row["payload"]
             error = str(payload.get("error") or "").casefold()
             reason = None
@@ -284,6 +293,8 @@ def evidence_page(task_id, include_logs=False):
                 "status": row["status"],
                 "message": "日志正文默认隐藏；具有 logs.read 权限可点击“读取日志证据”查看。此提示不代表工具调用被拒绝。",
                 **({"failure_reason": reason} if reason else {}),
+                # Call metadata (kind, redacted arguments, evidence id) is not log text.
+                **({"_meta": meta} if meta else {}),
             }
     return rows
 
