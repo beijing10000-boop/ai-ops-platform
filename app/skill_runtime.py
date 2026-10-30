@@ -78,6 +78,7 @@ ALERT_WINDOW, BASELINE_DAYS, HISTORY_ROWS, HISTORY_PAGES = 1800, 7, 1000, 3
 # Log-style SSH tools get the alert moment ±15 min as their window.
 LOG_WINDOW = 900
 TRANSIENT_CODES = {"busy", "timeout"}
+CAPABILITY_NAME = re.compile(r"[A-Za-z0-9_.-]{1,40}")
 # ssh_collect steps that need the systemd unit (SSH MCP rejects them without).
 SERVICE_STEPS = {"service", "logs"}
 SENSITIVE_TOOL = re.compile(
@@ -238,6 +239,64 @@ def fill_arguments(schema, base, *, clock, now, service=None):
     if missing:
         return None
     return args
+
+
+def host_limits(outcome):
+    """[(step, capability)] when a missing host prerequisite alone left an SSH
+    result incomplete, else None.
+
+    SSH MCP stops a check whose prerequisite the host lacks (PSI disabled in
+    the kernel, nginx not installed, no journal permission) with
+    CAPABILITY_MISSING:<name> and exit code 69; its collection_coverage
+    finding lists the names. That is a property of the host, reported as a
+    capability. Timeouts, truncation, other exit codes, fatal stderr and steps
+    that never reported back stay evidence gaps.
+    """
+    data = outcome.get("data") if isinstance(outcome, dict) else None
+    if not isinstance(data, dict) or data.get("status") != "partial":
+        return None
+    if data.get("timed_out") or data.get("truncated"):
+        return None
+    if data.get("incomplete_reason") not in (None, "exit_code"):
+        return None
+    summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
+    steps = summary.get("steps")
+    parts = (
+        [
+            step
+            for step in steps
+            if not isinstance(step, dict) or step.get("status") != "success"
+        ]
+        if isinstance(steps, list)
+        else [data]
+    )
+    limits = []
+    for part in parts:
+        if (
+            not isinstance(part, dict)
+            or part.get("timed_out")
+            or part.get("truncated")
+            or part.get("exit_code", 69) not in (0, 69)
+        ):
+            return None
+        missing = next(
+            (
+                finding.get("value")
+                for finding in part.get("findings") or []
+                if isinstance(finding, dict)
+                and finding.get("metric") == "collection_coverage"
+                and isinstance(finding.get("value"), list)
+            ),
+            None,
+        )
+        if not missing or not all(
+            isinstance(name, str) and CAPABILITY_NAME.fullmatch(name)
+            for name in missing
+        ):
+            return None
+        step = str(part.get("action") or "") if isinstance(steps, list) else ""
+        limits.extend((step, name) for name in missing)
+    return limits or None
 
 
 def transient(outcome):
@@ -470,7 +529,14 @@ async def run(
         },
         "unauthorized_tools": [],
     }
-    coverage = {"planned": [], "collected": [], "failed": [], "skipped": []}
+    coverage = {
+        "planned": [],
+        "collected": [],
+        "failed": [],
+        "skipped": [],
+        # Checks the host itself cannot run (PSI off, no nginx, no journal access).
+        "unavailable": [],
+    }
     used = {"zabbix_mcp": False, "ssh_mcp": False}
     rounds_limit, extensions_left = limits["rounds"], limits["extension_rounds"]
 
@@ -555,6 +621,32 @@ async def run(
         if outcome.get("budget"):
             if str(outcome.get("error")) not in limits_hit:
                 limits_hit.append(str(outcome.get("error")))
+            return
+        limits = host_limits(outcome)
+        if limits:
+            # A prerequisite the host lacks: reported under 能力说明, not as
+            # evidence this task failed to collect (re-running cannot fix it).
+            names = list(dict.fromkeys(name for _, name in limits))
+            coverage["unavailable"].append(
+                {"tool": str(label), "reason": "主机不支持：" + "、".join(names)}
+            )
+            known = capabilities.setdefault("host_limits", [])
+            for step, name in limits:
+                entry = {
+                    "tool": str(label) + ("/" + step if step else ""),
+                    "missing": name,
+                }
+                if entry not in known:
+                    known.append(entry)
+            steps = ((outcome.get("data") or {}).get("summary") or {}).get("steps")
+            if (
+                isinstance(steps, list)
+                and any(
+                    isinstance(s, dict) and s.get("status") == "success" for s in steps
+                )
+                and str(label) not in coverage["collected"]
+            ):
+                coverage["collected"].append(str(label))
             return
         if (
             outcome.get("error")
@@ -1649,10 +1741,14 @@ async def run(
                             >= max(45.0, 2 * longest_model + longest_tools)
                         ):
                             nudges += 1
+                            unsupported = {
+                                item["tool"] for item in coverage["unavailable"]
+                            }
                             missing = [
                                 item
                                 for item in coverage["planned"]
                                 if item not in coverage["collected"]
+                                and item not in unsupported
                             ]
                             conversation.append(
                                 {

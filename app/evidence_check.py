@@ -285,6 +285,19 @@ SSH_STATUS = {
     "unreachable": "连接失败",
     "unauthorized": "未授权",
 }
+# CAPABILITY_MISSING names SSH MCP reports for a host; others read "缺少 <name>".
+HOST_LIMIT_LABELS = {
+    "kernel-psi": "内核未启用 PSI（Rocky/RHEL 9 需启动参数 psi=1）",
+    "journal-permission": "诊断账号无权读取完整 journal（需 root 或 systemd-journal/adm 组）",
+    "journalctl": "主机没有 journalctl",
+    "log-permission": "诊断账号无权读取日志文件",
+    "log-files": "未找到可读的系统日志文件",
+    "nginx": "主机未安装或未找到 Nginx",
+    "jcmd": "主机缺少 jcmd",
+    "jstat": "主机缺少 jstat",
+    "runuser": "主机缺少 runuser，无法切换到 JVM 用户",
+    "docker-or-podman": "主机未安装 Docker 或 Podman",
+}
 PATH_LABELS = {
     "zabbix+ssh": "Zabbix 历史 + SSH 实时联合分析",
     "zabbix-only": "仅 Zabbix 监控数据",
@@ -382,6 +395,27 @@ def scope(index, target, capabilities=None):
         notes.append(
             "令牌未授权的 SSH 工具："
             + "、".join(capabilities["unauthorized_tools"][:8])
+        )
+    limits = [
+        item
+        for item in capabilities.get("host_limits") or []
+        if isinstance(item, dict) and item.get("missing")
+    ]
+    if limits:
+        names = list(dict.fromkeys(str(item["missing"]) for item in limits))
+        notes.append(
+            "主机不支持的采集项："
+            + "；".join(
+                HOST_LIMIT_LABELS.get(name, "缺少 " + name)
+                + "（"
+                + "、".join(
+                    dict.fromkeys(
+                        str(item["tool"]) for item in limits if item["missing"] == name
+                    )
+                )
+                + "）"
+                for name in names[:8]
+            )
         )
     if notes:
         lines.append("- 能力说明：" + "；".join(notes))

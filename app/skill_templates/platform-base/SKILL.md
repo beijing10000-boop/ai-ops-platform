@@ -27,7 +27,7 @@ prefetch:
 - 不凭一个指标或一个快照下结论；根因结论至少需要两类证据相互印证。只有一类证据时写成“高可信推断”或“待验证假设”。
 - 必须对比告警前后与基线：历史结果中的 `alert_split`（before / after / at_alert）与 7 天趋势；`signals` 里的 `alert_vs_baseline`、`rise_at_alert`、`elevated_before_alert`、`recurrence` 已算好，可直接引用。常态性偏高时结论指向容量或阈值是否合理，而不是临时故障。
 - SSH 是采集时刻的快照，不能证明历史原因；采集时间与告警时间相距较远时只说明“现在”的状态。
-- 工具失败（`error`、`status` 为 failed / partial、带 `error_code`）时换同类工具或另一数据源补证（SSH 失败用 Zabbix 对应监控项；journalctl 无权限用文件日志）；失败或空结果不能写成“正常”或“无异常”。`coverage.failed` 与 `coverage.skipped` 中的项目要么补查，要么在结论里写明未覆盖。
+- 工具失败（`error`、`status` 为 failed / partial、带 `error_code`）时换同类工具或另一数据源补证（SSH 失败用 Zabbix 对应监控项；journalctl 无权限用文件日志）；失败或空结果不能写成“正常”或“无异常”。`coverage.failed` 与 `coverage.skipped` 中的项目要么补查，要么在结论里写明未覆盖。`coverage.unavailable` 与 `capabilities.host_limits` 是主机本身不具备的能力（如内核未启用 PSI、未安装 Nginx、诊断账号无 journal 权限），不要重复调用同一工具，改用其它证据（PSI 缺失时看 vmstat 的 r/b、D 状态进程与 iowait），并说明它对结论的影响。
 - 已有 3–5 项相互印证的关键证据足以支撑结论时就总结，不为用满预算继续采集；有相互矛盾的证据时继续调查。
 
 ## 按设备类型选择数据源

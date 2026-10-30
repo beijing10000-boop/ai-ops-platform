@@ -81,6 +81,7 @@ prefetch:
 - zabbix_items 只在任务有 Zabbix Host ID 时执行；写 `"*"` 表示不按 key 过滤、取该主机的监控项（最多 60 个，含最近采集时间），平台据此在 signals 里给出 `collection_freshness`。
 - 预采集计入采集次数，但模型始终保留 `follow_up_calls` 次补查（AI 配置 → 分析预算；保底次数不超过配置的采集次数）。预采集已解析的 SSH 目标、已取得的证据被模型再次请求时直接复用，不再调用。
 - SSH 解析失败、设备不适用、SSH MCP 未启用或连接失败时，不视为诊断缺口，而是写入 `capabilities` 与报告“诊断范围 → 能力说明”；令牌未授权的工具写入 `capabilities.unauthorized_tools`。
+- 主机本身不具备的采集能力（SSH MCP 以 `CAPABILITY_MISSING` 加退出码 69 标明，例如内核未启用 PSI、未安装 Nginx、诊断账号无 journal 权限）同样不算诊断缺口：写入 `coverage.unavailable` 与 `capabilities.host_limits`，报告“能力说明”列出“主机不支持的采集项”。超时、截断、其他退出码与没有返回的步骤仍记入 `coverage.failed`，任务为“部分完成”。
 
 名称用 1–64 位小写字母、数字、连字符，platform-base 由平台保留。可创建多个 Skill，同一场景按优先级从高到低提供给模型；各 Skill 应说明自己的适用范围，减少冲突。启停、修改适用范围或正文都会产生新版本；修改参考资料时重新导入 ZIP。
 

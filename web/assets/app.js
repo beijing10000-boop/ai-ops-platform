@@ -573,12 +573,12 @@ function coveragePanel(coverage) {
     return [...counts].map(([tool, n]) => `<span class="tag mono">${E(tool)}${n > 1 ? " ×" + n : ""}</span>`).join(" ");
   };
   const reasoned = items => items.map(item => `<div><span class="mono">${E(name(item))}</span>${item?.reason ? `<small>${E(item.reason)}</small>` : ""}</div>`).join("");
-  const rows = [["计划采集", list("planned"), counted], ["已采集", list("collected"), counted], ["失败", list("failed"), reasoned], ["跳过", list("skipped"), reasoned]];
+  const rows = [["计划采集", list("planned"), counted], ["已采集", list("collected"), counted], ["失败", list("failed"), reasoned], ["跳过", list("skipped"), reasoned], ["主机不支持", list("unavailable"), reasoned]];
   if (rows.every(([, items]) => !items.length)) return "";
   return panel(
     "证据覆盖",
     table(["类别", "采集项"], rows.map(([label, items, render]) => `<tr><td>${label}<small>${items.length} 项</small></td><td>${items.length ? render(items) : '<span class="muted">—</span>'}</td></tr>`).join("")),
-    "按平台记录的计划、已采集、失败与跳过项；失败和跳过附原因。",
+    "按平台记录的计划、已采集、失败、跳过与主机不支持的项，并附原因。主机不支持（如内核未启用 PSI、未安装 Nginx）只写进能力说明，不算诊断不足。",
   );
 }
 function argumentSummary(args) {
