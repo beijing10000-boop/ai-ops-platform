@@ -740,6 +740,9 @@ const configGroups = {
 function budgetFields(values, options) {
   let custom = {};
   try { custom = JSON.parse(values.ai_profile_budgets || "{}"); } catch {}
+  // Saving starts from the stored budgets so keys without an input here
+  // (follow_up_calls, extension_rounds — set through the API) are kept.
+  state.storedBudgets = custom && typeof custom === "object" && !Array.isArray(custom) ? custom : {};
   const names = {rounds: "最大轮次", calls: "采集次数", per_round: "每轮调用", result_chars: "每次结果字符", seconds: "总时间（秒）", tokens: "Token 阈值"};
   return `<h3>分析预算</h3><p class="muted small">各项预算无固定数值上限，仍保留整数和最小值校验。任务按保存的预算执行；修改后用于新任务或重试任务。SSH 主机解析也计入采集次数。</p>` + table(["分析模式", ...Object.values(names)], Object.entries(options.profiles).map(([profile, limits]) => `<tr><td>${labels[profile]}</td>${Object.keys(names).map(key => `<td><input class="budget-input" type="number" name="budget_${profile}_${key}" aria-label="${labels[profile]} ${names[key]}" min="${options.ranges[key][0]}" ${options.ranges[key][1] == null ? "" : `max="${options.ranges[key][1]}"`} step="1" required value="${E(custom[profile]?.[key] ?? limits[key])}"></td>`).join("")}</tr>`).join(""));
 }
@@ -759,7 +762,7 @@ function formValues(form) {
   }
   if (form.classList.contains("settings-form")) {
     if (form.dataset.group === "ai") {
-      const budgets = {};
+      const budgets = structuredClone(state.storedBudgets || {});
       for (const [key, value] of Object.entries(data)) if (key.startsWith("budget_")) {
         const [, profile, ...parts] = key.split("_");
         (budgets[profile] ||= {})[parts.join("_")] = Number(value); delete data[key];
