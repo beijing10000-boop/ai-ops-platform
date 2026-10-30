@@ -604,17 +604,20 @@ def update_settings(body: SettingsUpdate, identity=Depends(require_admin)):
 def record_ai_question(
     source, request_id, question, status="pending", error_type=None, token_usage=None
 ):
+    # rejected: refused before analysis (no permission, reply still being
+    # analyzed, chain too deep); final, but not an analysis failure.
     if source not in ("feishu", "web") or status not in (
         "pending",
         "running",
         "success",
         "failed",
+        "rejected",
     ):
         raise ValueError("invalid question metrics")
     with connection() as db:
         db.execute(
             """INSERT INTO ai_questions (source,request_id,question,status,error_type,completed_at)
-            VALUES (?,?,?,?,?,CASE WHEN ? IN ('success','failed') THEN CURRENT_TIMESTAMP ELSE NULL END)
+            VALUES (?,?,?,?,?,CASE WHEN ? IN ('success','failed','rejected') THEN CURRENT_TIMESTAMP ELSE NULL END)
             ON CONFLICT(source,request_id) DO UPDATE SET
             status=excluded.status, error_type=excluded.error_type,
             completed_at=excluded.completed_at""",
@@ -668,6 +671,7 @@ def qa_stats():
         "running": d.get("running", 0),
         "success": d.get("success", 0),
         "failed": d.get("failed", 0),
+        "rejected": d.get("rejected", 0),
     }
 
 
