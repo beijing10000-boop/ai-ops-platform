@@ -1601,6 +1601,95 @@ def test_model_calls_get_evidence_ids_and_cache_hits_keep_theirs(rig):
     assert "- E2 SSH MCP / ssh_diagnose_cpu" in report["answer"]
 
 
+def test_feishu_qa_reply_has_no_evidence_ids_while_the_web_report_keeps_them(
+    rig, monkeypatch
+):
+    from app import qa_worker
+
+    install(providers=["ssh_mcp"])
+    create = AsyncMock(
+        side_effect=[
+            response(Call("list_mcp_tools", {"provider": "ssh_mcp"})),
+            response(
+                Call(
+                    "call_mcp_tool",
+                    {
+                        "provider": "ssh_mcp",
+                        "name": "ssh_resolve_target",
+                        "arguments": {"address": "198.51.100.21"},
+                    },
+                )
+            ),
+            response(
+                Call(
+                    "call_mcp_tool",
+                    {
+                        "provider": "ssh_mcp",
+                        "name": "ssh_diagnose_cpu",
+                        "arguments": {"host_id": 7},
+                    },
+                )
+            ),
+            response(text="已确认事实：\n- CPU 负载 0.5（E2），目标见 E1。"),
+        ]
+    )
+    ran, cards = {}, []
+
+    async def ask(question, context, return_usage=False, actor="system", **kwargs):
+        ran["result"] = await mcp_runtime.run(
+            "中文报告",
+            question,
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            return_usage=True,
+        )
+        return ran["result"]
+
+    async def reply_card(message_id, title, body, template="blue"):
+        return "om_progress"
+
+    async def update_card(message_id, title, body, template="green"):
+        cards.append(body)
+
+    for name, value in {
+        "ask": ask,
+        "reply_card": reply_card,
+        "update_card": update_card,
+        "record_ai_question": lambda *args, **kwargs: None,
+        "recall": lambda *args: None,
+        "is_pending": lambda *args: False,
+        "mark_pending": lambda *args: None,
+        "clear_pending": lambda *args: None,
+        "remember": lambda *args, **kwargs: None,
+    }.items():
+        monkeypatch.setattr(qa_worker, name, value)
+    asyncio.run(qa_worker.execute("oc_group", "查询 198.51.100.21 现在 CPU", "om_q"))
+    body = cards[0]
+    assert "已确认事实：\n- CPU 负载 0.5，目标见证据。" in body
+    assert not re.search(r"(?<![A-Za-z0-9])E\d", body)
+    assert "证据核对" not in body and "依据可信度" not in body
+    # The scope stays, without the id range that points at the Web evidence list.
+    assert "诊断范围（平台生成）\n- 目标：linux-live" in body
+    assert "- 证据来源：SSH MCP 2 条\n" in body
+    report = tasks.get(ran["result"][1]["task_id"])["report"]
+    assert "CPU 负载 0.5（E2）" in report["answer"]
+    assert (
+        "- 证据来源：SSH MCP 2 条（E1–E2，详见证据与工具执行记录）" in report["answer"]
+    )
+    assert "证据核对\n依据可信度" in report["answer"]
+
+
+def test_report_lists_which_snapshot_skills_the_model_received():
+    assert skills.applied_names(None) is None  # queued or running
+    flagged = [
+        {"name": "platform-base", "applied": True},
+        {"name": "platform-nginx", "applied": False},
+    ]
+    assert skills.applied_names({"skills": flagged}) == {"platform-base"}
+    # Reports before v1.2.0 carry no flag: every Skill was sent then.
+    old = [{"name": "platform-base"}, {"name": "ops-local"}]
+    assert skills.applied_names({"skills": old}) == {"platform-base", "ops-local"}
+
+
 def test_zabbix_schemas_are_compact_but_validation_is_unchanged():
     schema = zabbix.input_schema("item_get")
     assert len(json.dumps(schema, ensure_ascii=False)) < 2000
@@ -1926,7 +2015,7 @@ def test_remaining_time_that_cannot_fit_another_round_forces_the_summary(
     requests = []
 
     async def create(**kwargs):
-        requests.append(kwargs)
+        requests.append({**kwargs, "input": list(kwargs["input"])})
         clock["now"] += 40  # a thinking model: 40 s per round of a 110 s budget
         return replies[len(requests) - 1]
 
@@ -1940,6 +2029,10 @@ def test_remaining_time_that_cannot_fit_another_round_forces_the_summary(
     )
     # 70 s cannot hold another 40 s round and a summary: summarize now.
     assert len(requests) == 2 and requests[1]["tool_choice"] == "none"
+    # Gateways that ignore tool_choice still read the summary-round notice.
+    summary_turn = {"role": "user", "content": skill_runtime.SUMMARY_TURN}
+    assert requests[1]["input"][-1] == summary_turn
+    assert summary_turn not in requests[0]["input"]
     spent = tasks.get(usage["task_id"])["report"]["budget"]
     assert spent["limits_hit"] == [
         "剩余 70 秒不足以再采集一轮并总结（最长一轮 40 秒），本轮只总结"

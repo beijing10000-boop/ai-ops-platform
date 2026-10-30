@@ -314,9 +314,12 @@ DEVICE_LABELS = {
 }
 
 
-def scope(index, target, capabilities=None):
+def scope(index, target, capabilities=None, id_range=True):
     """Target, collection time, queried windows, sources and capabilities, rendered
-    by the platform so the final model round does not have to restate them."""
+    by the platform so the final model round does not have to restate them.
+
+    `id_range=False` leaves out the evidence id range, for chat replies that
+    have no evidence list to point at."""
     capabilities = capabilities or {}
     if not index and not capabilities:
         return ""
@@ -377,7 +380,11 @@ def scope(index, target, capabilities=None):
                 f"{label} {ok} 条" + (f"（另 {bad} 条失败或不完整）" if bad else "")
                 for label, (ok, bad) in counts.items()
             )
-            + f"（{first}{'–' + last if last != first else ''}，详见证据与工具执行记录）"
+            + (
+                f"（{first}{'–' + last if last != first else ''}，详见证据与工具执行记录）"
+                if id_range
+                else ""
+            )
         )
     notes = []
     for provider in ("zabbix_mcp", "ssh_mcp"):

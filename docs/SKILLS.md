@@ -17,7 +17,7 @@ Skill 是**唯一的 AI 诊断策略来源**：数据源选择、工具顺序、
   | platform-service | 类型：service、logs、system | systemd 状态、退出原因、重启记录、端口与进程映射 |
   | platform-syslog | 类型：logs、system、memory、io、unreachable；设备：Linux | journald / /var/log 的 OOM、I/O、链路、内核、登录失败 |
 
-  任务创建时保存所有已启用 Skill 的快照；预采集判定设备类型（Zabbix 标签、资产 OS、关联模板、主机组、接口类型，SSH 解析结果可修正）与告警类型（告警文本 + 触发器监控项 key）后，平台只把适用的 Skill 交给模型，报告的“本次加载的 Skill”标出哪些已应用。
+  任务创建时保存所有已启用 Skill 的快照；预采集判定设备类型（Zabbix 标签、资产 OS、关联模板、主机组、接口类型，SSH 解析结果可修正）与告警类型（告警文本 + 触发器监控项 key）后，平台只把适用的 Skill 交给模型。报告页的“本次提供给模型的 Skill”只列出这些 Skill，不适用的折叠在“本次不适用的 Skill”中（未发送给模型，不消耗 Token）；详细报告同样逐个标注。
 - **自定义 Skill** 导入时选择与基础 Skill 的关系：
   - **补充**（推荐）：与基础 Skill 一起加载，只写本环境特有的规则；平台升级时基础规则自动更新，不再需要手工合并模板。
   - **替代**：该场景不再加载基础 Skill，自定义 Skill 需自行维护全部规则。v1.0 之前导入的 Skill 升级后默认为“替代”，行为与升级前完全一致。

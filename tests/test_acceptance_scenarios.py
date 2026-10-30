@@ -1039,6 +1039,17 @@ def test_windows_host_uses_zabbix_only_and_never_connects_ssh(monkeypatch):
     assert any("802" in q["itemids"] for q in histories)
     applied = summary_of(task)
     assert applied["platform-windows"] and not applied["platform-linux"]
+    # The task page and the detailed export show the same split of the snapshot.
+    from tests.test_platform import client_for
+
+    url = "/api/v1/platform/tasks/" + task["task_id"]
+    shown = client_for().get(url).json()["skills"]
+    assert {row["name"]: row["applied"] for row in shown} == applied
+    exported = client_for().get(url + "/detailed-report").text
+    assert exported.count("（已提供给模型）") == sum(applied.values())
+    assert exported.count("（本次不适用，未发送给模型）") == len(applied) - sum(
+        applied.values()
+    )
     assert task["status"] == "success"
     card = worker.card_summary(worker_info(task))
     assert "仅 Zabbix 监控数据（Windows 不做 SSH 诊断）" in card
