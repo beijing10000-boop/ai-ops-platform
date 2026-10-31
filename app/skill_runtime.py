@@ -88,6 +88,9 @@ SERVICE_STEPS = {"service", "logs"}
 # Keys that are constants or metadata: a 7-day trend of them says nothing.
 CONSTANT_KEYS = re.compile(r"^(system\.cpu\.num|system\.hw|system\.sw|agent\.version)")
 NON_LINUX = {"windows", "network", "vmware", "other"}
+# SSH states, set while resolving the task's own target, in which the model is
+# not offered SSH tools.
+SSH_CLOSED = {"unavailable", "not_ready", "not_applicable", "disabled"}
 
 
 @asynccontextmanager
@@ -619,7 +622,18 @@ async def run(
         evidence_index[ident]["text"] = safe(json.dumps(view, ensure_ascii=False))
         return view
 
+    def ssh_closed():
+        """The task's own target was checked against SSH MCP and cannot be
+        served (not registered, not ready, not Linux, SSH MCP disabled)."""
+        return bool(target) and capabilities["ssh_mcp"].get("status") in SSH_CLOSED
+
     def note_gap(label, outcome):
+        if outcome.get("ssh_closed"):
+            # Refused before any call: the reason is already in 能力说明.
+            coverage["skipped"].append(
+                {"tool": str(label), "reason": "目标主机的 SSH 实时诊断不可用，未调用"}
+            )
+            return
         if outcome.get("budget"):
             if str(outcome.get("error")) not in limits_hit:
                 limits_hit.append(str(outcome.get("error")))
@@ -1355,6 +1369,18 @@ async def run(
         if call.name not in {"list_mcp_tools", "call_mcp_tool"}:
             return args, {"error": "工具未授权"}, None
         provider = str(args.get("provider"))
+        if provider == "ssh_mcp" and ssh_closed():
+            reason = str(capabilities["ssh_mcp"].get("reason") or "")[:120]
+            return (
+                args,
+                {
+                    "error": "本任务目标主机的 SSH 实时诊断不可用"
+                    + (f"（{reason}）" if reason else "")
+                    + "，请只依据 Zabbix 数据分析",
+                    "ssh_closed": True,
+                },
+                None,
+            )
         signature = json.dumps([call.name, args], sort_keys=True)
         if call.name == "list_mcp_tools":
             wanted = (
@@ -1616,6 +1642,21 @@ async def run(
                     if applies(row, diagnostic_type, capabilities["device_type"])
                 ] or list(skills)
                 instructions = build_instructions(applied_skills)
+                if ssh_closed():
+                    # The target's SSH check already failed: the model works
+                    # from Zabbix alone instead of reaching the host another
+                    # way (it once tried the host's public IP).
+                    open_providers = [p for p in providers if p != "ssh_mcp"]
+                    tools[:] = [
+                        tool
+                        for tool in tools
+                        if open_providers
+                        or tool["name"] not in ("list_mcp_tools", "call_mcp_tool")
+                    ]
+                    for tool in tools:
+                        props = tool["parameters"]["properties"]
+                        if "provider" in props:
+                            props["provider"]["enum"] = open_providers
                 # Prefetch counts against `calls`, but the model keeps its
                 # follow-up allowance (never more than the configured calls).
                 reserve = min(limits["follow_up_calls"], configured_calls)

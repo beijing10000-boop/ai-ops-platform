@@ -1156,6 +1156,51 @@ def test_linux_host_without_ssh_asset_degrades_to_zabbix_and_says_why(monkeypatc
     assert "仅 Zabbix 监控数据（映射不存在" in card
 
 
+def test_model_gets_no_ssh_tools_once_the_target_has_no_ssh_asset(monkeypatch):
+    clock = alert_clock()
+    zbx = Zabbix(
+        LINUX_HOST, [item("201", "system.cpu.load[all,avg5]", 9.0)], [], [], {}, {}
+    )
+    ssh = SSH(
+        {},
+        resolve={
+            "status": "failed",
+            "error": "映射不存在或存在重复关联，请由管理员修正",
+            "error_code": "mapping_unresolved",
+        },
+    )
+    rig(monkeypatch, zbx, ssh)
+    # Seen in production (v1.3.0): the model then tried the host's public IP,
+    # SSH MCP refused it and the failed call turned the task partial.
+    by_ip = {
+        "provider": "ssh_mcp",
+        "name": "ssh_resolve_target",
+        "arguments": {"address": "203.0.113.7"},
+    }
+    model = Model(
+        lambda request: answer("", [Call("r1", "call_mcp_tool", by_ip)]),
+        lambda request: answer('{"cause": "仅凭 Zabbix"}'),
+    )
+    task, _ = run_alert(
+        event_for("Linux: Load average is too high", "71011", clock), model
+    )
+    enums = [
+        tool["parameters"]["properties"]["provider"]["enum"]
+        for tool in model.requests[0]["tools"]
+        if "provider" in tool["parameters"]["properties"]
+    ]
+    assert enums == [["zabbix_mcp"], ["zabbix_mcp"]]
+    assert "SSH 实时诊断不可用" in output_of(model.requests[1], "r1")["error"]
+    assert [name for name, _ in ssh_calls(ssh)] == ["ssh_resolve_host"]
+    assert task["status"] == "success"
+    assert task["report"]["coverage"]["skipped"] == [
+        {
+            "tool": "ssh_resolve_target",
+            "reason": "目标主机的 SSH 实时诊断不可用，未调用",
+        }
+    ]
+
+
 def test_disabled_ssh_mcp_is_reported_once_and_not_retried(monkeypatch):
     clock = alert_clock()
     zbx = Zabbix(

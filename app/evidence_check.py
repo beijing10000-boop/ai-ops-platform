@@ -123,14 +123,39 @@ def confidence(valid, invalid=()):
     return "中" if valid else "低"
 
 
-def _parse(answer):
+FENCED = re.compile(r"\x60\x60\x60(?:json)?\s*(.*?)\s*\x60\x60\x60", re.S | re.I)
+ANSWER_FIELDS = ("cause", "action", "analysis")
+
+
+def answer_object(answer):
+    """The model's structured answer as a dict, or None for a plain-text one.
+
+    The prompts ask for bare JSON. Models sometimes wrap it in a code fence or
+    put a heading before it ("## 诊断结果" + a fenced block); the object is then
+    taken from the fence, or from the first "{" to the last "}", and only when
+    it carries one of the answer fields, so prose quoting JSON stays prose.
+    """
+    text = str(answer or "").strip()
     try:
         parsed = json.loads(
-            re.sub(r"^\x60\x60\x60(?:json)?\s*|\s*\x60\x60\x60$", "", answer.strip())
+            re.sub(r"^\x60\x60\x60(?:json)?\s*|\s*\x60\x60\x60$", "", text)
         )
-    except (AttributeError, TypeError, ValueError):
-        return None
-    return parsed if isinstance(parsed, dict) else None
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict):
+        return parsed
+    candidates = [match.group(1) for match in FENCED.finditer(text)]
+    start, end = text.find("{"), text.rfind("}")
+    if 0 <= start < end:
+        candidates.append(text[start : end + 1])
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict) and any(key in parsed for key in ANSWER_FIELDS):
+            return parsed
+    return None
 
 
 def _check_facts(parsed, valid_ids):
@@ -188,7 +213,7 @@ def check(answer, index):
     `index` maps evidence ids to {"provider", "tool", "text", "status", "failed"}
     as the model saw them.
     """
-    parsed = _parse(answer)
+    parsed = answer_object(answer)
     if parsed is not None and isinstance(parsed.get("evidence"), list):
         valid, invalid = [], []
         for item in parsed["evidence"][:20]:

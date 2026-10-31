@@ -4,7 +4,7 @@ Original sanitized tool results are written to diagnostic_evidence unchanged.
 Only the model context receives a preview, never the authoritative report.
 """
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 import json
 from math import isfinite
@@ -47,6 +47,15 @@ SSH_LIST_KEYS = (
     "top_upstreams",
     "xx_flags",
 )
+# Inventories of objects (processes, units, sockets) whose rows may lose their
+# bulkiest fields before any row is dropped. Log and sample lists are not
+# here: their text is the evidence, so they lose rows instead.
+WIDE_ROW_LISTS = ("processes", "top_processes", "units", "listening", "listeners")
+# Never dropped from such rows: what identifies the object and, for a JVM,
+# what it runs and its heap limits.
+ROW_KEPT = {"pid", "name", "application", "unit", "comm", "port", "main", "heap"}
+# Rows at or below this average size are lean; past it rows are cut instead.
+ROW_CHARS = 160
 
 
 def _positive(value):
@@ -116,6 +125,72 @@ def _shrink_lists(value, keep):
     return value
 
 
+def _row_sizes(value, sizes):
+    """Characters per field over the rows of WIDE_ROW_LISTS ("" counts rows)."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in WIDE_ROW_LISTS and isinstance(item, list):
+                for row in item:
+                    if isinstance(row, dict):
+                        sizes[""] += 1
+                        for field, data in row.items():
+                            sizes[field] += len(field) + len(
+                                json.dumps(data, ensure_ascii=False)
+                            )
+            else:
+                _row_sizes(item, sizes)
+    elif isinstance(value, list):
+        for item in value:
+            _row_sizes(item, sizes)
+
+
+def _without_fields(value, fields):
+    """Copy of ``value`` whose WIDE_ROW_LISTS rows lack ``fields``."""
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if key in WIDE_ROW_LISTS and isinstance(item, list):
+                result[key] = [
+                    {k: v for k, v in row.items() if k not in fields}
+                    if isinstance(row, dict)
+                    else row
+                    for row in item
+                ]
+            else:
+                result[key] = _without_fields(item, fields)
+        return result
+    if isinstance(value, list):
+        return [_without_fields(x, fields) for x in value]
+    return value
+
+
+def _slim_rows(view, max_chars):
+    """Drop the bulkiest row fields, largest total first, until the view fits
+    or rows are lean, so wide inventories keep every row: a Java inventory's
+    command lines, log paths and -XX flags would otherwise leave room for one
+    process out of thirteen."""
+    sizes = Counter()
+    _row_sizes(view, sizes)
+    rows = sizes.pop("", 0)
+    remaining, dropped = sum(sizes.values()), []
+    for field, total in sizes.most_common():
+        if _fits(view, max_chars) or not rows or remaining / rows <= ROW_CHARS:
+            break
+        if field in ROW_KEPT:
+            continue
+        dropped.append(field)
+        remaining -= total
+        view = _without_fields(view, {field})
+    if dropped:
+        view = {
+            **view,
+            "fields_note": "为列出全部行，每行省略了字段："
+            + "、".join(dropped)
+            + "；完整内容在任务证据中",
+        }
+    return view
+
+
 def ssh_view(outcome, max_chars):
     """SSH results keep their structure: drop raw text, then shorten lists.
 
@@ -134,6 +209,9 @@ def ssh_view(outcome, max_chars):
         view["data"]["output_note"] = "原文已省略，完整内容在任务证据中"
         if _fits(view, max_chars):
             return view
+    view = _slim_rows(view, max_chars)
+    if _fits(view, max_chars):
+        return view
     # Even one row per list may not fit; the one-row view is the smallest.
     for keep in (20, 10, 5, 3, 1):
         shorter = _shrink_lists(view, keep)
