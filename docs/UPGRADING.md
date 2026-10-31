@@ -1,5 +1,22 @@
 # 升级说明
 
+## v1.4.0 → v1.4.1
+
+没有数据库迁移，不改配置，Skill 不变，SSH MCP 与日志 MCP 无需升级。修复：模型在 JSON 结论的字符串里直接换行时，飞书“AI 分析结果”卡片的诊断结论只显示一行原始 JSON、处理建议变成兜底句。在平台部署目录执行：
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://服务器IP:8088/healthz
+```
+
+healthz 应返回 version 1.4.1。只影响升级后的新分析：此前受影响任务的网页报告在任务完成时已经生成，飞书卡片也已发出，都保持原样，需要时重新发起分析。
+
+回滚：没有表结构变化，切回 v1.4.0（`4c7c53a`）后按同样命令重建即可。
+
 ## v1.3.2 → v1.4.0：接入日志分析平台 MCP
 
 没有数据库迁移，SSH MCP 无需升级。升级后平台自动安装第 9 个平台 Skill `platform-logs`（日志证据，默认启用，后台服务只有日志 MCP），并刷新 platform-base、platform-network 的正文。日志 MCP 未配置时平台不会发起任何日志调用，报告“能力说明”里会有一行“日志 MCP未启用：未配置日志 MCP 地址和令牌”，任务状态不受影响；不打算接入日志平台的环境可以在 Skill 管理停用 platform-logs，这一行随之消失。
