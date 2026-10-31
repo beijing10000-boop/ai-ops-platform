@@ -230,7 +230,15 @@ def java_row(index):
         "main": {"kind": "jar", "name": jar},
         "application": f"{name}_445",
         "profiles": ["prod"],
-        "heap": {"xms": "256m", "xmx": "1024m", "max_metaspace": "256m"},
+        "heap": {
+            "xms": "256m",
+            "xmx": "1024m",
+            "xss": None,
+            "max_ram_percentage": None,
+            "max_metaspace": "256m",
+            "max_direct": None,
+            "xmx_MiB": 1024.0,
+        },
         "gc": {"collector": "G1", "gc_log": None, "xx_flags": flags},
         "logs": {
             "configured": [f"logging.file.name=/data/logs/app-{name}.log"],
@@ -271,8 +279,55 @@ def test_wide_inventory_rows_lose_bulky_fields_before_rows():
         assert "command_preview" not in row and "logs" not in row
     assert "command_preview" in view["fields_note"]
     assert "rss_KiB" in shown[0] and shown[0]["heap"]["xmx"] == "1024m"
+    # Unset options are left out, and the note says absent means not set.
+    assert "xss" not in shown[0]["heap"] and "container" not in shown[0]
+    assert "未设置" in view["fields_note"]
     # The stored evidence is untouched.
     assert "command_preview" in outcome["data"]["summary"]["processes"][0]
+    assert outcome["data"]["summary"]["processes"][0]["heap"]["xss"] is None
+
+
+def test_slimmed_rows_fit_together_with_their_note():
+    """More room never shows fewer rows. v1.3.1 checked the fit before adding
+    the note on dropped fields, so the note pushed a 6000-character view over
+    its limit and thirteen Java processes were cut to ten."""
+    outcome = {"data": {"summary": {"processes": [java_row(i) for i in range(13)]}}}
+    shown = []
+    for limit in range(2000, 7000, 100):
+        view = model_view("ssh_mcp", "ssh_diagnose_java", outcome, max_chars=limit)
+        assert len(json.dumps(view, ensure_ascii=False)) <= limit
+        shown.append(len(view["data"]["summary"]["processes"]))
+    assert shown == sorted(shown) and shown[-1] == 13
+
+
+def test_inventory_too_big_for_the_view_keeps_as_many_rows_as_fit():
+    """Thirteen slimmed Java rows need more than the standard profile's 4000
+    characters (production: eleven fit); rows are cut to what fits, notes
+    included, not down to the next of 20/10/5/3/1 (v1.3.1 showed five)."""
+    rows = [java_row(index) for index in range(13)]
+    for row in rows:
+        row["main"]["name"] = "/data/jar/" + "x" * 60 + row["main"]["name"][-14:]
+    outcome = {
+        "is_error": False,
+        "data": {
+            "status": "success",
+            "summary": {
+                "title": "Java 进程",
+                "coverage": "只读 /proc 的单次快照，不附加 JVM；" * 6,
+                "java_processes": 13,
+                "processes": rows,
+            },
+            "findings": [
+                {"metric": "many_java_processes", "hint": "同机 Java 进程较多" * 4}
+            ],
+        },
+    }
+    view = model_view("ssh_mcp", "ssh_diagnose_java", outcome, max_chars=4000)
+    assert len(json.dumps(view, ensure_ascii=False)) <= 4000
+    summary = view["data"]["summary"]
+    assert 10 < len(summary["processes"]) < 13
+    assert summary["processes_omitted"] == 13 - len(summary["processes"])
+    assert view["fields_note"] and view["view_note"]
 
 
 def test_log_rows_keep_their_text_and_lose_rows_instead():

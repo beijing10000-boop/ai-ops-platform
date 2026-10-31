@@ -1,6 +1,6 @@
 # 升级说明
 
-## v1.3.1 → 未发布版本：接入日志分析平台 MCP
+## v1.3.2 → 未发布版本：接入日志分析平台 MCP
 
 没有数据库迁移。升级后平台自动安装第 9 个平台 Skill `platform-logs`（日志证据，默认启用，后台服务只有日志 MCP），并刷新 platform-base、platform-network 的正文。日志 MCP 未配置时平台不会发起任何日志调用，报告“能力说明”里会有一行“日志 MCP未启用：未配置日志 MCP 地址和令牌”，任务状态不受影响；不打算接入日志平台的环境可以在 Skill 管理停用 platform-logs，这一行随之消失。
 
@@ -22,13 +22,30 @@ curl -fsS http://服务器IP:8088/healthz
    - 对一台没有日志接入的主机告警点“AI 分析”：“能力说明”写“日志 MCP目标未接入：<IP> 最近 7 天没有来自该目标的日志……”，任务状态不因此变为“部分完成”，“本次不适用的 Skill”中有 platform-logs。
    - 把日志 MCP 令牌改成一个已撤销的令牌后点“验证连接”：提示“日志 MCP 拒绝令牌（HTTP 401）……”。
 
-回滚：没有表结构变化，但 v1.3.1 不认识 prefetch 的 `logs` / `devices` 两项，读到 platform-logs 会让所有新任务创建失败，所以切回旧版本前先删除 platform-logs（自定义 Skill 若用了这两项，也先删掉对应规则），再切换提交并重建。platform-base 与 platform-network 的正文由旧版本启动时自动改回：
+回滚：没有表结构变化，但 v1.3.2 不认识 prefetch 的 `logs` / `devices` 两项，读到 platform-logs 会让所有新任务创建失败，所以切回旧版本前先删除 platform-logs（自定义 Skill 若用了这两项，也先删掉对应规则），再切换提交并重建。platform-base 与 platform-network 的正文由旧版本启动时自动改回：
 
 ```bash
 docker compose exec -T web python -c "import sqlite3; db=sqlite3.connect('/app/data/app.sqlite3'); print(db.execute(\"DELETE FROM platform_skills WHERE name='platform-logs' AND managed=1\").rowcount); db.commit()"
-git switch --detach a2db7e3
+git switch --detach d16e6a9
 docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
 ```
+
+## v1.3.1 → v1.3.2
+
+没有数据库迁移，不改配置，Skill 不变，SSH MCP 无需升级。修复：进程等清单在模型视图里能放下全部行时就全部列出（v1.3.1 中“省略了哪些字段”的说明没计入上限，13 个 Java 进程在 6000 字符下仍只给模型看 10 个）。在平台部署目录执行：
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://服务器IP:8088/healthz
+```
+
+healthz 应返回 version 1.3.2。验收：对运行十几个 Java 进程的主机提问“这些 java 进程是什么”，回答列出全部进程的应用名与 -Xmx，不再写“另有 N 个未列出”（标准档默认 4000 字符下约可列 11 个，需要全部列出时在“系统配置 → AI 配置”把该档的“每次结果字符”调到 6000）。
+
+回滚：没有表结构变化，切回 v1.3.1（`a2db7e3`）后按同样命令重建即可。
 
 ## v1.3.0 → v1.3.1
 
