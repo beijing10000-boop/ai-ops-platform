@@ -203,7 +203,8 @@ def test_ssh_process_lists_keep_busy_rows_only_and_leave_the_evidence_whole():
 
 
 def java_row(index):
-    """One process of a Java inventory, shaped like production rows (~1000 chars)."""
+    """One process of a Java inventory, shaped like SSH MCP v0.8.0 production
+    rows (~1000 chars)."""
     name = f"svc-{index:02d}"
     jar = f"/data/jar/{name}/{name}_445.jar"
     flags = [
@@ -227,7 +228,8 @@ def java_row(index):
         "exe": "/usr/local/jdk1.8.0_271/bin/java",
         "java_version": "1.8.0_271",
         "implementor": "Oracle Corporation",
-        "main": {"kind": "jar", "name": jar},
+        "main": f"{name}_445.jar",
+        "jar_path": jar,
         "application": f"{name}_445",
         "profiles": ["prod"],
         "heap": {
@@ -237,7 +239,6 @@ def java_row(index):
             "max_ram_percentage": None,
             "max_metaspace": "256m",
             "max_direct": None,
-            "xmx_MiB": 1024.0,
         },
         "gc": {"collector": "G1", "gc_log": None, "xx_flags": flags},
         "logs": {
@@ -306,7 +307,7 @@ def test_inventory_too_big_for_the_view_keeps_as_many_rows_as_fit():
     included, not down to the next of 20/10/5/3/1 (v1.3.1 showed five)."""
     rows = [java_row(index) for index in range(13)]
     for row in rows:
-        row["main"]["name"] = "/data/jar/" + "x" * 60 + row["main"]["name"][-14:]
+        row["main"] = "x" * 100 + row["main"]
     outcome = {
         "is_error": False,
         "data": {
@@ -328,6 +329,35 @@ def test_inventory_too_big_for_the_view_keeps_as_many_rows_as_fit():
     assert 10 < len(summary["processes"]) < 13
     assert summary["processes_omitted"] == 13 - len(summary["processes"])
     assert view["fields_note"] and view["view_note"]
+
+
+def test_java_rows_keep_rss_at_the_standard_limit():
+    """With SSH MCP v0.8.0 rows, thirteen Java processes fit the standard
+    profile's 4000 characters and each keeps its RSS next to -Xmx, which a
+    memory alert is judged by; the other ps fields still go first."""
+    outcome = {
+        "is_error": False,
+        "data": {
+            "status": "success",
+            "summary": {
+                "title": "Java 进程",
+                "coverage": "只读 /proc 的单次快照，不附加 JVM；" * 6,
+                "java_processes": 13,
+                "processes": [java_row(index) for index in range(13)],
+            },
+            "findings": [
+                {"metric": "many_java_processes", "hint": "同机 Java 进程较多" * 4}
+            ],
+        },
+    }
+    view = model_view("ssh_mcp", "ssh_diagnose_java", outcome, max_chars=4000)
+    assert len(json.dumps(view, ensure_ascii=False)) <= 4000
+    shown = view["data"]["summary"]["processes"]
+    assert len(shown) == 13 and "view_note" not in view
+    for index, row in enumerate(shown):
+        assert row["rss_KiB"] == 1500000 - index * 1000
+        assert row["heap"]["xmx"] == "1024m" and row["main"].endswith(".jar")
+    assert "cpu_percent" in view["fields_note"] and "jar_path" in view["fields_note"]
 
 
 def test_log_rows_keep_their_text_and_lose_rows_instead():
