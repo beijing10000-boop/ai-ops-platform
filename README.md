@@ -1,6 +1,6 @@
 # AI Ops Platform · AI 智能运维平台
 
-**v1.3.0** · 默认 Web 端口 **8088**。平台负责 Zabbix 告警、飞书协作、AI 分析与报告，通过两个独立的 Streamable HTTP MCP 服务获取证据。
+**v1.3.1** · 默认 Web 端口 **8088**。平台负责 Zabbix 告警、飞书协作、AI 分析与报告，通过两个独立的 Streamable HTTP MCP 服务获取证据。
 
 | 服务 | 职责 |
 | --- | --- |
@@ -57,7 +57,7 @@ docker compose exec -T web cat /app/data/bootstrap.token
 
 在受信任内网打开 `http://服务器IP:8088/setup`，输入一次性凭据和飞书应用、管理员 Open ID、实际外部地址，验证后保存。登录后在 Web 完成两个 MCP、AI 和飞书配置，无需创建业务 `.env`。
 
-独立 SSH MCP 需为 **v0.4.1 或更新版本**，推荐 **v0.7.0**：负载/CPU 背离、D 状态进程、1 秒 CPU 增量和按授权目录过滤工具依赖 v0.5.0；Nginx 日志、系统日志、Java/JVM、服务详情与端口映射、单会话多项采集（`ssh_collect`）依赖 v0.6.0。旧版本仍可运行，报告的“证据覆盖”会把缺少的工具列为跳过项并注明原因。在其 Web 登记主机、核验公钥、配置凭据，并为平台签发专用客户端令牌；实时 IP 查询无需填写 Zabbix Host ID。按 Zabbix Host ID 关联告警时仍需填写映射。
+独立 SSH MCP 需为 **v0.4.1 或更新版本**，推荐 **v0.7.1**：负载/CPU 背离、D 状态进程、1 秒 CPU 增量和按授权目录过滤工具依赖 v0.5.0；Nginx 日志、系统日志、Java/JVM、服务详情与端口映射、单会话多项采集（`ssh_collect`）依赖 v0.6.0。旧版本仍可运行，报告的“证据覆盖”会把缺少的工具列为跳过项并注明原因。在其 Web 登记主机、核验公钥、配置凭据，并为平台签发专用客户端令牌；实时 IP 查询无需填写 Zabbix Host ID。按 Zabbix Host ID 关联告警时仍需填写映射。
 
 完成飞书配置并停止使用同一 App ID 的旧接收器后启动：
 

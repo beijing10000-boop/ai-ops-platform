@@ -1,5 +1,22 @@
 # 升级说明
 
+## v1.3.0 → v1.3.1
+
+没有数据库迁移，不改配置，Skill 不变。修复分析质量问题：结论放在标题之后时飞书卡片显示为空、SSH 不可用的主机上模型仍尝试 SSH 而使任务“部分完成”、Java 进程清单被截到只剩 1 个。建议同时把 SSH MCP 升级到 v0.7.1（Java 启动命令解析与 `memory_processes` 退出码修复）。在平台部署目录执行：
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://服务器IP:8088/healthz
+```
+
+healthz 应返回 version 1.3.1。验收：对未在 SSH MCP 登记的 Linux 主机的告警点“AI 分析”，任务为“成功”，证据覆盖里没有失败的 SSH 调用；对运行多个 Java 进程的主机提问“这些 java 进程是什么”，回答能列出各进程的应用名与 -Xmx。
+
+回滚：没有表结构变化，切回 v1.3.0（`2719564`）后按同样命令重建即可。
+
 ## v1.2.3 → v1.3.0
 
 没有数据库迁移，不改配置，Skill 不变。界面改为与 SSH MCP 控制台统一的设计；后端做了不改变行为的清理；修复 6 个问题（见 CHANGELOG）。建议先把 SSH MCP 升级到 v0.7.0（同样是统一界面与问题修复），顺序反过来也能运行。在平台部署目录执行：
