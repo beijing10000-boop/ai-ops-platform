@@ -1,5 +1,22 @@
 # 升级说明
 
+## v1.4.3 → v1.4.4
+
+没有数据库迁移，不改配置，SSH MCP 与日志 MCP 无需升级。飞书“AI 分析结果”卡片只保留诊断结论与最多 4 条处理建议，容量统一以 GiB 显示；模型回答的 JSON 少括号或被截断时仍能解析。平台维护的 Skill `platform-linux`（未配置 Swap 按正常处理、不再提及）与 `platform-base` 正文有更新，升级后启动时自动刷新（版本号加 1；管理员停用的仍保持停用）。在平台部署目录执行：
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://服务器IP:8088/healthz
+```
+
+healthz 应返回 version 1.4.4。验收：在一条告警卡片上点“🤖 AI分析”，回复的“AI 分析结果”卡片只有“诊断结论”和编号的“处理建议”（最多 4 条），容量写 GiB、没有 E2 之类的编号，其下是“查看完整诊断报告”按钮，底部一行灰色小字为数据来源、可信度、Token 与耗时。升级前已发出的卡片与已生成的报告不变。
+
+回滚：没有表结构变化，切回 v1.4.3（`0e03e8c`）后按同样命令重建即可；两个 Skill 会随旧代码启动恢复为旧正文。
+
 ## v1.4.2 → v1.4.3
 
 没有数据库迁移，不改配置，Skill 不变，SSH MCP 与日志 MCP 无需升级。界面调整：“系统配置 → 服务与维护”打开即显示服务与队列状态，去掉“查看服务与队列状态”按钮。在平台部署目录执行：
