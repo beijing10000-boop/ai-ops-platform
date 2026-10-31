@@ -860,6 +860,10 @@ def test_log_view_keeps_whole_entries_within_the_model_limit():
     # A time series keeps its first and last points.
     assert data["trend"][0]["t"] == "10:00" and data["trend"][-1]["t"] == "10:59"
     assert "截短" in view["view_note"]
+    # The note counts against the limit at every size (v1.3.2 lesson).
+    for limit in range(500, 4001, 250):
+        shown = model_view("logs", "log_search", outcome, max_chars=limit)
+        assert len(json.dumps(shown, ensure_ascii=False)) <= limit, limit
     small = {"is_error": False, "status": "success", "data": {"total": 1}}
     assert model_view("logs", "log_overview", small, max_chars=4000) == small
 

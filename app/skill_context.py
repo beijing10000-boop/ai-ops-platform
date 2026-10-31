@@ -286,14 +286,14 @@ def log_view(outcome, max_chars):
     than a JSON document cut in the middle, which could not be cited."""
     if _fits(outcome, max_chars):
         return outcome
+    # The note counts against the limit too (a view that only fits without
+    # it would be cut in the middle after all).
+    note = "列表与日志原文已按模型视图上限截短；完整证据在任务记录中"
     for keep, chars in LOG_STEPS:
-        view = _log_cut(outcome, keep, chars)
+        view = {**_log_cut(outcome, keep, chars), "view_note": note}
         if _fits(view, max_chars):
             break
-    return {
-        **view,
-        "view_note": "列表与日志原文已按模型视图上限截短；完整证据在任务记录中",
-    }
+    return view
 
 
 def _numbers(records, fields):
