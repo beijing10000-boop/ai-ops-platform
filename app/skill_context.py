@@ -52,8 +52,19 @@ SSH_LIST_KEYS = (
 # here: their text is the evidence, so they lose rows instead.
 WIDE_ROW_LISTS = ("processes", "top_processes", "units", "listening", "listeners")
 # Never dropped from such rows: what identifies the object and, for a JVM,
-# what it runs and its heap limits.
-ROW_KEPT = {"pid", "name", "application", "unit", "comm", "port", "main", "heap"}
+# what it runs, its heap limits and its resident memory (a memory alert is
+# answered by RSS against -Xmx; ps fields are otherwise the first to go).
+ROW_KEPT = {
+    "pid",
+    "name",
+    "application",
+    "unit",
+    "comm",
+    "port",
+    "main",
+    "heap",
+    "rss_KiB",
+}
 # Rows at or below this average size are lean; past it rows are cut instead.
 ROW_CHARS = 160
 # Log tool replies are ranked lists (error templates, routes, exceptions) and
