@@ -28,12 +28,20 @@ def _gib(match):
     return f"{gib:.2f} GiB" if gib >= 0.01 else f"{size / 1024**2:.2f} MiB"
 
 
+def _percent(match):
+    """Long decimals cut to two places; "90%" or "9.4%" stay as written."""
+    if len(match["number"].partition(".")[2]) <= 2:
+        return match[0]
+    return f"{float(match['number']):.2f}%"
+
+
 def human_metrics(text):
-    """Use two decimals for percentages and GiB for sizes in bytes, KiB or MiB."""
+    """Use at most two decimals for percentages and GiB for sizes in bytes,
+    KiB or MiB."""
     if not isinstance(text, str):
         return text
     text = _SIZE.sub(_gib, text)
-    text = _PERCENT.sub(lambda m: f"{float(m['number']):.2f}%", text)
+    text = _PERCENT.sub(_percent, text)
     # Avoid repeating model-provided approximate binary equivalents:
     # "1.48 GiB（约 1.48 GiB）" and "1.48 GiB（约 1.48 GiB，9.44%）".
     text = re.sub(r"(\d+\.\d{2}\s+(?:MiB|GiB))（约\s*\1）", r"\1", text)

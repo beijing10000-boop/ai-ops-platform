@@ -118,6 +118,16 @@ def test_feishu_card_shows_conclusion_and_actions_without_evidence_ids():
         worker.card_summary({"analysis": "只有一句话", "_unstructured": True})
         == "**诊断结论**\n只有一句话"
     )
+    # Bare section names are headings too, as in the platform's own readable
+    # report ("诊断结论" on a line of its own); a label on the line is dropped.
+    readable = (
+        "诊断结论\n13 个 Java 服务占满内存（E10）。\n\n处理建议\n1. 下调 -Xmx\n\n"
+        "分析与依据\n逐步抬升。"
+    )
+    assert worker.card_summary({"analysis": readable, "_unstructured": True}) == (
+        "**诊断结论**\n13 个 Java 服务占满内存。\n\n**处理建议**\n1. 下调 -Xmx"
+    )
+    assert worker.plain_answer_parts("故障原因（AI 推断）：磁盘将满")[0] == "磁盘将满"
 
 
 def test_report_links_are_plain_urls_for_the_default_browser(monkeypatch):
