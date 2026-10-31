@@ -1,5 +1,22 @@
 # 升级说明
 
+## v1.4.2 → v1.4.3
+
+没有数据库迁移，不改配置，Skill 不变，SSH MCP 与日志 MCP 无需升级。界面调整：“系统配置 → 服务与维护”打开即显示服务与队列状态，去掉“查看服务与队列状态”按钮。在平台部署目录执行：
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://服务器IP:8088/healthz
+```
+
+healthz 应返回 version 1.4.3。主页静态资源地址改为 `?v=1.4.3`，刷新页面即可。验收：打开“系统配置 → 服务与维护”，不点任何按钮即显示“数据库可访问”“Redis 可访问”与 5 个队列的排队数和 Worker 数。
+
+回滚：没有表结构变化，切回 v1.4.2（`ada7da9`）后按同样命令重建即可。
+
 ## v1.4.1 → v1.4.2
 
 没有数据库迁移，不改配置，Skill 不变。修复：模型视图省略进程清单字段时，Java 等进程的常驻内存 `rss_KiB` 始终保留。建议 SSH MCP 为 v0.8.0（CentOS/RHEL 7 上 RSS 等字段有值、Java 行更紧凑；旧版本也能运行）。在平台部署目录执行：
