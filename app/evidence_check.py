@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 BEIJING = ZoneInfo("Asia/Shanghai")
 NUMBER = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?")
 CITED_ID = re.compile(r"\bE(\d{1,3})\b")
-PROVIDER_LABELS = {"ssh_mcp": "SSH MCP", "zabbix_mcp": "Zabbix MCP"}
+PROVIDER_LABELS = {"ssh_mcp": "SSH MCP", "zabbix_mcp": "Zabbix MCP", "logs": "日志 MCP"}
 # JSON keys whose numbers are identifiers or bookkeeping, not measurements.
 IDENTIFIER_KEYS = {
     "itemid",
@@ -294,6 +294,7 @@ STATUS_LABELS = {
     "disabled": "未启用",
     "unreachable": "连接失败",
     "unauthorized": "未授权",
+    "not_onboarded": "目标未接入",
 }
 # CAPABILITY_MISSING names SSH MCP reports for a host; others read "缺少 <name>".
 HOST_LIMIT_LABELS = {
@@ -312,6 +313,10 @@ PATH_LABELS = {
     "zabbix+ssh": "Zabbix 历史 + SSH 实时联合分析",
     "zabbix-only": "仅 Zabbix 监控数据",
     "ssh-only": "仅 SSH 实时数据",
+    "zabbix+ssh+logs": "Zabbix 历史 + SSH 实时 + 日志联合分析",
+    "zabbix+logs": "Zabbix 历史 + 日志联合分析",
+    "ssh+logs": "SSH 实时 + 日志联合分析",
+    "logs-only": "仅日志数据",
     "none": "未取得任何数据源",
 }
 DEVICE_LABELS = {
@@ -392,7 +397,7 @@ def scope(index, target, capabilities=None, id_range=True):
             )
         )
     notes = []
-    for provider in ("zabbix_mcp", "ssh_mcp"):
+    for provider in ("zabbix_mcp", "ssh_mcp", "logs"):
         state = capabilities.get(provider)
         if not isinstance(state, dict):
             continue
@@ -403,11 +408,14 @@ def scope(index, target, capabilities=None, id_range=True):
         if state.get("reason"):
             text += "：" + str(state["reason"])
         notes.append(text)
-    if capabilities.get("unauthorized_tools"):
-        notes.append(
-            "令牌未授权的 SSH 工具："
-            + "、".join(capabilities["unauthorized_tools"][:8])
-        )
+    for key, label in (
+        ("unauthorized_tools", " SSH "),
+        ("unauthorized_log_tools", "日志"),
+    ):
+        if capabilities.get(key):
+            notes.append(
+                f"令牌未授权的{label}工具：" + "、".join(capabilities[key][:8])
+            )
     limits = [
         item
         for item in capabilities.get("host_limits") or []

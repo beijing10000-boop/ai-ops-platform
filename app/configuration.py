@@ -108,6 +108,15 @@ def validate_form(values, read):
         value(k) for k in ("ssh_mcp_url", "ssh_mcp_token")
     ):
         raise HTTPException(422, "启用 SSH MCP 前请填写地址和专用令牌")
+    if {"log_mcp_url", "log_mcp_token"} & set(values) and bool(
+        value("log_mcp_url")
+    ) != bool(value("log_mcp_token")):
+        raise HTTPException(422, "日志 MCP 地址和令牌须同时填写；都留空表示不接入")
+    token = values.get("log_mcp_token")
+    if token and token != "********" and not token.startswith("logmcp_"):
+        raise HTTPException(
+            422, "日志 MCP 令牌应以 logmcp_ 开头，请在日志分析平台「MCP 接入」签发"
+        )
     return {
         "ok": True,
         "message": "填写内容校验通过；此检查不会保存配置或发起诊断。连接可用性请使用对应验证连接按钮。",

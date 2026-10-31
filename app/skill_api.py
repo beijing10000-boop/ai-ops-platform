@@ -24,7 +24,7 @@ class ImportSkill(BaseModel):
         default_factory=lambda: ["qa", "alert", "web"], max_length=3
     )
     providers: list[str] = Field(
-        default_factory=lambda: ["ssh_mcp", "zabbix_mcp"], max_length=2
+        default_factory=lambda: ["ssh_mcp", "zabbix_mcp"], max_length=3
     )
     priority: int = Field(default=100, ge=0, le=2147483647)
     mode: Literal["standalone", "supplement"] = "standalone"
@@ -36,7 +36,7 @@ class UpdateSkill(BaseModel):
     instructions: str | None = Field(default=None, min_length=1, max_length=64000)
     enabled: StrictBool | None = None
     scopes: list[str] | None = Field(default=None, max_length=3)
-    providers: list[str] | None = Field(default=None, max_length=2)
+    providers: list[str] | None = Field(default=None, max_length=3)
     priority: int | None = Field(default=None, ge=0, le=2147483647)
     mode: Literal["standalone", "supplement"] | None = None
 
@@ -185,12 +185,26 @@ async def verify(ident: str, who=Depends(require("settings.manage"))):
 
     row = skills.get(ident)
     referenced = set(
-        re.findall(r"`((?:ssh_[a-z_]+|[a-z]+_get))`", "\n".join(row["files"].values()))
+        re.findall(
+            r"`((?:ssh_[a-z_]+|log_[a-z_]+|[a-z]+_get))`",
+            "\n".join(row["files"].values()),
+        )
     )
     # Tools named only in prefetch rules must exist too.
     for rule in row.get("prefetch") or []:
         referenced.update(rule.get("ssh", []))
+        referenced.update(rule.get("logs", []))
         referenced.update(rule.get("schemas", []))
+
+    def provider_of(name):
+        return (
+            "ssh_mcp"
+            if name.startswith("ssh_")
+            else "logs"
+            if name.startswith("log_")
+            else "zabbix_mcp"
+        )
+
     results = []
     async with SkillMCP(
         read_setting, row["providers"], deadline=time.monotonic() + 35
@@ -199,9 +213,7 @@ async def verify(ident: str, who=Depends(require("settings.manage"))):
             try:
                 tools = await bridge.catalog(provider)
                 required = {
-                    name
-                    for name in referenced
-                    if (name.startswith("ssh_")) == (provider == "ssh_mcp")
+                    name for name in referenced if provider_of(name) == provider
                 }
                 missing = sorted(required - tools.keys())
                 results.append(

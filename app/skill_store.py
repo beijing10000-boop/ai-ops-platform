@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 MAX_PACKAGE = 1024 * 1024
 MAX_DOCUMENT = 64000
 SCOPES = {"alert", "qa", "web"}
-PROVIDERS = {"ssh_mcp", "zabbix_mcp"}
+PROVIDERS = {"ssh_mcp", "zabbix_mcp", "logs"}
 # A custom Skill either replaces the platform base Skill or is loaded with it.
 MODES = {"standalone", "supplement"}
 BASE_NAME = "platform-base"
@@ -29,6 +29,7 @@ BASE_NAME = "platform-base"
 # that apply to the task, so a CPU alert does not carry the Nginx playbook.
 MANAGED = {
     "platform-base": 50,
+    "platform-logs": 52,
     "platform-linux": 55,
     "platform-windows": 55,
     "platform-network": 55,
@@ -37,6 +38,11 @@ MANAGED = {
     "platform-nginx": 65,
     "platform-java": 65,
 }
+# MCP services a platform Skill may use when first installed (admins can change
+# them later). Only the log Skill opens the log MCP, so disabling it turns log
+# evidence off, on upgraded and new installations alike.
+MANAGED_PROVIDERS = {"platform-logs": ["logs"]}
+DEFAULT_PROVIDERS = ["ssh_mcp", "zabbix_mcp"]
 DEVICES = {"linux", "windows", "network", "vmware", "other", "unknown"}
 TEMPLATES = Path(__file__).parent / "skill_templates"
 
@@ -143,19 +149,41 @@ PARAMETRIZED_SSH = {
     "ssh_diagnose_jvm",
 }
 SSH_TOOL = re.compile(r"ssh_diagnose_[a-z_]{1,40}|ssh_collect")
+LOG_TOOL = re.compile(r"log_[a-z_]{1,40}")
+# Log tools the platform runs itself (target lookup) or cannot fill: a trace
+# id, an anchor time and line counts.
+PARAMETRIZED_LOGS = {
+    "log_list_tool_catalog",
+    "log_list_sources",
+    "log_resolve_target",
+    "log_context",
+    "log_trace",
+}
 # Item key fragments or `*` patterns; Windows performance counters need spaces,
 # backslashes, quotes, % and parentheses (perf_counter_en["\System\..."]).
 ITEM_KEY = re.compile(r'[A-Za-z0-9_.,\[\]*/ \\"%():#-]{1,120}')
+RULE_KEYS = (
+    "scopes",
+    "types",
+    "devices",
+    "ssh",
+    "zabbix_items",
+    "history",
+    "logs",
+    "schemas",
+)
 
 
 def validate_prefetch(rules):
     """Skill-declared evidence the platform collects before the first model round.
 
-    Each rule: scopes, types (diagnostic types or "*"), and any of ssh (fixed
-    read-only SSH diagnostics), zabbix_items (item key search terms for the task
-    host), history (exact item keys or `*` patterns among the found items whose
-    alert-window history and 7-day trend are collected) and schemas (tool
-    schemas handed to the model up front).
+    Each rule: scopes, types (diagnostic types or "*"), optional devices (device
+    types the rule is limited to), and any of ssh (fixed read-only SSH
+    diagnostics), zabbix_items (item key search terms for the task host),
+    history (exact item keys or `*` patterns among the found items whose
+    alert-window history and 7-day trend are collected), logs (log tools run on
+    the target's log source around the alert) and schemas (tool schemas handed
+    to the model up front).
     """
     from .diagnostics.playbooks import PLAYBOOKS
     from .integrations.zabbix import READ_TOOLS
@@ -164,21 +192,13 @@ def validate_prefetch(rules):
         raise ValueError("prefetch 须为最多 20 条规则的列表")
     result = []
     for rule in rules:
-        if not isinstance(rule, dict) or not {"scopes", "types"} <= set(rule) <= {
-            "scopes",
-            "types",
-            "ssh",
-            "zabbix_items",
-            "history",
-            "schemas",
-        }:
+        if not isinstance(rule, dict) or not {"scopes", "types"} <= set(rule) <= set(
+            RULE_KEYS
+        ):
             raise ValueError(
-                "prefetch 规则须包含 scopes、types，可选 ssh、zabbix_items、history、schemas"
+                "prefetch 规则须包含 scopes、types，可选 devices、ssh、zabbix_items、history、logs、schemas"
             )
-        lists = {
-            key: rule.get(key, [])
-            for key in ("scopes", "types", "ssh", "zabbix_items", "history", "schemas")
-        }
+        lists = {key: rule.get(key, []) for key in RULE_KEYS}
         if any(
             not isinstance(value, list)
             or len(value) > 8
@@ -190,6 +210,15 @@ def validate_prefetch(rules):
             raise ValueError("prefetch scopes 须为 alert、qa、web")
         if not lists["types"] or set(lists["types"]) - set(PLAYBOOKS) - {"*"}:
             raise ValueError("prefetch types 须为诊断类型或 *")
+        if set(lists["devices"]) - DEVICES - {"*"}:
+            raise ValueError("prefetch devices 须为设备类型或 *")
+        if len(lists["logs"]) > 6 or any(
+            not LOG_TOOL.fullmatch(tool) or tool in PARAMETRIZED_LOGS
+            for tool in lists["logs"]
+        ):
+            raise ValueError(
+                "prefetch logs 只能是平台能按日志来源和告警时间填参的 log_* 工具（最多 6 个）"
+            )
         if len(lists["ssh"]) > 6 or any(
             not SSH_TOOL.fullmatch(tool) or tool in PARAMETRIZED_SSH
             for tool in lists["ssh"]
@@ -203,7 +232,9 @@ def validate_prefetch(rules):
         ):
             raise ValueError("prefetch zabbix_items、history 须为监控项 key 片段或模式")
         if len(lists["schemas"]) > 4 or any(
-            tool not in READ_TOOLS and not SSH_TOOL.fullmatch(tool)
+            tool not in READ_TOOLS
+            and not SSH_TOOL.fullmatch(tool)
+            and not LOG_TOOL.fullmatch(tool)
             for tool in lists["schemas"]
         ):
             raise ValueError("prefetch schemas 须为已开放的工具名（最多 4 个）")
@@ -234,22 +265,30 @@ def scope_of(request, source):
 
 
 def prefetch_plan(skills, scope, diagnostic_type, device=None):
-    """Merge the loaded Skills' matching rules, higher priority first, no repeats."""
-    plan = {"ssh": [], "zabbix_items": [], "history": [], "schemas": []}
+    """Merge the loaded Skills' matching rules, higher priority first, no repeats.
+
+    A rule with `devices` applies only to those device types; None means the
+    device is not known yet and matches, as in applies().
+    """
+    plan = {"ssh": [], "zabbix_items": [], "history": [], "logs": [], "schemas": []}
     for skill in skills:
         if not applies(skill, diagnostic_type, device):
             continue
         for rule in skill.get("prefetch") or []:
-            if scope in rule["scopes"] and (
-                diagnostic_type in rule["types"] or "*" in rule["types"]
+            devices = rule.get("devices") or ["*"]
+            if (
+                scope in rule["scopes"]
+                and (diagnostic_type in rule["types"] or "*" in rule["types"])
+                and (device is None or "*" in devices or device in devices)
             ):
                 for key in plan:
-                    # Snapshots taken before `history` existed have no such key.
+                    # Snapshots taken before `history` / `logs` existed lack them.
                     plan[key].extend(x for x in rule.get(key, []) if x not in plan[key])
     plan["ssh"] = plan["ssh"][:6]
     plan["schemas"] = plan["schemas"][:4]
     plan["zabbix_items"] = plan["zabbix_items"][:8]
     plan["history"] = plan["history"][:8]
+    plan["logs"] = plan["logs"][:6]
     return plan
 
 
@@ -376,7 +415,7 @@ def ensure_base(db):
                     package["description"],
                     priority,
                     json.dumps(sorted(SCOPES)),
-                    json.dumps(sorted(PROVIDERS)),
+                    json.dumps(MANAGED_PROVIDERS.get(name, DEFAULT_PROVIDERS)),
                     wanted,
                     encode(package["files"]),
                 ),

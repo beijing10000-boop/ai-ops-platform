@@ -129,7 +129,7 @@ const badge = (s) =>
 const chip = (text, tone = "") => `<span class="status ${tone}">${E(text)}</span>`;
 const sourceLabel = value => ({web: "Web 诊断", alert: "告警分析", qa: "监控问答", feishu: "飞书", ui_test: "界面测试"}[value] || value);
 function stageLabel(value) {
-  return labels[value] || ({collecting: "收集证据", ai_reasoning: "AI 分析中", skill_analysis: "按 Skill 分析查询步骤", skill_prefetch: "按 Skill 预采集证据", skill_ssh_mcp: "正在查询后台 MCP 服务并进行分析", skill_zabbix_mcp: "正在查询后台 MCP 服务并进行分析", retired: "旧任务已停用"}[value]) || value || "等待执行";
+  return labels[value] || ({collecting: "收集证据", ai_reasoning: "AI 分析中", skill_analysis: "按 Skill 分析查询步骤", skill_prefetch: "按 Skill 预采集证据", skill_ssh_mcp: "正在查询后台 MCP 服务并进行分析", skill_zabbix_mcp: "正在查询后台 MCP 服务并进行分析", skill_logs: "正在查询后台 MCP 服务并进行分析", retired: "旧任务已停用"}[value]) || value || "等待执行";
 }
 const btn = (action, text, id = "", kind = "", disabled = false) =>
   `<button type="button" class="btn ${kind}" data-action="${action}" data-id="${E(id)}" ${disabled ? "disabled" : ""}>${text}</button>`;
@@ -253,7 +253,7 @@ const PLAY = {
 async function overview() {
   const [o, t] = await Promise.all([api(P + "/overview"), api(P + "/tasks?page_size=6")]);
   const stat = (label, value, hint, tone = "") => `<div class="stat ${tone}"><div class="label">${label}</div><div class="value">${value}</div><div class="hint">${hint}</div></div>`;
-  const readiness = [["model", "AI 模型", "settings/ai"], ["zabbix_mcp", "Zabbix MCP", "connections"], ["ssh_mcp", "SSH MCP", "connections"], ["feishu", "飞书应用", "settings/feishu"], ["webhook", "告警接入", "settings/general"]];
+  const readiness = [["model", "AI 模型", "settings/ai"], ["zabbix_mcp", "Zabbix MCP", "connections"], ["ssh_mcp", "SSH MCP", "connections"], ["logs", "日志 MCP", "connections"], ["feishu", "飞书应用", "settings/feishu"], ["webhook", "告警接入", "settings/general"]];
   const health = (provider, title, configured) => {
     const record = o.health.find(row => row.provider === provider);
     return `<div class="health-row"><div><strong>${title}</strong><p>${record ? "最近检测：" + date(record.checked_at) : "配置完成后，请主动验证连接"}</p></div>${record ? chip(record.status === "success" ? "最近检测通过" : "最近检测失败", record.status === "success" ? "success" : "failed") : chip(configured ? "待验证" : "未配置 / 未启用", configured ? "pending" : "")}</div>`;
@@ -261,7 +261,7 @@ async function overview() {
   return `<div class="hero"><div><span class="eyebrow">运维工作台 · 最近 24 小时</span><h2>监控异常，循证诊断。</h2><p>从告警定位问题，关联 Zabbix 历史与 Linux 实时证据。仅统计本平台收到的事件和执行的分析。</p></div><div class="actions">${btn("go-alerts", "查看告警")}${can("diagnostics.run") ? btn("go-page", "新建诊断", "diagnostics", "primary") : ""}</div></div>` +
     `<div class="stats">${stat("未收到恢复的事件", fmt(o.unrecovered_received_events), "平台累计接收，非 Zabbix 全量", o.unrecovered_received_events ? "attention" : "")}${stat("AI 分析次数", fmt(o.ai_runs_24h), "最近 24 小时创建")}${stat("AI 分析成功率", o.ai_success_rate_24h == null ? "—" : o.ai_success_rate_24h + "%", "成功 / 已结束的分析")}${stat("实际 Token", fmt(o.token_total_24h), `${fmt(o.usage_available_runs_24h)} 次返回用量`)}</div>` +
     (can("settings.manage") ? `<div class="readiness-strip"><div><strong>配置检查</strong><small>仅检查是否填写，连接请主动验证</small></div>${readiness.map(([key, label, target]) => `<button class="readiness-item ${o.readiness[key] ? "ready" : ""}" data-action="go-page" data-id="${target}"><span class="mark" aria-hidden="true"></span><span>${label}<small>${o.readiness[key] ? "已配置" : "待配置"}</small></span></button>`).join("")}</div>` : "") +
-    `<div class="grid2">${panel("MCP 连接状态", health("zabbix_mcp", "Zabbix MCP · 历史监控", o.mcp_configured) + health("ssh_mcp", "SSH MCP · 实时诊断", o.ssh_mcp_configured) + `<p class="muted small footnote">状态代表最近一次主动检测结果；主机通过 Zabbix Host ID 关联。</p>`)}${panel("诊断处理情况", `<div class="health-row"><span>已完成 / 部分完成</span><strong>${fmt(o.completed_24h)} / ${fmt(o.partial_24h)}</strong></div><div class="health-row"><span>执行中 / 等待执行</span><strong>${fmt(o.running)} / ${fmt(o.queued)}</strong></div><div class="health-row"><span>失败任务</span><strong>${fmt(o.failed_24h)}</strong></div><div class="health-row"><span>平均分析耗时</span><strong>${o.average_duration_ms_24h == null ? "—" : (o.average_duration_ms_24h / 1000).toFixed(1) + " 秒"}</strong></div>`)}</div>` +
+    `<div class="grid2">${panel("MCP 连接状态", health("zabbix_mcp", "Zabbix MCP · 历史监控", o.mcp_configured) + health("ssh_mcp", "SSH MCP · 实时诊断", o.ssh_mcp_configured) + health("logs", "日志 MCP · 历史日志", o.log_mcp_configured) + `<p class="muted small footnote">状态代表最近一次主动检测结果；主机通过 Zabbix Host ID 关联，日志来源按主机 IP 定位。</p>`)}${panel("诊断处理情况", `<div class="health-row"><span>已完成 / 部分完成</span><strong>${fmt(o.completed_24h)} / ${fmt(o.partial_24h)}</strong></div><div class="health-row"><span>执行中 / 等待执行</span><strong>${fmt(o.running)} / ${fmt(o.queued)}</strong></div><div class="health-row"><span>失败任务</span><strong>${fmt(o.failed_24h)}</strong></div><div class="health-row"><span>平均分析耗时</span><strong>${o.average_duration_ms_24h == null ? "—" : (o.average_duration_ms_24h / 1000).toFixed(1) + " 秒"}</strong></div>`)}</div>` +
     `<section class="panel">${heading("最近诊断", "告警分析、问答与手动诊断的统一记录", btn("go-history", "全部记录", "", "small"))}${table(["任务 / 时间", "诊断类型 / 来源", "状态", "工具", "耗时", "Token", "操作"], taskRows(t.items))}</section>`;
 }
 async function alerts() {
@@ -402,8 +402,9 @@ async function connections() {
   const groups = [
     ["zabbix_mcp", "Zabbix MCP", "监控指标、历史趋势和告警事实。", [["mcp_url", "Zabbix MCP 地址", "text"], ["mcp_token", "Zabbix MCP 令牌", "password"]]],
     ["ssh_mcp", "SSH MCP", "Linux 实时诊断；主机及 SSH 密钥在独立服务维护。", [["ssh_mcp_enabled", "启用 SSH MCP", "select", [["false", "关闭"], ["true", "开启"]]], ["ssh_mcp_url", "SSH MCP 地址", "text"], ["ssh_mcp_token", "SSH MCP 专用令牌", "password"], ["ssh_mcp_timeout_seconds", "单工具超时（秒）", "number"]]],
+    ["logs", "日志 MCP", "日志分析平台的只读日志工具：操作系统、网络设备、Nginx、Java 日志；令牌在日志平台「MCP 接入」签发（logmcp_ 开头）。地址和令牌都留空表示不接入。", [["log_mcp_url", "日志 MCP 地址", "text"], ["log_mcp_token", "日志 MCP 令牌", "password"]]],
   ];
-  return intro("分别配置两个 Streamable HTTP MCP。令牌加密保存且不回显原文；HTTP 地址仅用于受信任内网。验证连接检查当前表单，无需先保存。", btn("scroll-section", "查看诊断工具", "connection-tools")) + groups.map(([provider, title, note, fields]) => panel(title,
+  return intro("分别配置三个 Streamable HTTP MCP。令牌加密保存且不回显原文；HTTP 地址仅用于受信任内网。验证连接检查当前表单，无需先保存。", btn("scroll-section", "查看诊断工具", "connection-tools")) + groups.map(([provider, title, note, fields]) => panel(title,
     `<form id="${provider}-form" class="connection-form" data-provider="${provider}"><div class="fields">${fields.map(([key, label, type, options]) => field(key, label, values[key] || "", type === "select" ? "text" : type, key.includes("url") ? "例如 http://服务所在服务器:端口/mcp；请填写容器可访问的地址。" : "", options || null)).join("")}</div><div class="form-actions">${btn("validate-connection", "验证填写内容", provider)}${btn("verify-mcp", "验证连接", provider)}<button class="btn primary" type="submit">保存连接</button></div><p class="muted small" role="status" data-verify-result></p></form>`, note)).join("") + tools;
 }
 async function analysisHistory() {
@@ -536,7 +537,7 @@ async function report(id) {
     }).join("") : '<div class="empty">暂无采集证据</div>'}</section>`
   );
 }
-const DIAGNOSTIC_PATHS = {"zabbix+ssh": "Zabbix + SSH 联合", "zabbix-only": "仅 Zabbix", "ssh-only": "仅 SSH", none: "无可用数据源"};
+const DIAGNOSTIC_PATHS = {"zabbix+ssh": "Zabbix + SSH 联合", "zabbix-only": "仅 Zabbix", "ssh-only": "仅 SSH", "zabbix+ssh+logs": "Zabbix + SSH + 日志联合", "zabbix+logs": "Zabbix + 日志联合", "ssh+logs": "SSH + 日志联合", "logs-only": "仅日志", none: "无可用数据源"};
 const CAPABILITY_STATES = {
   used: ["已使用", "success"],
   available: ["可用", ""],
@@ -546,6 +547,7 @@ const CAPABILITY_STATES = {
   unreachable: ["连接失败", "failed"],
   not_applicable: ["不适用", ""],
   not_ready: ["主机未就绪", "partial"],
+  not_onboarded: ["目标未接入", ""],
 };
 const EVIDENCE_KINDS = {prefetch: "预采集", model: "模型请求", retry: "重试", cache_hit: "复用缓存"};
 function skillsPanel(rows) {
@@ -564,18 +566,21 @@ function skillsPanel(rows) {
   );
 }
 function capabilityPanel(caps) {
-  if (!caps.zabbix_mcp && !caps.ssh_mcp) return "";
+  if (!caps.zabbix_mcp && !caps.ssh_mcp && !caps.logs) return "";
   const row = (key, title) => {
     const state = caps[key] && typeof caps[key] === "object" ? caps[key] : {};
     const [text, tone] = CAPABILITY_STATES[state.status] || [state.status || "未记录", ""];
-    return `<div class="health-row"><div><strong>${title}</strong><p>${E(state.reason || "—")}${state.error_code ? ` · <span class="mono">${E(state.error_code)}</span>` : ""}</p></div>${chip(text, tone)}</div>`;
+    const detail = state.reason || (state.target ? "日志来源：" + state.target : "—");
+    return `<div class="health-row"><div><strong>${title}</strong><p>${E(detail)}${state.error_code ? ` · <span class="mono">${E(state.error_code)}</span>` : ""}</p></div>${chip(text, tone)}</div>`;
   };
   const denied = Array.isArray(caps.unauthorized_tools) ? caps.unauthorized_tools : [];
+  const deniedLogs = Array.isArray(caps.unauthorized_log_tools) ? caps.unauthorized_log_tools : [];
   return panel(
     "证据来源与能力",
-    row("zabbix_mcp", "Zabbix MCP · 监控历史") + row("ssh_mcp", "SSH MCP · Linux 实时诊断") +
-      (denied.length ? `<p class="notice warn footnote">本令牌未授权的 SSH 工具：<span class="mono">${denied.map(E).join("、")}</span>。需要时在 SSH MCP 控制台为平台客户端开启。</p>` : ""),
-    `设备类型：${E(labels[caps.device_type] || caps.device_type || "待确认")} · 诊断路径：${E(DIAGNOSTIC_PATHS[caps.diagnostic_path] || caps.diagnostic_path || "未记录")}。Windows、网络设备等非 Linux 主机只走 Zabbix。`,
+    row("zabbix_mcp", "Zabbix MCP · 监控历史") + row("ssh_mcp", "SSH MCP · Linux 实时诊断") + (caps.logs ? row("logs", "日志 MCP · 历史日志") : "") +
+      (denied.length ? `<p class="notice warn footnote">本令牌未授权的 SSH 工具：<span class="mono">${denied.map(E).join("、")}</span>。需要时在 SSH MCP 控制台为平台客户端开启。</p>` : "") +
+      (deniedLogs.length ? `<p class="notice warn footnote">日志 MCP 令牌未授权的工具：<span class="mono">${deniedLogs.map(E).join("、")}</span>。需要时在日志分析平台「MCP 接入」编辑该令牌。</p>` : ""),
+    `设备类型：${E(labels[caps.device_type] || caps.device_type || "待确认")} · 诊断路径：${E(DIAGNOSTIC_PATHS[caps.diagnostic_path] || caps.diagnostic_path || "未记录")}。Windows、网络设备等非 Linux 主机不做 SSH 诊断。`,
   );
 }
 function coveragePanel(coverage) {
@@ -1152,6 +1157,7 @@ document.addEventListener("submit", async (event) => {
       "probe-form",
       "zabbix_mcp-form",
       "ssh_mcp-form",
+      "logs-form",
     ].includes(form.id) && !form.classList.contains("settings-form")
   )
     return;

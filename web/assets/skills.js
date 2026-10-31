@@ -6,7 +6,7 @@ function skillChoices(values = {}) {
   const scopes = values.scopes || ["qa", "web", "alert"], providers = values.providers || ["ssh_mcp", "zabbix_mcp"];
   const mode = values.managed ? "" : field("mode", "与平台基础 Skill 的关系", values.mode || "supplement", "text", "补充 Skill 只写本环境的规则，平台升级时基础规则自动更新；替代模式需要自行维护全部规则。", SKILL_MODES);
   return `<fieldset class="skill-choices"><legend>适用场景</legend>${[["qa", "飞书问答"], ["web", "Web 诊断"], ["alert", "告警分析"]].map(([key, label]) => `<label class="check"><input type="checkbox" name="scopes" value="${key}" ${scopes.includes(key) ? "checked" : ""}>${label}</label>`).join("")}</fieldset>` +
-    `<fieldset class="skill-choices"><legend>允许使用的后台服务</legend>${[["ssh_mcp", "SSH MCP"], ["zabbix_mcp", "Zabbix MCP"]].map(([key, label]) => `<label class="check"><input type="checkbox" name="providers" value="${key}" ${providers.includes(key) ? "checked" : ""}>${label}</label>`).join("")}</fieldset>` +
+    `<fieldset class="skill-choices"><legend>允许使用的后台服务</legend>${[["ssh_mcp", "SSH MCP"], ["zabbix_mcp", "Zabbix MCP"], ["logs", "日志 MCP"]].map(([key, label]) => `<label class="check"><input type="checkbox" name="providers" value="${key}" ${providers.includes(key) ? "checked" : ""}>${label}</label>`).join("")}</fieldset>` +
     `<div class="fields">${field("priority", "优先级（数值越大越优先）", values.priority ?? 100, "number")}${field("enabled", "启用状态", String(values.enabled ?? false), "text", "", [["false", "停用"], ["true", "启用"]])}${mode}</div>`;
 }
 

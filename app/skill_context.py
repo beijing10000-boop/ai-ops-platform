@@ -56,6 +56,11 @@ WIDE_ROW_LISTS = ("processes", "top_processes", "units", "listening", "listeners
 ROW_KEPT = {"pid", "name", "application", "unit", "comm", "port", "main", "heap"}
 # Rows at or below this average size are lean; past it rows are cut instead.
 ROW_CHARS = 160
+# Log tool replies are ranked lists (error templates, routes, exceptions) and
+# time series; a series keeps evenly spaced points, a ranked list its head.
+LOG_SERIES = {"trend", "buckets", "timeline"}
+# (items per list, characters per string), tried in order until the view fits.
+LOG_STEPS = ((20, 400), (10, 240), (5, 160), (3, 120), (1, 80))
 
 
 def _positive(value):
@@ -247,6 +252,50 @@ def ssh_view(outcome, max_chars):
     return shorter
 
 
+def _log_cut(value, keep, chars):
+    """Copy with every list cut to ``keep`` items and every string to ``chars``
+    characters; ``<key>_omitted`` counts the items left out."""
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if isinstance(item, list) and len(item) > keep:
+                if key in LOG_SERIES and keep >= 2:
+                    last = len(item) - 1
+                    rows = [
+                        item[i]
+                        for i in sorted(
+                            {round(n * last / (keep - 1)) for n in range(keep)}
+                        )
+                    ]
+                else:
+                    rows = item[:keep]
+                result[key] = [_log_cut(row, keep, chars) for row in rows]
+                result[key + "_omitted"] = len(item) - len(rows)
+            else:
+                result[key] = _log_cut(item, keep, chars)
+        return result
+    if isinstance(value, list):
+        return [_log_cut(item, keep, chars) for item in value]
+    if isinstance(value, str) and len(value) > chars:
+        return value[:chars] + "…"
+    return value
+
+
+def log_view(outcome, max_chars):
+    """Log replies keep whole entries: shorter lists and sample lines rather
+    than a JSON document cut in the middle, which could not be cited."""
+    if _fits(outcome, max_chars):
+        return outcome
+    # The note counts against the limit too (a view that only fits without
+    # it would be cut in the middle after all).
+    note = "列表与日志原文已按模型视图上限截短；完整证据在任务记录中"
+    for keep, chars in LOG_STEPS:
+        view = {**_log_cut(outcome, keep, chars), "view_note": note}
+        if _fits(view, max_chars):
+            break
+    return view
+
+
 def _numbers(records, fields):
     """Summarize only finite numeric measurements, not arbitrary text fields."""
     stats = {}
@@ -378,6 +427,8 @@ def model_view(provider, tool, outcome, max_chars=None, event_clock=None):
         return fit_definitions(outcome, max_chars or SCHEMA_CHARS)
     if provider == "ssh_mcp":
         return ssh_view(outcome, max_chars)
+    if provider == "logs":
+        return log_view(outcome, max_chars)
     if (
         provider != "zabbix_mcp"
         or not isinstance(outcome, dict)
@@ -548,6 +599,61 @@ def _event_signals(collected):
     return []
 
 
+def _log_signals(collected):
+    """Alert-window error logs against the previous window of the same length,
+    and error templates first seen in the window (from log_overview)."""
+    signals = []
+    for provider, tool, outcome, evidence_id in collected:
+        if provider != "logs" or tool != "log_overview":
+            continue
+        data = outcome.get("data") if isinstance(outcome, dict) else None
+        if not isinstance(data, dict) or outcome.get("is_error"):
+            continue
+        errors, before = data.get("errors"), data.get("previous_window_errors")
+        if (
+            type(errors) is int
+            and type(before) is int
+            and errors >= max(10, 2 * before)
+        ):
+            signals.append(
+                {
+                    "source": "logs",
+                    "evidence_id": evidence_id,
+                    "level": "warning",
+                    "metric": "error_surge",
+                    "value": {"errors": errors, "previous_window_errors": before},
+                    "hint": (
+                        f"告警窗口错误日志 {errors} 条，是上一等长窗口（{before} 条）的 {errors / before:.1f} 倍"
+                        if before
+                        else f"告警窗口错误日志 {errors} 条，上一等长窗口没有错误日志"
+                    )
+                    + "：错误与告警同期出现，核对错误模板与告警时刻的先后",
+                }
+            )
+        new = [
+            row
+            for row in data.get("top_errors") or []
+            if isinstance(row, dict) and row.get("new") is True
+        ]
+        if new:
+            signals.append(
+                {
+                    "source": "logs",
+                    "evidence_id": evidence_id,
+                    "level": "info",
+                    "metric": "new_error_templates",
+                    "value": {
+                        "count": len(new),
+                        "templates": [
+                            str(row.get("template") or "")[:120] for row in new[:3]
+                        ],
+                    },
+                    "hint": f"窗口内有 {len(new)} 个首次出现的错误模板：新出现的错误比一直存在的错误更可能与本次告警相关",
+                }
+            )
+    return signals
+
+
 def derive_signals(collected, event_clock=None):
     """Deterministic cross-checks over prefetched evidence for the model.
 
@@ -673,6 +779,7 @@ def derive_signals(collected, event_clock=None):
             )
     signals.extend(_history_signals(collected, event_clock))
     signals.extend(_event_signals(collected))
+    signals.extend(_log_signals(collected))
     return signals[:14]
 
 

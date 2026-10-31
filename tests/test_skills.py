@@ -191,15 +191,31 @@ SSH_TOOLS = {
     ),
 }
 PLATFORM_TOOLS = {"list_mcp_tools", "call_mcp_tool", "read_skill_resource"}
+# The log analysis platform's tools (logmcp/catalog.py).
+LOG_TOOLS = {
+    "log_" + name
+    for name in (
+        "list_tool_catalog list_sources resolve_target overview histogram facets "
+        "patterns compare error_spikes nginx_summary java_exceptions "
+        "network_events os_events search context trace"
+    ).split()
+}
 
 
 @pytest.mark.parametrize("template", [*skills.MANAGED, "custom-example"])
 def test_templates_only_reference_existing_tools(template):
     text = "\n".join(skills.template_files(template).values())
-    referenced = set(re.findall(r"`((?:ssh|list|call|read)_[a-z_]+|[a-z]+_get)`", text))
-    assert referenced <= SSH_TOOLS | set(zabbix.READ_TOOLS) | PLATFORM_TOOLS, (
-        referenced - SSH_TOOLS - set(zabbix.READ_TOOLS) - PLATFORM_TOOLS
+    referenced = set(
+        re.findall(r"`((?:ssh|list|call|read|log)_[a-z_]+|[a-z]+_get)`", text)
     )
+    known = SSH_TOOLS | set(zabbix.READ_TOOLS) | PLATFORM_TOOLS | LOG_TOOLS
+    assert referenced <= known, referenced - known
+    for rule in (
+        skills.managed_package(template)["prefetch"]
+        if template in skills.MANAGED
+        else []
+    ):
+        assert set(rule["logs"]) <= LOG_TOOLS
 
 
 @pytest.mark.parametrize(
@@ -1403,6 +1419,7 @@ def test_prefetch_rules_survive_web_edits_and_only_match_their_scope():
         "ssh": [],
         "zabbix_items": [],
         "history": [],
+        "logs": [],
         "schemas": [],
     }
     linux = [skills.managed_package("platform-linux")]
@@ -1419,6 +1436,7 @@ def test_prefetch_rules_survive_web_edits_and_only_match_their_scope():
             "ssh": ["ssh_diagnose_cpu", "ssh_diagnose_processes"],
             "zabbix_items": [],
             "history": [],
+            "logs": [],
             "schemas": [],
         }
 

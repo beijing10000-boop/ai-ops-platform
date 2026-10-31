@@ -15,6 +15,7 @@ SECRET_SETTING_KEYS = (
     "openai_api_key",
     "mcp_token",
     "ssh_mcp_token",
+    "log_mcp_token",
     "lark_app_secret",
     "zabbix_webhook_secret",
 )

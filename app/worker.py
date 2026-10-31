@@ -71,7 +71,22 @@ TOOL_LABELS = {
     "ssh_diagnose_java": "Java 进程",
     "ssh_diagnose_jvm": "JVM",
     "ssh_diagnose_system": "系统信息",
+    "log_overview": "日志概览",
+    "log_compare": "日志基线对比",
+    "log_error_spikes": "错误突增",
+    "log_patterns": "日志模板",
+    "log_facets": "日志字段分布",
+    "log_histogram": "日志时间分布",
+    "log_search": "日志检索",
+    "log_context": "日志上下文",
+    "log_trace": "链路日志",
+    "log_nginx_summary": "Nginx 日志统计",
+    "log_java_exceptions": "Java 异常日志",
+    "log_network_events": "设备日志事件",
+    "log_os_events": "系统日志事件",
 }
+# Data source names on the card's evidence lines.
+SOURCE_NAMES = {"ssh_mcp": "SSH", "logs": "日志", "zabbix_mcp": "Zabbix"}
 DEVICE_NAMES = {
     "linux": "Linux",
     "windows": "Windows",
@@ -384,9 +399,17 @@ def source_line(info):
         "zabbix+ssh": "Zabbix 历史 + SSH 实时",
         "zabbix-only": "仅 Zabbix 监控数据",
         "ssh-only": "仅 SSH 实时数据",
+        "zabbix+ssh+logs": "Zabbix 历史 + SSH 实时 + 日志",
+        "zabbix+logs": "Zabbix 历史 + 日志",
+        "ssh+logs": "SSH 实时 + 日志",
+        "logs-only": "仅日志数据",
         "none": "未取得监控或实时数据",
     }.get(path, "")
-    if path == "zabbix-only" and ssh.get("status") not in (None, "used", "available"):
+    if path in ("zabbix-only", "zabbix+logs") and ssh.get("status") not in (
+        None,
+        "used",
+        "available",
+    ):
         reason = str(ssh.get("reason") or "").strip()
         if ssh.get("status") == "not_applicable" and device:
             reason = f"{device} 不做 SSH 诊断"
@@ -405,7 +428,7 @@ def evidence_lines(info, limit=4):
         if not isinstance(item, dict) or not str(item.get("quote") or "").strip():
             continue
         label = TOOL_LABELS.get(str(item.get("tool")), str(item.get("tool") or ""))
-        source = "SSH" if item.get("provider") == "ssh_mcp" else "Zabbix"
+        source = SOURCE_NAMES.get(item.get("provider"), "Zabbix")
         quote = clipped(without_evidence_ids(str(item["quote"])), 70)
         lines.append(f"· {source} {label}：{quote}")
         if len(lines) == limit:
