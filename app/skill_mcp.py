@@ -100,7 +100,7 @@ def _cache_key(provider, configuration):
     return hashlib.sha256(material.encode()).hexdigest()
 
 
-def _root(exc):
+def root_cause(exc):
     """The single exception an anyio task group wrapped, for a readable reason."""
     while isinstance(exc, BaseExceptionGroup) and len(exc.exceptions) == 1:
         exc = exc.exceptions[0]
@@ -180,7 +180,7 @@ class SkillMCP:
             try:
                 await self._open(provider)
             except Exception as exc:
-                root = _root(exc)
+                root = root_cause(exc)
                 self.failures[provider] = (
                     root
                     if isinstance(root, (ValueError, ssh_mcp.IntegrationError))
@@ -355,8 +355,7 @@ class SkillMCP:
                 else t.inputSchema,
             }
             for t in tools.values()
-            if not query
-            or query.casefold() in (t.name + " " + (t.description or "")).casefold()
+            if query.casefold() in (t.name + " " + (t.description or "")).casefold()
         ]
 
     def bind(self, name, args, data):
@@ -527,11 +526,11 @@ class SkillMCP:
                 not isinstance(data, dict) or data.get("host_id") != args["host_id"]
             ):
                 raise ValueError("SSH MCP 返回的主机与任务绑定不匹配")
-            failed = (
-                bool(response.isError)
-                or isinstance(data, dict)
-                and data.get("status") in {"failed", "cancelled"}
-            )
+            # isError replies returned above; a tool can still report failure.
+            failed = isinstance(data, dict) and data.get("status") in {
+                "failed",
+                "cancelled",
+            }
             if not failed:
                 self.bind(name, args, data)
             return {

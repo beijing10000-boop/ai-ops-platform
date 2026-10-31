@@ -421,12 +421,12 @@ def rows(include_content=False):
             row.update(parse_document(files["SKILL.md"]))
             row["files"] = files
         else:
-            row.update(_applicability_of(row["digest"], files["SKILL.md"]))
+            row.update(_applicability_of(files["SKILL.md"]))
     return values
 
 
 @cache
-def _applicability_of(digest_value, text):
+def _applicability_of(text):
     try:
         parsed = parse_document(text)
     except ValueError:

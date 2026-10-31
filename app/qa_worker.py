@@ -2,11 +2,10 @@
 
 import asyncio
 import logging
-import os
 import json
-from .main import record_ai_question
 from redis import Redis
 from rq import Worker, Queue
+from .main import REDIS_URL, record_ai_question
 from .ai_agent import ask
 from .alert_context import resolve_replied_event
 from .conversation_context import (
@@ -19,6 +18,7 @@ from .conversation_context import (
     clear_pending,
 )
 from .feishu_client import reply_card, update_card
+from .orchestrator import queues
 
 log = logging.getLogger(__name__)
 
@@ -223,5 +223,5 @@ if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
-    redis = Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
-    Worker([Queue("ai-questions", connection=redis)], connection=redis).work()
+    redis = Redis.from_url(REDIS_URL)
+    Worker([Queue(queues.QUESTIONS, connection=redis)], connection=redis).work()

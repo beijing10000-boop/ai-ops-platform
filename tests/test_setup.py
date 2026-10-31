@@ -66,3 +66,52 @@ def test_setup_never_overwrites_existing_admins(monkeypatch):
 
     assert read_setting("feishu_admin_open_ids") == "ou_first_admin"
     assert read_setting("lark_app_secret") == "testing-app-secret"
+
+
+def test_setup_restores_a_cleared_app_secret_and_keeps_valid_settings(
+    monkeypatch, tmp_path
+):
+    from app import main
+    from app.main import read_setting
+    from test_platform import client_for
+
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "DB", tmp_path / "app.sqlite3")
+    monkeypatch.setattr(main, "ADMIN_TOKEN", "test-admin")
+    with connection() as db:
+        for key, value in (
+            ("feishu_admin_open_ids", "ou_super"),
+            ("lark_app_id", "cli_12345678"),
+            ("web_public_host", "192.0.2.10:8088"),
+        ):
+            db.execute("INSERT OR REPLACE INTO settings VALUES (?,?,0)", (key, value))
+        db.execute(
+            "INSERT OR REPLACE INTO settings VALUES ('lark_app_secret',?,1)",
+            (main.cipher().encrypt(b"testing-app-secret").decode(),),
+        )
+    # An administrator clears the App Secret on the settings page: it is
+    # stored as the ciphertext of "", and Feishu login stops working.
+    response = client_for().put(
+        "/api/v1/settings", json={"values": {"lark_app_secret": ""}}
+    )
+    assert response.status_code == 200
+    client = TestClient(app)
+    assert client.get("/api/v1/setup/status").json()["setup_required"] is True
+    payload = {
+        "bootstrap_token": "test-admin",
+        "web_protocol": "http",
+        "web_public_host": "203.0.113.9",
+        "lark_app_id": "cli_87654321",
+        "lark_app_secret": "restored-secret",
+        "feishu_admin_open_ids": "ou_attacker",
+    }
+    assert client.post("/api/v1/setup", json=payload).status_code == 200
+    assert read_setting("lark_app_secret") == "restored-secret"
+    assert client.get("/api/v1/setup/status").json()["setup_required"] is False
+    # Setup only fills what is missing; valid settings are never overwritten.
+    assert read_setting("feishu_admin_open_ids") == "ou_super"
+    assert read_setting("lark_app_id") == "cli_12345678"
+    assert read_setting("web_public_host") == "192.0.2.10:8088"
+    payload["lark_app_secret"] = "second-secret"
+    assert client.post("/api/v1/setup", json=payload).status_code == 409
+    assert read_setting("lark_app_secret") == "restored-secret"

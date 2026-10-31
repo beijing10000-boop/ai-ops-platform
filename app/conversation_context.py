@@ -54,7 +54,8 @@ def remember(
     for message_id in (source_id, *message_ids(reply_id)):
         if message_id:
             client.set(PREFIX + message_id, encoded, ex=TTL)
-    # Retained for compatibility with old data; no fallback to a different reply branch.
+    # Thread-root copy: nothing reads it, since replies resolve only by the exact
+    # replied-to message (no fallback to a different reply branch).
     if root_id:
         client.set(THREAD_PREFIX + chat_id + ":" + root_id, encoded, ex=TTL)
 
@@ -72,24 +73,6 @@ def recall(chat_id, parent_id):
         if not isinstance(payload.get("turns"), list):
             return None
         return payload
-    except (ValueError, TypeError):
-        return None
-
-
-def recall_thread(chat_id, root_id):
-    if not chat_id or not root_id:
-        return None
-    data = _client().get(THREAD_PREFIX + chat_id + ":" + root_id)
-    if not data:
-        return None
-    try:
-        payload = json.loads(data)
-        return (
-            payload
-            if payload.get("chat_id") == chat_id
-            and isinstance(payload.get("turns"), list)
-            else None
-        )
     except (ValueError, TypeError):
         return None
 

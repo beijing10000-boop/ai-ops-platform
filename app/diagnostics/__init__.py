@@ -1,1 +1,1 @@
-"""Deterministic fixed-cost Linux diagnostics."""
+"""Diagnostic type classification and exact target selectors."""

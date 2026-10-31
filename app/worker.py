@@ -3,12 +3,15 @@
 import asyncio
 import json
 import logging
-import os
 import re
+import time
+from datetime import datetime
+from urllib.parse import urlencode, urlsplit
 import httpx
 from redis import Redis
 from rq import Worker, Queue
 from rq.job import Job
+from .alert_mute import action_signature
 from .main import read_setting
 from .orchestrator import queues
 
@@ -110,11 +113,10 @@ async def analyze(event, task_id=None):
         raise RuntimeError("AI model configuration missing")
     # Tool calls are integrated in a separate MCP adapter; never assert MCP
     # evidence unless it has been fetched by that adapter.
-    from .mcp_runtime import run
+    from .mcp_runtime import numbered, run
 
-    prompt = alert_instructions()
     raw, token_usage = await run(
-        prompt,
+        alert_instructions(),
         json.dumps({"alert": event}, ensure_ascii=False),
         model=model,
         return_usage=True,
@@ -137,8 +139,6 @@ async def analyze(event, task_id=None):
             "host_groups": "未查到",
             "_unstructured": True,
         }
-    from .mcp_runtime import numbered
-
     for key in ("cause", "action", "analysis"):
         if key in data:
             data[key] = numbered(data[key])
@@ -295,8 +295,6 @@ def safe(value, n):
 
 
 def report_url(info):
-    from urllib.parse import urlsplit
-
     task_id = str(
         info.get("_task_id") or (info.get("_token_usage") or {}).get("task_id") or ""
     )
@@ -321,6 +319,7 @@ def report_url(info):
 def analysis_summary(info):
     """Use the complete canonical report; transport handles byte-size segmentation."""
     from .mcp_runtime import readable_report_answer
+    from .report_presentation import human_metrics
 
     status = {"success": "已完成", "partial": "部分完成", "failed": "失败"}.get(
         info.get("_diagnostic_status")
@@ -340,8 +339,6 @@ def analysis_summary(info):
         body += "\n\n**诊断不足与待核验**\n" + "\n".join(
             "- " + str(item) for item in info["_limitations"]
         )
-    from .report_presentation import human_metrics
-
     return human_metrics(body)
 
 
@@ -420,6 +417,11 @@ def evidence_lines(info, limit=4):
     return lines
 
 
+# Body text of the card: conclusion first, the key evidence and actions next,
+# the analysis takes what is left; with headings it stays within ~1000 characters.
+CARD_CHARS, CAUSE_CHARS, ACTION_ROWS, ANALYSIS_MIN = 1000, 400, 8, 80
+
+
 def card_summary(info):
     """Feishu card body: conclusion, the key checked evidence with the data
     sources, actions and (as room allows) the analysis, plus the status when
@@ -483,11 +485,6 @@ def card_summary(info):
     return human_metrics("\n".join(lines))
 
 
-# Body text of the card: conclusion first, the key evidence and actions next,
-# the analysis takes what is left; with headings it stays within ~1000 characters.
-CARD_CHARS, CAUSE_CHARS, ACTION_ROWS, ANALYSIS_MIN = 1000, 400, 8, 80
-
-
 def clipped(text, limit):
     """Cut long text at the last sentence end within the limit, else with an ellipsis."""
     if len(text) <= limit:
@@ -514,8 +511,6 @@ def event_duration(event):
     if value:
         return value[:80]
     try:
-        from datetime import datetime
-
         began = datetime.strptime(
             event["event_date"] + " " + event["event_time"], "%Y.%m.%d %H:%M:%S"
         )
@@ -541,8 +536,6 @@ def zabbix_event_link(event):
     trigger_id = str(event.get("trigger_id") or "")
     if not (event_id.isdigit() and trigger_id.isdigit()):
         return ""
-    from urllib.parse import urlencode, urlsplit
-
     base = read_setting("zabbix_frontend_url").strip().rstrip("/")
     parts = urlsplit(base)
     if (
@@ -564,6 +557,9 @@ def zabbix_event_link(event):
 def make_card(event, info=None, *, analysis=False, mute_info=None):
     """Mobile-friendly, compact ops event; separate rich severe AI analysis."""
     info = info or {}
+    host_id, trigger_id, event_id = (
+        str(event.get(key) or "") for key in ("host_id", "trigger_id", "event_id")
+    )
     sev = str(event.get("severity", "0"))
     recovery = str(event.get("event_value", "1")) == "0"
     title = "告警恢复" if recovery else LEVELS.get(sev, "未知")
@@ -607,7 +603,6 @@ def make_card(event, info=None, *, analysis=False, mute_info=None):
             "**事件 ID**  " + safe(event.get("event_id"), 40),
         ]
     )
-    link = zabbix_event_link(event)
     elements = [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}}]
     if info.get("note") and not analysis and not recovery:
         # Why no automatic analysis follows (reused recent one, daily budget).
@@ -621,9 +616,7 @@ def make_card(event, info=None, *, analysis=False, mute_info=None):
             }
         )
     if not analysis:
-        host_id = str(event.get("host_id") or "")
-        trigger_id = str(event.get("trigger_id") or "")
-        event_id = str(event.get("event_id") or "")
+        link = zabbix_event_link(event)
         actions = []
         if link:
             actions.append(
@@ -635,8 +628,6 @@ def make_card(event, info=None, *, analysis=False, mute_info=None):
                 }
             )
         if event_id.isdigit() and trigger_id.isdigit():
-            from .alert_mute import action_signature
-
             actions.append(
                 {
                     "tag": "button",
@@ -684,25 +675,24 @@ def make_card(event, info=None, *, analysis=False, mute_info=None):
                 + safe(mute_info.get("expires"), 40),
             },
         }
-        if mute_info.get("active", True):
-            from .alert_mute import action_signature
-
-            host_id, trigger_id, event_id = (
-                str(event.get(k) or "") for k in ("host_id", "trigger_id", "event_id")
-            )
-            if host_id.isdigit() and trigger_id.isdigit() and event_id.isdigit():
-                mute_section["extra"] = {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "关闭屏蔽"},
-                    "type": "danger",
-                    "value": {
-                        "op": "unmute_alert",
-                        "host_id": host_id,
-                        "trigger_id": trigger_id,
-                        "event_id": event_id,
-                        "sig": action_signature(event_id, trigger_id, 0),
-                    },
-                }
+        if (
+            mute_info.get("active", True)
+            and host_id.isdigit()
+            and trigger_id.isdigit()
+            and event_id.isdigit()
+        ):
+            mute_section["extra"] = {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "关闭屏蔽"},
+                "type": "danger",
+                "value": {
+                    "op": "unmute_alert",
+                    "host_id": host_id,
+                    "trigger_id": trigger_id,
+                    "event_id": event_id,
+                    "sig": action_signature(event_id, trigger_id, 0),
+                },
+            }
         elements.append(mute_section)
     if analysis and not recovery:
         elements.append({"tag": "hr"})
@@ -764,7 +754,10 @@ async def notify(card, event=None, *, analysis_info=None):
     if cfg("feishu_enabled").lower() != "true":
         log.warning("FEISHU_APP_ALERT_DISABLED")
         return
+    from .conversation_context import remember
     from .feishu_client import get_token, send_rendered_card
+    from .integrations.feishu_links import remember as remember_link
+    from .main import connection
 
     ids = cfg("feishu_alert_chat_ids") or cfg("allowed_chat_ids")
     chats = list(dict.fromkeys(x.strip() for x in ids.split(",") if x.strip()))
@@ -780,8 +773,6 @@ async def notify(card, event=None, *, analysis_info=None):
                     str(event.get("event_value", "1")) == "0"
                     or analysis_info is not None
                 ):
-                    from .main import connection
-
                     with connection() as db:
                         row = db.execute(
                             "SELECT message_id FROM alert_message_links WHERE event_id=? AND chat_id=?",
@@ -809,8 +800,6 @@ async def notify(card, event=None, *, analysis_info=None):
                             raise RuntimeError(
                                 "Feishu did not return original alert message ID"
                             )
-                        from .main import connection
-
                         with connection() as db:
                             db.execute(
                                 "INSERT INTO alert_message_links(event_id,chat_id,message_id) VALUES (?,?,?) "
@@ -818,8 +807,6 @@ async def notify(card, event=None, *, analysis_info=None):
                                 (str(event["event_id"]), chat_id, message_id),
                             )
                 if event:
-                    from .integrations.feishu_links import remember as remember_link
-
                     result_id = (response.get("data") or {}).get("message_id")
                     remember_link(
                         event,
@@ -832,10 +819,7 @@ async def notify(card, event=None, *, analysis_info=None):
                         else "problem",
                     )
                     if analysis_info is not None and result_id:
-                        from .conversation_context import remember
-
-                        source = make_card(event)
-                        origin = source["elements"][0]["text"]["content"]
+                        origin = make_card(event)["elements"][0]["text"]["content"]
                         remember(
                             chat_id,
                             original_id or result_id,
@@ -863,19 +847,6 @@ async def notify(card, event=None, *, analysis_info=None):
                 errors.append(chat_id[:5])
     if errors:
         raise RuntimeError("企业应用告警有群发送失败，数量：" + str(len(errors)))
-
-
-def initial_info(event):
-    recovery = str(event.get("event_value", "1")) == "0"
-    return {
-        "host_groups": "待查询",
-        "cause": "Zabbix 告警恢复" if recovery else "Zabbix 监控触发告警",
-        "action": "可查看 Zabbix 事件详情" if recovery else "请检查告警主机及监控项",
-        "analysis": "恢复通知，无需 AI 分析"
-        if recovery
-        else "原始事件通知；达到 AI 分析门槛后另发分析结果",
-        "human_required": not recovery,
-    }
 
 
 def store_alert_usage(event, usage):
@@ -920,14 +891,16 @@ def update_event(event, **states):
 async def handle_alert(event):
     # Delivery and AI diagnostics are separate: do not wait for the model
     # before sending the initial alert.
+    from .main import connection
+
     severity = int(event.get("severity", "0"))
     recovery = str(event.get("event_value", "1")) == "0"
-    info = initial_info(event)
+    # Extra card context: the plain alert card reads only "note" and
+    # "host_groups" from it, falling back to the event macros when absent.
+    info = {}
     if recovery:
         # A recovery is only useful in Feishu if its original problem was
         # actually delivered. Muted/failed/disabled/unknown problems are silent.
-        from .main import connection
-
         with connection() as db:
             previous = db.execute(
                 "SELECT notify_status FROM alert_events WHERE event_id=? AND event_value='1'",
@@ -948,10 +921,7 @@ async def handle_alert(event):
                 "recovery_suppressed": True,
                 "ai_skipped": True,
             }
-    if not recovery:
-        from .main import connection
-        import time
-
+    else:
         host_id = str(event.get("host_id") or "")
         trigger_id = str(event.get("trigger_id") or "")
         if host_id.isdigit() and trigger_id.isdigit():
@@ -1107,26 +1077,13 @@ def process_alert_analysis(event, task_id=None):
     return asyncio.run(handle_alert_analysis(event, task_id))
 
 
-if __name__ == "__main__":
-    import sys
-
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
-    )
-    redis = Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
-    # `python -m app.worker analysis` serves manual clicks before automatic analysis.
-    names = (
-        [queues.ALERT_MANUAL, queues.ALERT_ANALYSIS]
-        if sys.argv[1:] == ["analysis"]
-        else [queues.ALERTS]
-    )
-    Worker([Queue(name, connection=redis) for name in names], connection=redis).work()
-
-
 async def analyze_on_demand(event, message_id, chat_id=None, task_id=None):
     """Fault and recovery: reply with progress, update it, preserve threaded context."""
     from .feishu_client import reply_card, update_card
     from .conversation_context import remember, mark_pending, clear_pending
+    from .integrations.feishu_links import remember as remember_link
+    from .main import connection
+    from .mcp_runtime import format_usage
 
     if not message_id or not str(message_id).startswith("om_"):
         raise ValueError("missing original Feishu message id")
@@ -1147,8 +1104,6 @@ async def analyze_on_demand(event, message_id, chat_id=None, task_id=None):
     # Resolve known delivery chat before creating the progress card, so replies
     # while AI is running can be rejected without an extra Feishu API request.
     if not chat_id:
-        from .main import connection
-
         with connection() as db:
             rows = db.execute(
                 "SELECT chat_id FROM alert_message_links WHERE event_id=? AND message_id=?",
@@ -1183,8 +1138,6 @@ async def analyze_on_demand(event, message_id, chat_id=None, task_id=None):
         detail_url = report_url(result)
         if detail_url:
             card += "\n\n[查看完整诊断报告](" + detail_url + ")"
-        from .mcp_runtime import format_usage
-
         card += "\n\n---\n" + format_usage(
             result.get("_token_usage"), duration_ms=result.get("_duration_ms")
         )
@@ -1200,8 +1153,6 @@ async def analyze_on_demand(event, message_id, chat_id=None, task_id=None):
             # A Feishu GET /im/v1/messages/{id} may return 400 even when
             # reply and PATCH succeed. Use the verified delivery link instead.
             if not chat_id:
-                from .main import connection
-
                 with connection() as db:
                     rows = db.execute(
                         "SELECT chat_id FROM alert_message_links WHERE event_id=? AND message_id=?",
@@ -1221,14 +1172,12 @@ async def analyze_on_demand(event, message_id, chat_id=None, task_id=None):
                         len(rows),
                     )
             if chat_id:
-                from .integrations.feishu_links import remember as remember_link
-
                 remember_link(event, chat_id, progress_id, "analysis")
                 # Use the actual visible alert card text, not a guessed summary.
                 source_card = make_card(event)
                 original = (
                     str(source_card["header"]["title"]["content"])
-                    + "\\n"
+                    + "\n"
                     + str(source_card["elements"][0]["text"]["content"])
                 )
                 remember(
@@ -1276,3 +1225,20 @@ def process_manual_analysis(event, message_id, chat_id=None, task_id=None):
         return {"event_id": event.get("event_id"), "skipped": True}
     # Jobs queued before v0.9.9 carry no task_id; the runtime then creates one.
     return asyncio.run(analyze_on_demand(event, message_id, chat_id, task_id))
+
+
+if __name__ == "__main__":
+    import sys
+    from .main import REDIS_URL
+
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
+    )
+    redis = Redis.from_url(REDIS_URL)
+    # `python -m app.worker analysis` serves manual clicks before automatic analysis.
+    names = (
+        [queues.ALERT_MANUAL, queues.ALERT_ANALYSIS]
+        if sys.argv[1:] == ["analysis"]
+        else [queues.ALERTS]
+    )
+    Worker([Queue(name, connection=redis) for name in names], connection=redis).work()

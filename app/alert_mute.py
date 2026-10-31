@@ -3,7 +3,7 @@
 import hashlib
 import hmac
 import time
-from .main import connection, read_setting
+from .main import connection
 
 DURATIONS = {1, 4, 24, 72, 168}
 
@@ -19,14 +19,10 @@ def action_signature(host_id, trigger_id, hours):
 def handle_mute_action(value, operator_open_id):
     if not isinstance(value, dict) or value.get("op") != "mute_alert":
         return False, "不支持的操作"
-    ids = read_setting("feishu_admin_open_ids")
-    admins = {x.strip() for x in ids.split(",") if x.strip()}
     from .security.rbac import permits
 
-    if not operator_open_id or (
-        operator_open_id not in admins
-        and not permits(operator_open_id, "alerts.manage")
-    ):
+    # Configured Feishu admins are super_admin in rbac, so permits() covers them.
+    if not operator_open_id or not permits(operator_open_id, "alerts.manage"):
         return False, "仅飞书管理员可以暂停告警通知"
     host = str(value.get("host_id", ""))
     trigger = str(value.get("trigger_id", ""))

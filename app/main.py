@@ -1,22 +1,34 @@
 """Zabbix AI Ops unified management API and webhook ingress."""
 
+import asyncio
 import hmac
 import json
+import logging
 import os
+import re
 import secrets
 import sqlite3
+import time
+import uuid
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from cryptography.fernet import Fernet
 from redis import Redis
-from rq import Queue
+from rq import Queue, Worker
+from rq.registry import FailedJobRegistry
+from .bootstrap import persistent_secret
+from .configuration import validate_form
 from .orchestrator import queues
+from .security.rbac import enforce
+
+log = logging.getLogger(__name__)
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DB = DATA_DIR / "app.sqlite3"
@@ -49,8 +61,6 @@ ALLOWED = SENSITIVE | {
     "feishu_alert_chat_ids",
     "feishu_admin_open_ids",
     "ai_analysis_profile",
-}
-ALLOWED |= {
     "ai_profile_budgets",
     "ai_request_timeout_seconds",
     "ai_thinking",
@@ -86,8 +96,6 @@ DEFAULTS = {
 def master_key_bytes():
     if MASTER_KEY:
         return MASTER_KEY.encode()
-    from .bootstrap import persistent_secret
-
     key_path = DATA_DIR / "master.key"
     if not key_path.exists() and DB.exists():
         with sqlite3.connect(DB) as check:
@@ -143,8 +151,6 @@ def connection():
             )
 
         # Import legacy redirect configuration only once, then use Web settings.
-        from urllib.parse import urlsplit
-
         redirect_migrated = db.execute(
             "SELECT 1 FROM settings WHERE key='redirect_migration_done'"
         ).fetchone()
@@ -250,8 +256,7 @@ def read_setting(key):
         ).fetchone()
     if not row:
         return DEFAULTS.get(key, "")
-    value = cipher().decrypt(row[0].encode()).decode() if row[1] else row[0]
-    return value
+    return cipher().decrypt(row[0].encode()).decode() if row[1] else row[0]
 
 
 def beijing_time(value):
@@ -271,7 +276,6 @@ def beijing_time(value):
 
 def require_admin(request: Request):
     from .feishu_auth import authenticate
-    from .security.rbac import enforce
 
     identity = authenticate(request)
     path = request.url.path
@@ -346,8 +350,21 @@ BOOTSTRAP_KEYS = (
 )
 
 
+OPEN_ID = re.compile(r"ou_[A-Za-z0-9_-]{2,128}")
+
+
 def setup_missing():
     return [key for key in BOOTSTRAP_KEYS if not read_setting(key).strip()]
+
+
+def open_ids(raw):
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def valid_open_ids(raw):
+    """1–100 comma-separated Feishu Open IDs."""
+    ids = open_ids(raw)
+    return 0 < len(ids) <= 100 and all(OPEN_ID.fullmatch(item) for item in ids)
 
 
 class SetupRequest(BaseModel):
@@ -371,10 +388,6 @@ def setup_page():
 
 
 def validate_setup(body):
-    import re
-    from urllib.parse import urlsplit
-    from .bootstrap import persistent_secret
-
     expected = (
         ADMIN_TOKEN
         or persistent_secret(
@@ -390,33 +403,14 @@ def validate_setup(body):
         raise HTTPException(409, "系统已经初始化，请登录 Web 后台修改配置")
     if body.web_protocol not in ("http", "https"):
         raise HTTPException(422, "无效访问协议")
-    from .configuration import validate_form
-
     validate_form(
         {"web_protocol": body.web_protocol, "web_public_host": body.web_public_host},
         read_setting,
     )
-    host = urlsplit(body.web_protocol + "://" + body.web_public_host.strip())
-    if (
-        not host.hostname
-        or not host.netloc
-        or host.username
-        or host.password
-        or host.path not in ("", "/")
-        or host.query
-        or host.fragment
-        or host.port is not None
-        and not 1 <= host.port <= 65535
-    ):
+    # validate_form checks the format of a non-empty host; setup requires one.
+    if not body.web_public_host.strip():
         raise HTTPException(422, "外部访问地址只能填写域名/IP及可选端口")
-    ids = [
-        item.strip() for item in body.feishu_admin_open_ids.split(",") if item.strip()
-    ]
-    if (
-        not ids
-        or len(ids) > 100
-        or any(not re.fullmatch(r"ou_[A-Za-z0-9_-]{2,128}", item) for item in ids)
-    ):
+    if not valid_open_ids(body.feishu_admin_open_ids):
         raise HTTPException(422, "管理员 Open ID 无效")
     if not re.fullmatch(r"cli_[A-Za-z0-9]{8,64}", body.lark_app_id):
         raise HTTPException(422, "飞书 App ID 格式错误")
@@ -446,28 +440,29 @@ def complete_setup(body: SetupRequest):
         "lark_app_id": body.lark_app_id,
         "lark_app_secret": body.lark_app_secret,
         "feishu_admin_open_ids": ",".join(
-            dict.fromkeys(
-                i.strip() for i in body.feishu_admin_open_ids.split(",") if i.strip()
-            )
+            dict.fromkeys(open_ids(body.feishu_admin_open_ids))
         ),
     }
     with connection() as db:
         # Recheck inside write lock, so concurrent bootstrap requests cannot overwrite.
         db.execute("BEGIN IMMEDIATE")
-        present = {
-            row[0]
-            for row in db.execute(
-                "SELECT key FROM settings WHERE key IN ('feishu_admin_open_ids','lark_app_id','lark_app_secret','web_public_host') AND value!=''"
-            )
-        }
-        if len(present) == len(BOOTSTRAP_KEYS):
+
+        def configured(key):
+            # Decrypted, as setup_missing reads it: a secret cleared in the
+            # settings page is stored as the ciphertext of "" and is missing.
+            row = db.execute(
+                "SELECT value,secret FROM settings WHERE key=?", (key,)
+            ).fetchone()
+            if not row:
+                return False
+            value = cipher().decrypt(row[0].encode()).decode() if row[1] else row[0]
+            return bool(value.strip())
+
+        if all(configured(key) for key in BOOTSTRAP_KEYS):
             raise HTTPException(409, "初始化已完成")
         for key, value in entries.items():
             # Preserve pre-existing configuration during repair/migration.
-            row = db.execute(
-                "SELECT value FROM settings WHERE key=?", (key,)
-            ).fetchone()
-            if row and row[0] and key != "web_protocol":
+            if key != "web_protocol" and configured(key):
                 continue
             secret = key in SENSITIVE
             stored = cipher().encrypt(value.encode()).decode() if secret else value
@@ -507,8 +502,6 @@ def settings_snapshot():
 
 def validate_settings_update(body, identity):
     if set(body.values) & {"feishu_admin_open_ids", "disabled_tools"}:
-        from .security.rbac import enforce
-
         enforce(identity["open_id"], "*")
     invalid = set(body.values) - ALLOWED
     if invalid:
@@ -529,25 +522,13 @@ def validate_settings_update(body, identity):
     from .integrations.ssh_mcp import validate_settings as validate_mcp_settings
 
     validate_mcp_settings(body.values)
-    if "feishu_admin_open_ids" in body.values:
-        import re
-
-        ids = [
-            v.strip()
-            for v in body.values["feishu_admin_open_ids"].split(",")
-            if v.strip()
-        ]
-        if (
-            not ids
-            or len(ids) > 100
-            or any(not re.fullmatch(r"ou_[A-Za-z0-9_-]{2,128}", v) for v in ids)
-        ):
-            raise HTTPException(
-                status_code=422,
-                detail="飞书管理员 Open ID 格式错误（应为 ou_ 开头，多个用英文逗号分隔）",
-            )
-    from .configuration import validate_form
-
+    if "feishu_admin_open_ids" in body.values and not valid_open_ids(
+        body.values["feishu_admin_open_ids"]
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="飞书管理员 Open ID 格式错误（应为 ou_ 开头，多个用英文逗号分隔）",
+        )
     return validate_form(body.values, read_setting)
 
 
@@ -584,7 +565,7 @@ def settings_options():
     }
 
 
-@app.put("/api/v1/settings", dependencies=[Depends(require_admin)])
+@app.put("/api/v1/settings")
 def update_settings(body: SettingsUpdate, identity=Depends(require_admin)):
     validate_settings_update(body, identity)
     changed = []
@@ -625,17 +606,20 @@ def update_settings(body: SettingsUpdate, identity=Depends(require_admin)):
 def record_ai_question(
     source, request_id, question, status="pending", error_type=None, token_usage=None
 ):
+    # rejected: refused before analysis (no permission, reply still being
+    # analyzed, chain too deep); final, but not an analysis failure.
     if source not in ("feishu", "web") or status not in (
         "pending",
         "running",
         "success",
         "failed",
+        "rejected",
     ):
         raise ValueError("invalid question metrics")
     with connection() as db:
         db.execute(
             """INSERT INTO ai_questions (source,request_id,question,status,error_type,completed_at)
-            VALUES (?,?,?,?,?,CASE WHEN ? IN ('success','failed') THEN CURRENT_TIMESTAMP ELSE NULL END)
+            VALUES (?,?,?,?,?,CASE WHEN ? IN ('success','failed','rejected') THEN CURRENT_TIMESTAMP ELSE NULL END)
             ON CONFLICT(source,request_id) DO UPDATE SET
             status=excluded.status, error_type=excluded.error_type,
             completed_at=excluded.completed_at""",
@@ -689,6 +673,7 @@ def qa_stats():
         "running": d.get("running", 0),
         "success": d.get("success", 0),
         "failed": d.get("failed", 0),
+        "rejected": d.get("rejected", 0),
     }
 
 
@@ -802,13 +787,9 @@ def validate_mute(body: MuteRequest):
     }
 
 
-@app.post("/api/v1/alert-mutes", dependencies=[Depends(require_admin)])
-def create_mute(body: MuteRequest, request: Request):
-    import time
-    from .feishu_auth import authenticate
-
-    actor = authenticate(request)["open_id"]
-
+@app.post("/api/v1/alert-mutes")
+def create_mute(body: MuteRequest, identity=Depends(require_admin)):
+    actor = identity["open_id"]
     expires = int(time.time()) + body.hours * 3600
     with connection() as db:
         db.execute(
@@ -825,24 +806,18 @@ def create_mute(body: MuteRequest, request: Request):
 @app.get("/api/v1/alert-mutes", dependencies=[Depends(require_admin)])
 def list_mutes(status: str = "active"):
     """List local mute rules; default remains active for existing clients."""
-    import time
-
     if status not in {"active", "expired"}:
         raise HTTPException(422, "屏蔽状态仅支持 active 或 expired")
-    now = int(time.time())
-    # Use parameterized, fixed SQL; only the last 100 expired entries are needed.
+    # Fixed SQL fragments; only the last 100 expired entries are needed.
     if status == "active":
-        clause, order, parameters = "expires_at>?", "expires_at ASC", (now,)
+        clause, order, limit = "expires_at>?", "expires_at ASC", 1000
     else:
-        clause, order, parameters = "expires_at<=?", "expires_at DESC", (now,)
+        clause, order, limit = "expires_at<=?", "expires_at DESC", 100
     with connection() as db:
         rows = db.execute(
             "SELECT host_id,trigger_id,created_at,expires_at FROM alert_mutes "
-            f"WHERE {clause} ORDER BY {order} LIMIT 1000"
-            if status == "active"
-            else "SELECT host_id,trigger_id,created_at,expires_at FROM alert_mutes "
-            f"WHERE {clause} ORDER BY {order} LIMIT 100",
-            parameters,
+            f"WHERE {clause} ORDER BY {order} LIMIT {limit}",
+            (int(time.time()),),
         ).fetchall()
     return [
         {
@@ -855,13 +830,9 @@ def list_mutes(status: str = "active"):
     ]
 
 
-@app.delete(
-    "/api/v1/alert-mutes/{host_id}/{trigger_id}", dependencies=[Depends(require_admin)]
-)
-def remove_mute(host_id: str, trigger_id: str, request: Request):
-    from .feishu_auth import authenticate
-
-    actor = authenticate(request)["open_id"]
+@app.delete("/api/v1/alert-mutes/{host_id}/{trigger_id}")
+def remove_mute(host_id: str, trigger_id: str, identity=Depends(require_admin)):
+    actor = identity["open_id"]
     if not host_id.isdigit() or not trigger_id.isdigit():
         raise HTTPException(422, "invalid mute identity")
     with connection() as db:
@@ -929,8 +900,7 @@ def alert_events(kind: str = "problems", limit: int = 100, offset: int = 0):
     ]
 
 
-@app.get("/api/v1/audit", dependencies=[Depends(require_admin)])
-def audit():
+def recent_audit():
     with connection() as db:
         rows = db.execute(
             "SELECT id,action,key,created_at FROM audit ORDER BY id DESC LIMIT 100"
@@ -941,11 +911,14 @@ def audit():
     ]
 
 
+@app.get("/api/v1/audit", dependencies=[Depends(require_admin)])
+def audit():
+    return recent_audit()
+
+
 @app.get("/api/v1/logs", dependencies=[Depends(require_admin)])
 def logs_overview():
     """Sanitized operational log overview; never return raw exception traces."""
-    from rq.registry import FailedJobRegistry
-
     result = {
         "failed_jobs": [],
         "queues": {},
@@ -954,31 +927,21 @@ def logs_overview():
     try:
         redis = Redis.from_url(REDIS_URL, socket_connect_timeout=3, socket_timeout=5)
         for name in queues.ALL:
-            queue = Queue(name, connection=redis)
+            failed = FailedJobRegistry(name, connection=redis)
             result["queues"][name] = {
-                "queued": len(queue),
-                "failed": len(FailedJobRegistry(name, connection=redis)),
+                "queued": len(Queue(name, connection=redis)),
+                "failed": len(failed),
             }
-            ids = FailedJobRegistry(name, connection=redis).get_job_ids()[:20]
-            for jid in ids:
+            for jid in failed.get_job_ids()[:20]:
                 result["failed_jobs"].append({"queue": name, "id": jid})
     except Exception:
         result["error"] = "队列日志暂不可用，请查看 Redis 状态"
-    with connection() as db:
-        rows = db.execute(
-            "SELECT id,action,key,created_at FROM audit ORDER BY id DESC LIMIT 100"
-        ).fetchall()
-    result["audit"] = [
-        {"id": r[0], "action": r[1], "key": r[2], "time": beijing_time(r[3])}
-        for r in rows
-    ]
+    result["audit"] = recent_audit()
     return result
 
 
 @app.get("/api/v1/status", dependencies=[Depends(require_admin)])
 def runtime_status():
-    from rq import Worker
-
     result = {
         "database": "ok",
         "redis": "unknown",
@@ -998,12 +961,12 @@ def runtime_status():
     return result
 
 
-@app.post("/api/v1/test/mcp", dependencies=[Depends(require_admin)])
-async def test_mcp():
+@app.post("/api/v1/test/mcp")
+async def test_mcp(identity=Depends(require_admin)):
     from .platform_api import discover
 
     # Compatibility endpoint for existing API clients, using the same safe connection test.
-    return await discover(provider="zabbix_mcp", who={"open_id": "system"})
+    return await discover(provider="zabbix_mcp", who=identity)
 
 
 @app.post("/api/v1/test/feishu")
@@ -1013,7 +976,6 @@ async def test_feishu(
     identity=Depends(require_admin),
 ):
     import httpx
-    import asyncio
     from .feishu_client import ROOT
 
     reader = draft_reader(body, identity)
@@ -1094,14 +1056,11 @@ class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=3000)
 
 
-@app.post("/api/v1/test/ai", dependencies=[Depends(require_admin)])
+@app.post("/api/v1/test/ai")
 async def test_ai_model(
     body: SettingsUpdate | None = None, identity=Depends(require_admin)
 ):
     """Test model availability without tools; report Azure errors without leaking credentials."""
-    import asyncio
-    import logging
-    import time
     from openai import (
         AsyncOpenAI,
         APIStatusError,
@@ -1173,9 +1132,7 @@ async def test_ai_model(
             "AI 模型测试失败（" + type(exc).__name__ + "），请查看服务器日志。",
         )
     elapsed = round(time.monotonic() - started, 2)
-    logging.getLogger(__name__).warning(
-        "AI_MODEL_TEST_FAILED status=%s elapsed=%.2f", status, elapsed
-    )
+    log.warning("AI_MODEL_TEST_FAILED status=%s elapsed=%.2f", status, elapsed)
     raise HTTPException(status_code=status, detail=f"{msg} 耗时 {elapsed} 秒") from None
 
 
@@ -1183,7 +1140,6 @@ async def test_ai_model(
 async def ask_web(body: AskRequest):
     """Use the same read-only MCP agent as Feishu; never expose write tools."""
     from .ai_agent import ask
-    import uuid
 
     request_id = uuid.uuid4().hex
     record_ai_question("web", request_id, body.question, "running")
@@ -1198,11 +1154,7 @@ async def ask_web(body: AskRequest):
         record_ai_question(
             "web", request_id, body.question, "failed", type(exc).__name__
         )
-        import logging
-
-        logging.getLogger(__name__).warning(
-            "WEB_QA_FAILED error_type=%s", type(exc).__name__
-        )
+        log.warning("WEB_QA_FAILED error_type=%s", type(exc).__name__)
         raise HTTPException(
             status_code=502,
             detail="问答失败（" + type(exc).__name__ + "），请检查模型与 MCP 服务",
@@ -1218,12 +1170,10 @@ def ingest(alert: Alert, authorization: str | None = Header(default=None)):
         or not hmac.compare_digest(authorization, "Bearer " + secret)
     ):
         raise HTTPException(status_code=401, detail="unauthorized")
-    # Zabbix recovery operations retain original {EVENT.VALUE}=1.
-    # Prefer the dedicated recovery macro when present and resolved.
-    resolved_recovery = alert.recovery_value == "0" or (
-        alert.recovery_id.isdigit() and bool(alert.recovery_id)
-    )
-    if resolved_recovery:
+    # Zabbix recovery operations retain original {EVENT.VALUE}=1. Prefer the
+    # dedicated recovery macros when resolved (an unexpanded or empty
+    # recovery_id is not a digit string).
+    if alert.recovery_value == "0" or alert.recovery_id.isdigit():
         alert.event_value = "0"
     if alert.event_source != "0" or alert.event_value not in ("0", "1"):
         return {"status": "skipped", "reason": "unsupported event type"}
@@ -1254,7 +1204,7 @@ def ingest(alert: Alert, authorization: str | None = Header(default=None)):
                     json.dumps(alert.model_dump(), ensure_ascii=False),
                 ),
             )
-        job = Queue("ai-alerts", connection=redis).enqueue(
+        job = Queue(queues.ALERTS, connection=redis).enqueue(
             "app.worker.process_alert", alert.model_dump(), job_timeout=-1
         )
     except Exception:
@@ -1263,11 +1213,10 @@ def ingest(alert: Alert, authorization: str | None = Header(default=None)):
     return {"status": "queued", "job_id": job.id}
 
 
-# Register OAuth endpoints after defining app and persistence helpers.
+# Register OAuth endpoints and routers after defining app and persistence helpers.
 from . import feishu_auth  # noqa: E402,F401
 from .platform_api import router as platform_router  # noqa: E402
-
-app.include_router(platform_router)
 from .skill_api import router as skill_router  # noqa: E402
 
+app.include_router(platform_router)
 app.include_router(skill_router)

@@ -1,10 +1,13 @@
-"""Signed Feishu alert actions and personalized duration selector."""
+"""Signed Feishu alert card actions: AI analysis, mute duration selector, unmute."""
 
 import hmac
 import json
 import logging
+import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from .alert_mute import action_signature
-from .main import connection, read_setting
+from .main import connection
 
 log = logging.getLogger(__name__)
 
@@ -41,19 +44,14 @@ def _event(value):
 
 
 def _authorized(operator_open_id, permission="alerts.manage"):
-    ids = read_setting("feishu_admin_open_ids")
-    admins = {s.strip() for s in ids.split(",") if s.strip()}
-    if not operator_open_id:
-        return False
-    if operator_open_id in admins:
-        return True
+    """Configured Feishu admins are super_admin in rbac, so permits() covers them."""
     from .security.rbac import permits
 
-    return permits(operator_open_id, permission)
+    return bool(operator_open_id) and permits(operator_open_id, permission)
 
 
 def handle_choose_mute(value, operator_open_id):
-    """Return a replacement card visible only to clicking user (update_multi=False)."""
+    """Replace the card's action row with the mute durations (shared card update)."""
     if not _authorized(operator_open_id):
         return False, "仅飞书管理员可以暂停告警通知", None
     event = _event(value)
@@ -163,10 +161,7 @@ def handle_analyze_action(value, operator_open_id, message_id=None, chat_id=None
 
 def card_after_mute(value, operator_open_id):
     """Render the updated shared source card with auditable mute metadata."""
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
     from .worker import make_card
-    from .main import connection
 
     host = str(value.get("host_id", ""))
     trigger = str(value.get("trigger_id", ""))
@@ -207,9 +202,6 @@ def card_after_mute(value, operator_open_id):
 
 def handle_unmute_action(value, operator_open_id):
     """Authorize, verify clicked event identity, and revoke only its matching mute."""
-    import time
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
     from .worker import make_card
 
     if not _authorized(operator_open_id):

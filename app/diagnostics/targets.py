@@ -22,7 +22,7 @@ def question_target(question):
             continue
     if len(ids) > 1 or len(addresses) > 1 or ids and addresses:
         raise ValueError(
-            "本轮包含多个主机标识，请一次指定一个 Host ID 或 IP；未建立 SSH 关联"
+            "问题中包含多个主机标识（IP 或 Host ID），一次只诊断一台主机，请分别提问"
         )
     if ids:
         return "hostid", ids.pop()

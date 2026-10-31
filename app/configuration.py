@@ -1,4 +1,4 @@
-"""Web form defaults and local validation. No credentials are returned by validation."""
+"""Local validation of Web settings forms. No credentials are returned by validation."""
 
 import re
 from urllib.parse import urlsplit
@@ -24,9 +24,8 @@ def validate_form(values, read):
         val = values.get(key)
         return read(key) if val is None or val == "********" else val
 
-    for key in ("web_protocol",):
-        if key in values and values[key] not in {"http", "https"}:
-            raise HTTPException(422, "Web 协议必须为 HTTP 或 HTTPS")
+    if "web_protocol" in values and values["web_protocol"] not in {"http", "https"}:
+        raise HTTPException(422, "Web 协议必须为 HTTP 或 HTTPS")
     if "web_public_host" in values and values["web_public_host"]:
         try:
             host = urlsplit("http://" + values["web_public_host"])
@@ -76,9 +75,8 @@ def validate_form(values, read):
         and not 8 <= len(values["lark_app_secret"]) <= 512
     ):
         raise HTTPException(422, "飞书 App Secret 长度应为 8–512 字符")
-    for key in ("feishu_enabled",):
-        if key in values and values[key] not in {"true", "false"}:
-            raise HTTPException(422, "飞书开关无效")
+    if "feishu_enabled" in values and values["feishu_enabled"] not in {"true", "false"}:
+        raise HTTPException(422, "飞书开关无效")
     if "ai_min_severity" in values and values["ai_min_severity"] not in {
         str(i) for i in range(6)
     }:

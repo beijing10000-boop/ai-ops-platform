@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import re
-import sqlite3
 import time
 from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -14,11 +13,17 @@ from pydantic import BaseModel, ConfigDict, Field
 from . import skill_mcp
 from .platform_db import row_dict, archived_asset
 from .integrations import ssh_mcp, zabbix
-from .main import connection, read_setting, SettingsUpdate, draft_reader
+from .main import (
+    connection,
+    draft_reader,
+    read_setting,
+    settings_snapshot,
+    SettingsUpdate,
+)
 from .security.rbac import require, enforce, ROLES, audit
 from .security.redact import redact, redact_data
 from .orchestrator import tasks
-from .integrations.ssh_mcp import SERVICE
+from .orchestrator.tasks import SENSITIVE_TOOL
 from .diagnostics.playbooks import PLAYBOOKS, classify
 from .skill_mcp import (
     ACTION_TOOLS,
@@ -37,10 +42,6 @@ ASSET_CATEGORY = "资产解析"
 RISKS = {"low", "medium", "high"}
 # A diagnostic test sends only the resolved SSH asset and its revision.
 PROBE_ARGUMENTS = frozenset({"host_id", "expected_revision"})
-# Same name rule as the hidden log evidence in orchestrator.tasks.evidence_page.
-SENSITIVE_TOOL = re.compile(
-    r"(logs?|journal|syslog|kernel|errors|oom|nginx|java|jvm|service_detail|triage|collect)"
-)
 # Last live SSH MCP tool list: {settings digest: (monotonic time, registry)}.
 SSH_REGISTRY_CACHE = {}
 
@@ -65,15 +66,6 @@ def _reason(exc):
     return "SSH MCP 连接失败：" + type(exc).__name__
 
 
-def write(call):
-    try:
-        return call()
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from None
-    except sqlite3.IntegrityError:
-        raise HTTPException(409, "名称、Host ID 重复，或关联对象不存在") from None
-
-
 @router.get("/overview")
 def overview(who=Depends(require("overview.read"))):
     with connection() as db:
@@ -94,7 +86,6 @@ def overview(who=Depends(require("overview.read"))):
                 "SELECT provider,status,checked_at,detail FROM integration_health"
             )
         ]
-    with connection() as db:
         ai_counts = dict(
             db.execute(
                 "SELECT status,COUNT(*) FROM diagnostic_tasks WHERE kind='analysis' AND created_at>=datetime('now','-1 day') GROUP BY status"
@@ -102,8 +93,6 @@ def overview(who=Depends(require("overview.read"))):
         )
     ai_finished = sum(ai_counts.get(k, 0) for k in ("success", "partial", "failed"))
     finished = sum(counts.get(k, 0) for k in ("success", "partial", "failed"))
-    from .main import settings_snapshot
-
     configured = settings_snapshot()
     return {
         "scope": "平台已接收的告警；任务与用量为最近 24 小时",
@@ -211,7 +200,7 @@ async def validate_task(body):
         "deep",
     }:
         raise HTTPException(422, "诊断类型或模式无效")
-    if body.service and not SERVICE.fullmatch(body.service):
+    if body.service and not ssh_mcp.SERVICE.fullmatch(body.service):
         raise HTTPException(422, "服务名称无效")
     if not body.question.strip():
         raise HTTPException(422, "请输入诊断问题")
@@ -804,8 +793,7 @@ async def discover(
             str(exc)
             if isinstance(exc, (ValueError, ssh_mcp.IntegrationError))
             else type(exc).__name__
-        )
-        detail = detail[:250]
+        )[:250]
     keys = (
         ("mcp_url", "mcp_token", "disabled_tools")
         if provider == "zabbix_mcp"

@@ -335,6 +335,42 @@ def test_queued_question_rechecks_revoked_permissions(monkeypatch):
     ask.assert_not_awaited()
 
 
+def test_rejected_feishu_questions_are_recorded_and_counted(monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from app import qa_worker
+
+    ask = AsyncMock()
+    monkeypatch.setattr(qa_worker, "reply_card", AsyncMock())
+    monkeypatch.setattr(qa_worker, "ask", ask)
+    # No diagnosis permission.
+    asyncio.run(
+        qa_worker.execute("oc_one", "diagnose", "om_denied", sender_open_id="ou_none")
+    )
+    # A reply to an answer that is still being analyzed.
+    monkeypatch.setattr(qa_worker, "recall", lambda *args: None)
+    monkeypatch.setattr(qa_worker, "is_pending", lambda *args: True)
+    asyncio.run(qa_worker.execute("oc_one", "again", "om_busy", parent_id="om_card"))
+    ask.assert_not_awaited()
+    client = client_for()
+    stats = client.get("/api/v1/qa-stats").json()
+    assert stats["rejected"] == 2 and stats["failed"] == 0 and stats["total"] == 2
+    rows = {row["request_id"]: row for row in client.get("/api/v1/qa-events").json()}
+    assert rows["om_denied"]["status"] == rows["om_busy"]["status"] == "rejected"
+    assert rows["om_denied"]["completed_at"] and rows["om_busy"]["completed_at"]
+
+
+def test_legacy_mcp_test_endpoint_audits_the_caller():
+    # Zabbix MCP is not configured here: the test fails, and is still audited.
+    response = client_for().post("/api/v1/test/mcp")
+    assert response.status_code == 200 and response.json()["ok"] is False
+    with main.connection() as db:
+        actors = db.execute(
+            "SELECT actor FROM audit WHERE action='mcp_connection_test'"
+        ).fetchall()
+    assert actors == [("ou_super",)]
+
+
 def test_imported_history_cannot_be_retried():
     old, _ = tasks.create({"legacy_id": 1}, kind="legacy")
     tasks.finish(old["task_id"], {}, status="failed")

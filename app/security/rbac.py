@@ -28,11 +28,9 @@ ROLES = {
 
 
 def role_for(open_id):
-    from ..main import connection, read_setting
+    from ..main import connection, open_ids, read_setting
 
-    if open_id in {
-        x.strip() for x in read_setting("feishu_admin_open_ids").split(",") if x.strip()
-    }:
+    if open_id in open_ids(read_setting("feishu_admin_open_ids")):
         return "super_admin"
     # Legacy identity is only issued by the explicitly opt-in authenticator.
     if open_id == "legacy-admin":

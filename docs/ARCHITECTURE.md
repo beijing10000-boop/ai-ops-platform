@@ -24,7 +24,7 @@ Zabbix MCP 用独立会话获取九类受限只读数据。平台不透传通用
 
 MCP 会话在任务主协程中打开，并发调用复用同一会话；工具目录按配置在进程内缓存 60 秒，Web 上“刷新目录”通过设置项让所有进程失效。
 
-可信告警或从 Zabbix MCP 实时核验的所选主机提供 Zabbix Host ID；仅在 Linux 类型明确时启用 SSH 补查。远端 `ssh_resolve_host` 要求唯一、已登记且授权就绪；解析结果的主机 ID 与 revision 在本任务固定，每个动作传 `expected_revision`。远端配置变化、映射错误、权限失败与超时都会停止后续补查；不重解析并转向另一资产、不按地址匹配、不回退旧本地实现。
+可信告警或从 Zabbix MCP 实时核验的所选主机提供 Zabbix Host ID；明确的非 Linux 主机不做 SSH，Linux 与未识别设备才解析 SSH 资产（SSH MCP 判定为非 Linux 时修正设备类型）。远端 `ssh_resolve_host` 要求唯一、已登记且授权就绪；解析结果的主机 ID 与 revision 在本任务固定，每个动作传 `expected_revision`。远端配置变化、映射错误、权限失败与超时都会停止后续补查；不重解析并转向另一资产、不按地址匹配、不回退旧本地实现。
 
 独立 HTTP 客户端禁止跟随重定向和隐式环境代理，TLS 验证开启。HTTP 由管理员明确填写，用于受信任内网。令牌不进入模型；返回值递归脱敏、限长并单独加密记录，保留 provider、job_id、Host ID 和版本。
 

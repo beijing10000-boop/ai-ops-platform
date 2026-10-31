@@ -57,7 +57,6 @@ def build_detailed_report(task_id, *, task=None):
     """Export *all stored* task, evidence and model records, not page-limited UI views."""
     from .main import connection, read_setting
     from .orchestrator import tasks
-    from .orchestrator.tasks import decode
     from .mcp_runtime import readable_report_answer
     from .skill_store import applied_names
 
@@ -123,11 +122,11 @@ def build_detailed_report(task_id, *, task=None):
             ).fetchall()
         ]
         for row in evidence:
-            row["payload"] = decode(row["payload"])
+            row["payload"] = tasks.decode(row["payload"])
         # Rounds reference shared system instructions; print each text once.
         instructions = {}
         for row in interactions:
-            row["payload"] = decode(row["payload"])
+            row["payload"] = tasks.decode(row["payload"])
             shared = ((row["payload"] or {}).get("request") or {}).get("instructions")
             if isinstance(shared, dict) and shared.get("blob") not in (
                 None,
