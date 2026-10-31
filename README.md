@@ -1,6 +1,6 @@
 # AI Ops Platform · AI 智能运维平台
 
-**v1.4.2** · 默认 Web 端口 **8088**。平台负责 Zabbix 告警、飞书协作、AI 分析与报告，通过三个独立的 Streamable HTTP MCP 服务获取证据（日志 MCP 可选）。
+**v1.4.3** · 默认 Web 端口 **8088**。平台负责 Zabbix 告警、飞书协作、AI 分析与报告，通过三个独立的 Streamable HTTP MCP 服务获取证据（日志 MCP 可选）。
 
 | 服务 | 职责 |
 | --- | --- |
