@@ -868,17 +868,9 @@ def test_log_view_keeps_whole_entries_within_the_model_limit():
     assert model_view("logs", "log_overview", small, max_chars=4000) == small
 
 
-def test_feishu_card_names_the_log_source_without_evidence_ids():
+def test_feishu_card_names_the_log_source():
     info = {
-        "_evidence": [
-            {
-                "id": "E3",
-                "quote": "错误日志 42 条（E3）",
-                "provider": "logs",
-                "tool": "log_overview",
-            }
-        ],
-        "_capabilities": {"diagnostic_path": "zabbix+logs", "device_type": "network"},
+        "_capabilities": {"diagnostic_path": "zabbix+logs", "device_type": "network"}
     }
-    assert worker.evidence_lines(info) == ["· 日志 日志概览：错误日志 42 条"]
     assert worker.source_line(info) == "Zabbix 历史 + 日志（网络设备）"
+    assert worker.card_note(info).startswith("Zabbix 历史 + 日志（网络设备） · 本轮")

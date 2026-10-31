@@ -46,6 +46,54 @@ def test_raw_line_breaks_inside_strings_still_parse():
     assert readable_report_answer(raw).startswith("诊断结论\n")
 
 
+def test_answer_with_a_lost_bracket_or_cut_short_still_parses():
+    """Production (v1.4.1, a memory alert): the model never closed "findings",
+    so "evidence" landed inside it and the outer object stayed open; the card
+    showed a line of raw JSON in bytes with evidence ids, and a generic
+    suggestion instead of the model's six."""
+    lost = (
+        '{"host_groups": "Linux servers", "cause": "可用内存仅 1587232768 B（E5，E7）。", '
+        '"action": ["核对 13 个 JVM 的 -Xmx 之和"], "analysis": "逐步抬升（E8）。", '
+        '"findings": {"confirmed": [{"statement": "可用 9.44%", "evidence": ["E5"]}], '
+        '"hypotheses": [], '
+        '"evidence": [{"id": "E5", "quote": "lastvalue 90.559619"}]}'
+        "\n\n诊断范围（平台生成）\n- 目标：host"
+    )
+    parsed = answer_object(lost)
+    assert parsed["action"] == ["核对 13 个 JVM 的 -Xmx 之和"]
+    # "evidence" is back at the top level, so the citations are still checked.
+    assert parsed["evidence"] == [{"id": "E5", "quote": "lastvalue 90.559619"}]
+    assert "evidence" not in parsed["findings"]
+    index = {
+        "E5": {
+            "provider": "zabbix_mcp",
+            "tool": "item_get",
+            "text": "lastvalue 90.559619",
+        }
+    }
+    assert [item["id"] for item in check(lost, index)["valid"]] == ["E5"]
+    assert worker.card_summary(parsed) == (
+        "**诊断结论**\n可用内存仅 1.48 GiB。\n\n**处理建议**\n1. 核对 13 个 JVM 的 -Xmx 之和"
+    )
+    # Output cut short inside a later field keeps the fields before it.
+    cut = (
+        '{"cause": "/ 使用率 91.20%（E1）。", "action": ["清理 /var/log 下的旧日志"], '
+        '"analysis": "近 7 天每天增长约 1'
+    )
+    parsed = answer_object(cut)
+    assert parsed["cause"] == "/ 使用率 91.20%（E1）。"
+    assert parsed["action"] == ["清理 /var/log 下的旧日志"]
+    # A stray quote breaks one field; the whole ones are still taken.
+    stray = (
+        '{"cause": "内存不足（E5）。", "action": ["重启 dsp-api"], '
+        '"analysis": "他说"内存"不足", "findings": {}}'
+    )
+    assert answer_object(stray) == {
+        "cause": "内存不足（E5）。",
+        "action": ["重启 dsp-api"],
+    }
+
+
 def test_prose_quoting_json_stays_prose():
     assert answer_object("纯文本结论") is None
     assert answer_object('日志里有 {"level": "error"} 一行') is None

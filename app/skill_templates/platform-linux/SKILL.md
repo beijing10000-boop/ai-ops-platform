@@ -13,7 +13,7 @@ prefetch:
   types: [memory]
   ssh: [ssh_diagnose_memory, ssh_diagnose_memory_processes, ssh_diagnose_pressure, ssh_diagnose_oom, ssh_diagnose_java]
   zabbix_items: [vm.memory, system.swap]
-  history: [vm.memory.utilization, "vm.memory.size[pavailable]", "vm.memory.size[available]", "system.swap.size[,pfree]", "system.swap.size[,free]"]
+  history: [vm.memory.utilization, "vm.memory.size[pavailable]", "vm.memory.size[available]"]
   schemas: [history_get, trend_get]
 - scopes: [alert]
   types: [disk]
@@ -67,7 +67,8 @@ prefetch:
 
 ## 内存
 
-- 以 MemAvailable 与 Swap 判断是否真正不足，缓存占用不等同于内存不足；持续偏高看 PSI memory 与 `ssh_diagnose_oom`（OOM 记录），必要时 `ssh_diagnose_syslog` 查 OOM 被杀进程。
+- 以 MemAvailable 判断是否真正不足，缓存占用不等同于内存不足；持续偏高看 PSI memory 与 `ssh_diagnose_oom`（OOM 记录），必要时 `ssh_diagnose_syslog` 查 OOM 被杀进程。
+- 未配置 Swap（总量为 0）是常见的有意配置，按正常处理：不要在结论、分析或建议中提及（包括“未启用 Swap”“建议配置 Swap”）；只有 Swap 实际被使用时才分析换页。
 - 用 7 天趋势区分“持续增长”（泄漏或容量不足）与“突增”（批处理、流量峰值）；只有趋势证据时不能断言内存泄漏。
 - RSS 排行中的 Java 进程以 `ssh_diagnose_java` 核对 -Xmx、MaxRAMPercentage、容器内存上限与 RSS 的关系：RSS 远高于堆上限说明堆外、元空间或线程栈占用；未设堆上限的多个 JVM 共存容易挤爆内存。
 

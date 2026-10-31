@@ -20,10 +20,14 @@ log = logging.getLogger(__name__)
 # Immutable Feishu card output contract; diagnostic policy lives in enabled Skills.
 ALERT_OUTPUT_CONTRACT = (
     "告警卡片要求只输出 JSON 对象，必须包含 "
-    "host_groups,cause,action,analysis,findings,human_required 字段，另加 evidence 数组。"
-    "cause 写完整中文结论（100–200 字）：证据充分的直接成因和主要依据，关键数值后注明证据编号（E2）；"
-    "action 为处理建议数组，按影响与风险排序，每项一句；"
-    "analysis 写证据之间的关联、排除项和尚未证实的方向（200–400 字）。"
+    "host_groups,cause,action,analysis,findings,human_required 字段，另加 evidence 数组；"
+    "输出前核对括号成对闭合，字符串内不要换行。"
+    "cause 显示在飞书卡片上：写一段完整中文结论（60–150 字），不分点、不换行，"
+    "写清证据充分的直接成因和 2–3 个关键数值，关键数值后注明证据编号（E2）；"
+    "action 为处理建议数组，2–4 项，按影响与风险排序，每项一句、不超过 50 字，"
+    "写能直接执行的操作：要查的命令或指标、要处理的进程、服务或配置项；"
+    "不写“持续观察”“必要时评估”“打开报告核验”这类没有具体动作的建议；"
+    "analysis 只在网页报告显示，写证据之间的关联、排除项和尚未证实的方向（200–400 字）。"
     "findings 为对象："
     '{"confirmed":[{"statement":"已确认的事实","evidence":["E2"]}],'
     '"probable":[{"statement":"高可信推断","evidence":["E3"]}],'
@@ -37,56 +41,6 @@ ALERT_OUTPUT_CONTRACT = (
     "平台会核对 quote 是否真的出现在对应证据中，并据此评定可信度。"
     "无证据时明确写未知，不能编造事实。"
 )
-# Plain names for the evidence lines of the Feishu card.
-TOOL_LABELS = {
-    "history_get": "监控历史",
-    "trend_get": "7 天趋势",
-    "item_get": "监控项",
-    "event_get": "告警事件",
-    "problem_get": "当前问题",
-    "trigger_get": "触发器",
-    "host_get": "主机信息",
-    "ssh_collect": "实时采集",
-    "ssh_diagnose_cpu": "CPU 负载",
-    "ssh_diagnose_processes": "进程排行",
-    "ssh_diagnose_memory": "内存",
-    "ssh_diagnose_memory_processes": "内存进程排行",
-    "ssh_diagnose_pressure": "资源压力",
-    "ssh_diagnose_disk": "磁盘",
-    "ssh_diagnose_io": "磁盘 I/O",
-    "ssh_diagnose_network": "网络接口",
-    "ssh_diagnose_sockets": "端口与连接",
-    "ssh_diagnose_tcp_states": "TCP 状态",
-    "ssh_diagnose_oom": "OOM 记录",
-    "ssh_diagnose_syslog": "系统日志",
-    "ssh_diagnose_system_errors": "系统日志",
-    "ssh_diagnose_kernel": "内核日志",
-    "ssh_diagnose_logs": "服务日志",
-    "ssh_diagnose_service": "服务状态",
-    "ssh_diagnose_service_detail": "服务详情",
-    "ssh_diagnose_service_map": "端口归属",
-    "ssh_diagnose_failed_services": "失败服务",
-    "ssh_diagnose_nginx": "Nginx 状态",
-    "ssh_diagnose_nginx_access": "Nginx 访问日志",
-    "ssh_diagnose_java": "Java 进程",
-    "ssh_diagnose_jvm": "JVM",
-    "ssh_diagnose_system": "系统信息",
-    "log_overview": "日志概览",
-    "log_compare": "日志基线对比",
-    "log_error_spikes": "错误突增",
-    "log_patterns": "日志模板",
-    "log_facets": "日志字段分布",
-    "log_histogram": "日志时间分布",
-    "log_search": "日志检索",
-    "log_context": "日志上下文",
-    "log_trace": "链路日志",
-    "log_nginx_summary": "Nginx 日志统计",
-    "log_java_exceptions": "Java 异常日志",
-    "log_network_events": "设备日志事件",
-    "log_os_events": "系统日志事件",
-}
-# Data source names on the card's evidence lines.
-SOURCE_NAMES = {"ssh_mcp": "SSH", "logs": "日志", "zabbix_mcp": "Zabbix"}
 DEVICE_NAMES = {
     "linux": "Linux",
     "windows": "Windows",
@@ -421,95 +375,115 @@ def source_line(info):
     return text + (f" · 依据可信度 {confidence}" if confidence else "")
 
 
-def evidence_lines(info, limit=4):
-    """The checked citations as short plain lines, without evidence ids."""
-    lines = []
-    for item in info.get("_evidence") or []:
-        if not isinstance(item, dict) or not str(item.get("quote") or "").strip():
-            continue
-        label = TOOL_LABELS.get(str(item.get("tool")), str(item.get("tool") or ""))
-        source = SOURCE_NAMES.get(item.get("provider"), "Zabbix")
-        quote = clipped(without_evidence_ids(str(item["quote"])), 70)
-        lines.append(f"· {source} {label}：{quote}")
-        if len(lines) == limit:
+# The card holds the conclusion and what to do; the evidence, the analysis and
+# the scope are on the Web report it links to.
+CAUSE_CHARS, ACTION_ROWS, ACTION_CHARS = 200, 4, 80
+LIST_MARK = re.compile(r"^\s*(?:\d{1,2}\s*[.、)）](?!\d)\s*|[-•·*]\s+)")
+HEADING = re.compile(r"^(?:#|\x60\x60\x60)|^\*\*[^*]{1,20}\*\*[：:]?$")
+ADVICE_HEADING = re.compile(r"^[#*\s]*(?:处理|操作|修复)?(?:建议|措施)[*：:\s]*$")
+# What to do when the analysis did not finish, by the reason its answer gives.
+RETRY = "在原告警卡片上点「🤖 AI分析」重新分析"
+UNFINISHED_STEPS = (
+    ("请求超时", [RETRY, "反复超时时，在 系统配置 → AI 配置 调高「AI 单次请求超时」"]),
+    (
+        "时间预算",
+        [RETRY, "反复出现时，在 系统配置 → AI 配置 调高该分析模式的「总时间（秒）」"],
+    ),
+    ("未形成完整结论", ["在 系统配置 → AI 配置 调高该分析模式的「最大轮次」", RETRY]),
+    (
+        "请求被拒绝",
+        ["在 系统配置 → AI 配置 点「验证模型连接」，核对地址、模型与密钥", RETRY],
+    ),
+    (
+        "",
+        [
+            "稍后" + RETRY,
+            "持续失败时，在 系统配置 → AI 配置 点「验证模型连接」检查模型服务",
+        ],
+    ),
+)
+
+
+def action_items(value):
+    """Suggestions as plain items, whether a list or numbered lines of text."""
+    lines = value if isinstance(value, list) else str(value or "").splitlines()
+    items = (LIST_MARK.sub("", str(line)).strip() for line in lines)
+    return [item for item in items if item]
+
+
+def plain_answer_parts(text):
+    """Conclusion and actions of an answer that is not JSON.
+
+    The conclusion is its first line of text (a heading or code fence would
+    show as an empty conclusion); the actions are the list under a heading
+    that names suggestions. An analysis that did not finish gets the steps
+    that address why, never a bare "check the report".
+    """
+    text = str(text or "")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    prose = [line for line in lines if not HEADING.match(line)]
+    actions, listing = [], False
+    for line in lines:
+        if ADVICE_HEADING.match(line):
+            listing = True
+        elif listing and LIST_MARK.match(line):
+            actions.append(LIST_MARK.sub("", line))
+        elif listing and actions:
             break
-    return lines
+    if not actions and ("模型未完成最终诊断" in text or "未形成完整结论" in text):
+        actions = next(steps for marker, steps in UNFINISHED_STEPS if marker in text)
+    return (prose[0] if prose else ""), actions
 
 
-# Body text of the card: conclusion first, the key evidence and actions next,
-# the analysis takes what is left; with headings it stays within ~1000 characters.
-CARD_CHARS, CAUSE_CHARS, ACTION_ROWS, ANALYSIS_MIN = 1000, 400, 8, 80
+def card_text(value):
+    """Model text for the card: one paragraph, no evidence ids, sizes in GiB."""
+    from .report_presentation import human_metrics
+
+    return human_metrics(without_evidence_ids(re.sub(r"\s*\n\s*", " ", str(value))))
 
 
 def card_summary(info):
-    """Feishu card body: conclusion, the key checked evidence with the data
-    sources, actions and (as room allows) the analysis, plus the status when
-    not clean.
+    """Feishu card body: the status when not clean, the conclusion and up to
+    four numbered actions.
 
-    Scope, the full citation check and limitations stay on the Web report the
-    card links to; the conversation context keeps the full analysis_summary().
+    The data sources, confidence and usage are the card's footer (card_note);
+    the conversation context keeps the full analysis_summary().
     """
     from .mcp_runtime import numbered
-    from .report_presentation import human_metrics
 
-    status = info.get("_diagnostic_status")
-    lines = []
-    if status in ("partial", "failed"):
-        lines.append("**诊断状态**  " + ("部分完成" if status == "partial" else "失败"))
     if info.get("_unstructured"):
-        # No structured answer (model error fallback, plain text): its first
-        # line of text carries the reason (a Markdown heading or code fence
-        # would show as an empty conclusion); the evidence is on the Web report.
-        first = next(
-            (
-                line.strip()
-                for line in str(info.get("analysis") or "").splitlines()
-                if line.strip() and not line.lstrip().startswith(("#", "\x60\x60\x60"))
-            ),
-            "",
-        )
-        lines += [
-            "**诊断结论**",
-            first or "模型未给出结论。",
-            "",
-            "**处理建议**",
-            "请打开完整诊断报告核验已采集的证据，必要时重新发起分析。",
-        ]
+        cause, actions = plain_answer_parts(info.get("analysis"))
     else:
-        full = without_evidence_ids(numbered(info.get("cause")))
-        cause = clipped(full, CAUSE_CHARS)
-        if cause != full:
-            cause += "（详见完整报告）"
-        budget = CARD_CHARS - len(cause)
-        lines += ["**诊断结论**", cause or "未知"]
-        proof = evidence_lines(info)
-        sources = source_line(info)
-        if proof or sources:
-            lines += ["", "**核心证据**" + (f"  {sources}" if sources else "")]
-            lines += proof or ["未取得通过核对的证据引用，结论请在完整报告中核验。"]
-            budget -= len(sources) + sum(len(line) for line in proof or [""]) + 8
-        actions = [
-            line.strip()
-            for line in without_evidence_ids(numbered(info.get("action"))).split("\n")
-            if line.strip()
+        cause, actions = numbered(info.get("cause")), action_items(info.get("action"))
+    lines = []
+    status = info.get("_diagnostic_status")
+    if status in ("partial", "failed"):
+        lines += [
+            "**诊断状态**  " + ("部分完成" if status == "partial" else "失败"),
+            "",
         ]
-        kept = []
-        for index, item in enumerate(actions):
-            if index == ACTION_ROWS or (kept and len(item) > budget):
-                kept.append("其余建议见完整诊断报告。")
-                budget -= len(kept[-1])
-                break
-            kept.append(clipped(item, max(budget, 40)))
-            budget -= len(kept[-1])
+    full = card_text(cause or "")
+    shown = clipped(full, CAUSE_CHARS)
+    lines += ["**诊断结论**", shown + "（详见完整报告）" if shown != full else full]
+    if lines[-1] == "":
+        lines[-1] = "模型未给出结论。"
+    items = [clipped(card_text(item), ACTION_CHARS) for item in actions]
+    items = [item for item in items if item]
+    if items:
         lines += ["", "**处理建议**"]
-        lines += kept or ["无"]
-        analysis = without_evidence_ids(numbered(info.get("analysis")))
-        if analysis and budget >= ANALYSIS_MIN:
-            shown = clipped(analysis, budget)
-            if shown != analysis:
-                shown += "（详见完整报告）"
-            lines += ["", "**分析与依据**", shown]
-    return human_metrics("\n".join(lines))
+        lines += [f"{n}. {item}" for n, item in enumerate(items[:ACTION_ROWS], 1)]
+        if len(items) > ACTION_ROWS:
+            lines.append(f"另有 {len(items) - ACTION_ROWS} 条建议见完整报告")
+    return "\n".join(lines)
+
+
+def card_note(info):
+    """Footer of the analysis card: what the conclusion rests on, how far it
+    can be trusted, and what the run cost."""
+    from .mcp_runtime import format_usage
+
+    usage = format_usage(info.get("_token_usage"), duration_ms=info.get("_duration_ms"))
+    return " · ".join(part for part in (source_line(info), usage) if part)
 
 
 def clipped(text, limit):
@@ -748,22 +722,11 @@ def make_card(event, info=None, *, analysis=False, mute_info=None):
                 }
             )
     if analysis:
-        from .mcp_runtime import format_usage
-
         elements.append({"tag": "hr"})
         elements.append(
             {
                 "tag": "note",
-                "elements": [
-                    {
-                        "tag": "plain_text",
-                        "content": "◉ "
-                        + format_usage(
-                            info.get("_token_usage"),
-                            duration_ms=info.get("_duration_ms"),
-                        ),
-                    }
-                ],
+                "elements": [{"tag": "plain_text", "content": "◉ " + card_note(info)}],
             }
         )
     return {
@@ -1110,7 +1073,6 @@ async def analyze_on_demand(event, message_id, chat_id=None, task_id=None):
     from .conversation_context import remember, mark_pending, clear_pending
     from .integrations.feishu_links import remember as remember_link
     from .main import connection
-    from .mcp_runtime import format_usage
 
     if not message_id or not str(message_id).startswith("om_"):
         raise ValueError("missing original Feishu message id")
@@ -1161,21 +1123,18 @@ async def analyze_on_demand(event, message_id, chat_id=None, task_id=None):
         # The card shows the conclusion and actions; the full summary is kept
         # as conversation context so follow-up questions see the analysis.
         detail = analysis_summary(result)
-        card = card_summary(result)
-        detail_url = report_url(result)
-        if detail_url:
-            card += "\n\n[查看完整诊断报告](" + detail_url + ")"
-        card += "\n\n---\n" + format_usage(
-            result.get("_token_usage"), duration_ms=result.get("_duration_ms")
-        )
+        card = card_summary(result) + "\n\n---\n" + card_note(result)
+        link = report_url(result) or None
         if progress_id:
             try:
-                await update_card(progress_id, "AI 分析结果", card)
+                await update_card(progress_id, "AI 分析结果", card, link=link)
             except Exception:
                 log.exception("ALERT_AI_CARD_UPDATE_FAILED event_id=%s", event_id)
-                progress_id = await reply_card(message_id, "AI 分析结果", card)
+                progress_id = await reply_card(
+                    message_id, "AI 分析结果", card, link=link
+                )
         else:
-            progress_id = await reply_card(message_id, "AI 分析结果", card)
+            progress_id = await reply_card(message_id, "AI 分析结果", card, link=link)
         try:
             # A Feishu GET /im/v1/messages/{id} may return 400 even when
             # reply and PATCH succeed. Use the verified delivery link instead.

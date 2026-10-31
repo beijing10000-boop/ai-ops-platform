@@ -1051,8 +1051,8 @@ def test_windows_host_uses_zabbix_only_and_never_connects_ssh(monkeypatch):
         applied.values()
     )
     assert task["status"] == "success"
-    card = worker.card_summary(worker_info(task))
-    assert "仅 Zabbix 监控数据（Windows 不做 SSH 诊断）" in card
+    note = worker.card_note(worker_info(task))
+    assert "仅 Zabbix 监控数据（Windows 不做 SSH 诊断）" in note
 
 
 def worker_info(task):
@@ -1152,8 +1152,8 @@ def test_linux_host_without_ssh_asset_degrades_to_zabbix_and_says_why(monkeypatc
     assert "能力说明：SSH MCP不可用：映射不存在" in report["answer"]
     # No SSH asset is a stated limitation of the evidence, not a failed task.
     assert task["status"] == "success"
-    card = worker.card_summary(worker_info(task))
-    assert "仅 Zabbix 监控数据（映射不存在" in card
+    note = worker.card_note(worker_info(task))
+    assert "仅 Zabbix 监控数据（映射不存在" in note
 
 
 def test_model_gets_no_ssh_tools_once_the_target_has_no_ssh_asset(monkeypatch):
@@ -1503,7 +1503,7 @@ def test_host_limits_name_the_step_and_capability():
     assert host_limits(collected) == [("pressure", "kernel-psi")]
 
 
-def test_card_shows_checked_evidence_and_sources_without_evidence_ids():
+def test_card_footer_names_sources_and_confidence_without_evidence_ids():
     info = {
         "cause": "负载高由 D 状态任务造成（E3）。",
         "action": ["排查 sdb 写入"],
@@ -1528,10 +1528,17 @@ def test_card_shows_checked_evidence_and_sources_without_evidence_ids():
             "diagnostic_path": "zabbix+ssh",
             "ssh_mcp": {"status": "used"},
         },
+        "_token_usage": {"available": True, "total": 1000, "input": 900, "output": 100},
+        "_duration_ms": 12300,
     }
+    # Raw evidence quotes stay on the Web report; the card reads as prose.
     card = worker.card_summary(info)
-    assert "**核心证据**  Zabbix 历史 + SSH 实时（Linux） · 依据可信度 高" in card
-    assert "· SSH 实时采集：psi_io_some_avg10 48.2" in card
-    assert "· Zabbix 监控历史：after avg 12" in card
-    assert not re.search(r"\bE\d+\b", card)
-    assert len(card) <= 1100
+    assert card == (
+        "**诊断结论**\n负载高由 D 状态任务造成。\n\n**处理建议**\n1. 排查 sdb 写入"
+    )
+    note = worker.card_note(info)
+    assert note == (
+        "Zabbix 历史 + SSH 实时（Linux） · 依据可信度 高 · "
+        "本轮 Token 消耗：1,000（输入 900 / 输出 100） · 执行耗时：12.3 秒"
+    )
+    assert not re.search(r"\bE\d+\b", card + note)

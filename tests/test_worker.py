@@ -35,12 +35,12 @@ def test_feishu_card_shows_conclusion_and_actions_without_evidence_ids():
         "_limitations": ["工具 trend_get 未取得完整证据"],
         "_diagnostic_status": "partial",
     }
-    # No "需人工处理" wording; the analysis follows the actions.
+    # The conclusion and numbered actions only: the analysis, evidence and
+    # scope are on the Web report (a denser card was hard to read in Feishu).
     assert worker.card_summary(info) == (
-        "**诊断状态**  部分完成\n**诊断结论**\n"
+        "**诊断状态**  部分完成\n\n**诊断结论**\n"
         "每核 5 分钟负载 1.65超过阈值 1.5，CPU 利用率 33.57%；负载来自 postgres 周期性任务。\n\n"
-        "**处理建议**\n1. 核对 postgres 定时任务\n2. 评估是否扩容 CPU，参考证据\n\n"
-        "**分析与依据**\n可用性项由 1 变 0 的时间紧接告警时间，7 天趋势始终为 1，可排除阈值不合理。"
+        "**处理建议**\n1. 核对 postgres 定时任务\n2. 评估是否扩容 CPU，参考证据"
     )
     # Hardware model numbers are not evidence references; an id inside the
     # sentence reads as "证据".
@@ -67,56 +67,57 @@ def test_feishu_card_shows_conclusion_and_actions_without_evidence_ids():
         == "**诊断结论**\n磁盘将满\n\n**处理建议**\n1. 清理日志"
     )
     long = {
-        "cause": "负载来自周期性任务，建议核对。" * 40,
+        "cause": "负载来自周期性任务，建议核对。\n" * 40,
         "action": [f"建议 {n}" for n in range(1, 10)],
         "_diagnostic_status": "success",
     }
     text = worker.card_summary(long)
-    # The conclusion is cut at a sentence end within 400 characters.
+    # One paragraph cut at a sentence end within 200 characters; four actions.
     assert (
         text.split("\n")[1]
-        == "负载来自周期性任务，建议核对。" * 26 + "（详见完整报告）"
+        == "负载来自周期性任务，建议核对。" * 13 + "（详见完整报告）"
     )
-    assert "8. 建议 8\n其余建议见完整诊断报告。" in text and "建议 9" not in text
-    # Body text stays within ~1000 characters: the analysis takes what is left
-    # and is cut at a sentence end, or dropped when under 80 characters remain.
-    step = "核对定时任务并记录执行时长，必要时调整执行窗口以避开业务高峰。"
+    assert text.endswith("4. 建议 4\n另有 5 条建议见完整报告")
+    # A long action is cut to one line; an item starting with a number keeps it.
     text = worker.card_summary(
         {
-            "cause": "负载偏高。" * 80,
-            "action": [step] * 4,
-            "analysis": "分析句子。" * 200,
-            "_diagnostic_status": "success",
+            "cause": "负载偏高",
+            "action": ["核对定时任务并记录执行时长，" * 10, "1.5 倍基线"],
         }
     )
-    assert "4. " + step in text
-    assert text.split("**分析与依据**\n")[1] == "分析句子。" * 92 + "（详见完整报告）"
-    assert len(text) <= 1100
-    text = worker.card_summary(
-        {
-            "cause": "负载偏高。" * 80,
-            "action": [step * 2] * 9,
-            "analysis": "分析句子。" * 50,
-            "_diagnostic_status": "success",
-        }
-    )
-    assert text.endswith("其余建议见完整诊断报告。") and "分析与依据" not in text
-    assert len(text) <= 1100
+    first, second = text.split("\n")[-2:]
+    assert first.startswith("1. 核对定时任务") and first.endswith("…")
+    assert len(first) == 3 + worker.ACTION_CHARS and second == "2. 1.5 倍基线"
     assert worker.clipped("结论" * 120, 200) == "结论" * 99 + "结…"
-    # Model-error fallbacks are plain text: the first line says why.
+    # An analysis that did not finish says why and how to fix it, never
+    # "open the report and re-run if needed".
     partial = {
         "cause": "分析结果需要人工复核",
         "action": "请检查告警相关指标及服务日志",
-        "analysis": "AI 模型请求超时；模型未完成最终诊断。\n下列仅为已执行的工具及采集状态…",
+        "analysis": "AI 模型请求超时；模型未完成最终诊断。\n下列仅为已执行的工具及采集状态…\n"
+        "- zabbix_mcp / history_get: success",
         "human_required": True,
         "_unstructured": True,
         "_diagnostic_status": "partial",
     }
-    text = worker.card_summary(partial)
-    assert text.startswith(
-        "**诊断状态**  部分完成\n**诊断结论**\nAI 模型请求超时；模型未完成最终诊断。\n"
+    assert worker.card_summary(partial) == (
+        "**诊断状态**  部分完成\n\n**诊断结论**\nAI 模型请求超时；模型未完成最终诊断。\n\n"
+        "**处理建议**\n1. 在原告警卡片上点「🤖 AI分析」重新分析\n"
+        "2. 反复超时时，在 系统配置 → AI 配置 调高「AI 单次请求超时」"
     )
-    assert "下列仅为" not in text and "分析结果需要人工复核" not in text
+    # A plain-text answer keeps its own suggestions; none are made up.
+    prose = {
+        "analysis": "## 诊断结果\n主机内存不足（E5）。\n\n### 处理建议\n"
+        "1. 重启 dsp-api（E9）\n2. 调低 -Xmx\n\n其它说明",
+        "_unstructured": True,
+    }
+    assert worker.card_summary(prose) == (
+        "**诊断结论**\n主机内存不足。\n\n**处理建议**\n1. 重启 dsp-api\n2. 调低 -Xmx"
+    )
+    assert (
+        worker.card_summary({"analysis": "只有一句话", "_unstructured": True})
+        == "**诊断结论**\n只有一句话"
+    )
 
 
 def test_report_links_are_plain_urls_for_the_default_browser(monkeypatch):
@@ -705,11 +706,11 @@ def test_manual_analysis_progress_updates_and_context_for_both_states(monkeypatc
             "analysis": "CPU趋势连续上升",
         }
 
-    async def reply(message_id, title, detail):
+    async def reply(message_id, title, detail, link=None):
         events.append(("reply", message_id, title, detail))
         return "om_progress"
 
-    async def update(message_id, title, detail, template="green"):
+    async def update(message_id, title, detail, template="green", link=None):
         events.append(("update", message_id, title, detail))
 
     saved = []
@@ -742,10 +743,11 @@ def test_manual_analysis_progress_updates_and_context_for_both_states(monkeypatc
         assert len(events) == 2
         assert events[0][0:3] == ("reply", "om_original", "AI 分析中")
         assert events[1][0:3] == ("update", "om_progress", "AI 分析结果")
-        # The card carries conclusion, actions and analysis; the conversation
-        # context keeps the full summary for follow-up questions.
-        assert "负载较高" in events[1][3] and "检查进程" in events[1][3]
-        assert "CPU趋势连续上升" in events[1][3]
+        # The card carries the conclusion and actions; the conversation
+        # context keeps the full summary, analysis included, for follow-ups.
+        assert "负载较高" in events[1][3] and "1. 检查进程" in events[1][3]
+        assert "CPU趋势连续上升" not in events[1][3]
+        assert events[1][3].endswith("本轮 Token 消耗：模型未返回用量")
         assert saved[-1][0:3] == ("oc_group", "om_original", "om_progress")
         assert "CPU趋势连续上升" in saved[-1][4]
 
@@ -756,10 +758,10 @@ def test_alert_origin_kept_for_follow_ups_has_real_line_breaks(monkeypatch):
     async def analyze(event, task_id=None):
         return {"cause": "负载较高", "action": "检查进程", "analysis": "CPU趋势上升"}
 
-    async def reply(message_id, title, detail):
+    async def reply(message_id, title, detail, link=None):
         return "om_progress"
 
-    async def update(message_id, title, detail, template="green"):
+    async def update(message_id, title, detail, template="green", link=None):
         pass
 
     saved = []

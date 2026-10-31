@@ -776,7 +776,7 @@ def derive_signals(collected, event_clock=None):
                     evidence_id,
                     "memory_utilization",
                     {"key": key, "percent": round(figure, 2)},
-                    "Zabbix 最新内存利用率已超过 90%：核对 RSS 排行、Swap 与 OOM 记录",
+                    "Zabbix 最新内存利用率已超过 90%：核对 RSS 排行与 OOM 记录",
                 )
             )
         elif key.startswith("vfs.fs") and "pused" in key and figure >= 90:
