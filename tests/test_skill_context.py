@@ -200,3 +200,88 @@ def test_ssh_process_lists_keep_busy_rows_only_and_leave_the_evidence_whole():
     assert len(outcome["data"]["summary"]["processes"]) == 41
     small = {"data": {"summary": {"processes": rows[:5]}}}
     assert model_view("ssh_mcp", "ssh_diagnose_processes", small) is small
+
+
+def java_row(index):
+    """One process of a Java inventory, shaped like production rows (~1000 chars)."""
+    name = f"svc-{index:02d}"
+    jar = f"/data/jar/{name}/{name}_445.jar"
+    flags = [
+        "-XX:+UseG1GC",
+        "-XX:+HeapDumpOnOutOfMemoryError",
+        f"-XX:HeapDumpPath=/data/logs/dump/{name}/",
+    ]
+    return {
+        "pid": 30000 + index,
+        "user": "root",
+        "elapsed_seconds": 106000,
+        "rss_KiB": 1500000 - index * 1000,
+        "cpu_percent": 1.5,
+        "mem_percent": 9.4,
+        "threads": 120,
+        "fds": 300,
+        "fd_limit": 65535,
+        "unit": "supervisord.service",
+        "container": None,
+        "cwd": f"/data/jar/{name}",
+        "exe": "/usr/local/jdk1.8.0_271/bin/java",
+        "java_version": "1.8.0_271",
+        "implementor": "Oracle Corporation",
+        "main": {"kind": "jar", "name": jar},
+        "application": f"{name}_445",
+        "profiles": ["prod"],
+        "heap": {"xms": "256m", "xmx": "1024m", "max_metaspace": "256m"},
+        "gc": {"collector": "G1", "gc_log": None, "xx_flags": flags},
+        "logs": {
+            "configured": [f"logging.file.name=/data/logs/app-{name}.log"],
+            "open_files": [
+                f"/data/logs/app-{name}.log",
+                f"/data/logs/error-{name}.log",
+                f"/data/logs/{name}/dledger/dledger.log",
+            ],
+        },
+        "cgroup_memory_limit_bytes": None,
+        "system_properties_count": 6,
+        "command_preview": " ".join(
+            ["java -jar -Xms256m -Xmx1024m", *flags, *flags, *flags, jar]
+        )[:400],
+        "args_truncated": False,
+    }
+
+
+def test_wide_inventory_rows_lose_bulky_fields_before_rows():
+    """Thirteen Java processes in a 6000-character view: every process stays
+    listed with its identity, heap and memory; command lines and log paths go.
+    Production (v1.3.0) showed the model one process out of thirteen."""
+    rows = [java_row(index) for index in range(13)]
+    outcome = {
+        "is_error": False,
+        "data": {
+            "status": "success",
+            "summary": {"title": "Java 进程", "java_processes": 13, "processes": rows},
+            "output": "raw " * 900,
+        },
+    }
+    view = model_view("ssh_mcp", "ssh_diagnose_java", outcome, max_chars=6000)
+    assert len(json.dumps(view, ensure_ascii=False)) <= 6000
+    shown = view["data"]["summary"]["processes"]
+    assert [row["pid"] for row in shown] == [row["pid"] for row in rows]
+    for row in shown:
+        assert {"pid", "application", "unit"} <= set(row)
+        assert "command_preview" not in row and "logs" not in row
+    assert "command_preview" in view["fields_note"]
+    assert "rss_KiB" in shown[0] and shown[0]["heap"]["xmx"] == "1024m"
+    # The stored evidence is untouched.
+    assert "command_preview" in outcome["data"]["summary"]["processes"][0]
+
+
+def test_log_rows_keep_their_text_and_lose_rows_instead():
+    entries = [
+        {"time": f"2026-10-31T07:0{i % 10}:00", "message": "kernel: oom " + "x" * 400}
+        for i in range(40)
+    ]
+    outcome = {"data": {"summary": {"entries": entries}}}
+    view = model_view("ssh_mcp", "ssh_diagnose_syslog", outcome, max_chars=6000)
+    shown = view["data"]["summary"]["entries"]
+    assert 0 < len(shown) < 40 and all("message" in row for row in shown)
+    assert "fields_note" not in view
