@@ -446,21 +446,23 @@ def complete_setup(body: SetupRequest):
     with connection() as db:
         # Recheck inside write lock, so concurrent bootstrap requests cannot overwrite.
         db.execute("BEGIN IMMEDIATE")
-        present = {
-            row[0]
-            for row in db.execute(
-                "SELECT key FROM settings WHERE key IN (?,?,?,?) AND value!=''",
-                BOOTSTRAP_KEYS,
-            )
-        }
-        if len(present) == len(BOOTSTRAP_KEYS):
+
+        def configured(key):
+            # Decrypted, as setup_missing reads it: a secret cleared in the
+            # settings page is stored as the ciphertext of "" and is missing.
+            row = db.execute(
+                "SELECT value,secret FROM settings WHERE key=?", (key,)
+            ).fetchone()
+            if not row:
+                return False
+            value = cipher().decrypt(row[0].encode()).decode() if row[1] else row[0]
+            return bool(value.strip())
+
+        if all(configured(key) for key in BOOTSTRAP_KEYS):
             raise HTTPException(409, "初始化已完成")
         for key, value in entries.items():
             # Preserve pre-existing configuration during repair/migration.
-            row = db.execute(
-                "SELECT value FROM settings WHERE key=?", (key,)
-            ).fetchone()
-            if row and row[0] and key != "web_protocol":
+            if key != "web_protocol" and configured(key):
                 continue
             secret = key in SENSITIVE
             stored = cipher().encrypt(value.encode()).decode() if secret else value
@@ -604,17 +606,20 @@ def update_settings(body: SettingsUpdate, identity=Depends(require_admin)):
 def record_ai_question(
     source, request_id, question, status="pending", error_type=None, token_usage=None
 ):
+    # rejected: refused before analysis (no permission, reply still being
+    # analyzed, chain too deep); final, but not an analysis failure.
     if source not in ("feishu", "web") or status not in (
         "pending",
         "running",
         "success",
         "failed",
+        "rejected",
     ):
         raise ValueError("invalid question metrics")
     with connection() as db:
         db.execute(
             """INSERT INTO ai_questions (source,request_id,question,status,error_type,completed_at)
-            VALUES (?,?,?,?,?,CASE WHEN ? IN ('success','failed') THEN CURRENT_TIMESTAMP ELSE NULL END)
+            VALUES (?,?,?,?,?,CASE WHEN ? IN ('success','failed','rejected') THEN CURRENT_TIMESTAMP ELSE NULL END)
             ON CONFLICT(source,request_id) DO UPDATE SET
             status=excluded.status, error_type=excluded.error_type,
             completed_at=excluded.completed_at""",
@@ -668,6 +673,7 @@ def qa_stats():
         "running": d.get("running", 0),
         "success": d.get("success", 0),
         "failed": d.get("failed", 0),
+        "rejected": d.get("rejected", 0),
     }
 
 
@@ -955,12 +961,12 @@ def runtime_status():
     return result
 
 
-@app.post("/api/v1/test/mcp", dependencies=[Depends(require_admin)])
-async def test_mcp():
+@app.post("/api/v1/test/mcp")
+async def test_mcp(identity=Depends(require_admin)):
     from .platform_api import discover
 
     # Compatibility endpoint for existing API clients, using the same safe connection test.
-    return await discover(provider="zabbix_mcp", who={"open_id": "system"})
+    return await discover(provider="zabbix_mcp", who=identity)
 
 
 @app.post("/api/v1/test/feishu")

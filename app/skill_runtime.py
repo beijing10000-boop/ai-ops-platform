@@ -1556,6 +1556,20 @@ async def run(
             if (request.get("event") or {}).get("host_id")
             else question_target(question)
         )
+    except ValueError as exc:
+        # Several hosts in one question: neither is guessed, nothing is queried
+        # and no model round runs; the reason is the task's answer.
+        answer = str(exc)
+        tasks.finish(
+            task_id,
+            {"answer": answer, "limitations": [answer]},
+            usage(),
+            "failed",
+            error_type="MultipleTargets",
+            duration_ms=int((time.monotonic() - began) * 1000),
+        )
+        return (answer, usage()) if return_usage else answer
+    try:
         async with unwrapped(), AsyncExitStack() as stack:
             bridge = await stack.enter_async_context(
                 SkillMCP(read_setting, providers, deadline=deadline, target=target)
