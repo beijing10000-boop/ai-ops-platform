@@ -1,5 +1,22 @@
 # 升级说明
 
+## v1.4.1 → v1.4.2
+
+没有数据库迁移，不改配置，Skill 不变。修复：模型视图省略进程清单字段时，Java 等进程的常驻内存 `rss_KiB` 始终保留。建议 SSH MCP 为 v0.8.0（CentOS/RHEL 7 上 RSS 等字段有值、Java 行更紧凑；旧版本也能运行）。在平台部署目录执行：
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://服务器IP:8088/healthz
+```
+
+healthz 应返回 version 1.4.2。验收：对运行十几个 Java 进程的主机提问“这些 java 进程是什么、各占多少内存”，回答列出全部进程的应用名、-Xmx 与 RSS。
+
+回滚：没有表结构变化，切回 v1.4.1（`187b1df`）后按同样命令重建即可。
+
 ## v1.4.0 → v1.4.1
 
 没有数据库迁移，不改配置，Skill 不变，SSH MCP 与日志 MCP 无需升级。修复：模型在 JSON 结论的字符串里直接换行时，飞书“AI 分析结果”卡片的诊断结论只显示一行原始 JSON、处理建议变成兜底句。在平台部署目录执行：
