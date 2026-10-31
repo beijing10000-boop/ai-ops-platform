@@ -1,5 +1,26 @@
 # 升级说明
 
+## v1.2.3 → v1.3.0
+
+没有数据库迁移，不改配置，Skill 不变。界面改为与 SSH MCP 控制台统一的设计；后端做了不改变行为的清理；修复 6 个问题（见 CHANGELOG）。建议先把 SSH MCP 升级到 v0.7.0（同样是统一界面与问题修复），顺序反过来也能运行。在平台部署目录执行：
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://服务器IP:8088/healthz
+```
+
+healthz 应返回 version 1.3.0。静态资源地址带 `?v=1.3.0`，刷新页面即加载新界面；深浅色主题默认跟随系统，之前手动切换过的需要再切换一次（偏好的存储键已改为两个控制台共用的 `ui-theme`）。验收：
+
+- 总览、告警中心、AI 诊断、系统配置等页面为新界面，侧栏按“工作台 / 配置 / 治理”分组，顶栏有刷新与主题按钮；浏览器窗口窄于 860px 时侧栏收为抽屉。
+- 在飞书群里 @机器人提一个同时包含两台主机 IP 的问题：回复“AI 分析未完成”，原因为“一次只诊断一台主机，请分别提问”；分析历史里该任务为“失败”（此前会一直停在“执行中”）。
+- 系统配置 → AI 配置修改一项预算并保存：通过 API 设置过的 `follow_up_calls`、`extension_rounds` 保持不变。
+
+回滚：没有表结构变化，切回 v1.2.3（`b1dc91a`）后按同样命令重建即可。
+
 ## v1.2.2 → v1.2.3
 
 没有数据库迁移，不改配置，Skill 不变。飞书问答回复去掉证据编号和“证据核对”清单；报告页只把实际发给模型的 Skill 列为“本次提供给模型的 Skill”；总结轮明确告诉模型不能再调用工具。在平台部署目录执行：
