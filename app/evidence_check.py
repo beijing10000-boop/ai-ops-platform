@@ -125,6 +125,59 @@ def confidence(valid, invalid=()):
 
 FENCED = re.compile(r"\x60\x60\x60(?:json)?\s*(.*?)\s*\x60\x60\x60", re.S | re.I)
 ANSWER_FIELDS = ("cause", "action", "analysis")
+# Top-level keys of the answer contracts; one a lost bracket nested is moved up.
+ANSWER_KEYS = (*ANSWER_FIELDS, "findings", "evidence", "human_required", "host_groups")
+
+
+def _closed(text):
+    """``text`` with the string, arrays and objects it leaves open closed, or
+    None when nothing is open or its brackets do not pair."""
+    stack, quoted, escaped = [], False, False
+    for char in text:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in "{[":
+            stack.append("}" if char == "{" else "]")
+        elif char in "}]" and (not stack or stack.pop() != char):
+            return None
+    if not stack:
+        return None
+    return text + ('"' if quoted else "") + "".join(reversed(stack))
+
+
+def _hoisted(parsed):
+    """``parsed`` with answer keys a lost bracket put in a nested object moved
+    back to the top level ("findings" left open swallows "evidence")."""
+    for value in list(parsed.values()):
+        if isinstance(value, dict):
+            for key in ANSWER_KEYS:
+                if key in value and key not in parsed:
+                    parsed[key] = value.pop(key)
+    return parsed
+
+
+def _salvaged(text):
+    """The answer fields of a broken object whose own values are whole JSON
+    and end where the next field or the object does."""
+    decoder, found = json.JSONDecoder(strict=False), {}
+    for key in (*ANSWER_FIELDS, "human_required", "host_groups"):
+        for match in re.finditer(r'"' + key + r'"\s*:\s*', text):
+            try:
+                value, end = decoder.raw_decode(text, match.end())
+            except ValueError:
+                continue
+            whole = text[end:].lstrip()[:1] in (",", "}", "")
+            if whole and (key not in ANSWER_FIELDS or isinstance(value, (str, list))):
+                found[key] = value
+                break
+    return found if any(key in found for key in ANSWER_FIELDS) else None
 
 
 def answer_object(answer):
@@ -135,7 +188,9 @@ def answer_object(answer):
     taken from the fence, or from the first "{" to the last "}", and only when
     it carries one of the answer fields, so prose quoting JSON stays prose.
     Raw line breaks inside strings are accepted (``strict=False``): models
-    write a multi-line "cause" that way, and strict JSON rejects it.
+    write a multi-line "cause" that way, and strict JSON rejects it. A bracket
+    the model lost or an output cut short is closed; failing that, each answer
+    field whose own value is whole is taken on its own.
     """
     text = str(answer or "").strip()
     try:
@@ -158,7 +213,19 @@ def answer_object(answer):
             continue
         if isinstance(parsed, dict) and any(key in parsed for key in ANSWER_FIELDS):
             return parsed
-    return None
+    if start < 0:
+        return None
+    for candidate in (*candidates, text[start:]):
+        repaired = _closed(candidate)
+        try:
+            parsed = json.loads(repaired, strict=False) if repaired else None
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            parsed = _hoisted(parsed)
+            if any(key in parsed for key in ANSWER_FIELDS):
+                return parsed
+    return _salvaged(text[start:])
 
 
 def _check_facts(parsed, valid_ids):
