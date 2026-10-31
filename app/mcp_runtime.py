@@ -5,9 +5,6 @@ a managed base Skill enabled, so a scope only has no Skill when an administrator
 disabled all of them; such tasks fail explicitly instead of using a fixed flow.
 """
 
-import json
-import re
-
 from .main import read_setting
 from .diagnostics.playbooks import classify
 from .diagnostics.targets import directory_request
@@ -80,15 +77,10 @@ def readable_report_answer(raw):
     Worker callers still receive the original JSON text for Feishu card fields.
     All generated strings remain escaped by the browser renderer.
     """
+    from .evidence_check import answer_object
     from .report_presentation import human_metrics
 
-    text = str(raw or "").strip()
-    if text.startswith("```"):
-        text = re.sub(r"^\x60\x60\x60(?:json)?\s*|\s*\x60\x60\x60$", "", text).strip()
-    try:
-        result = json.loads(text)
-    except (TypeError, ValueError):
-        return human_metrics(raw)
+    result = answer_object(raw)
     if not isinstance(result, dict) or not any(
         isinstance(result.get(key), (str, list))
         for key in ("cause", "action", "analysis")

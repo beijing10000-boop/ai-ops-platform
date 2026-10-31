@@ -12,6 +12,7 @@ from redis import Redis
 from rq import Worker, Queue
 from rq.job import Job
 from .alert_mute import action_signature
+from .evidence_check import answer_object
 from .main import read_setting
 from .orchestrator import queues
 
@@ -124,13 +125,8 @@ async def analyze(event, task_id=None):
         task_id=task_id,
     )
     raw = raw.strip()
-    try:
-        data = json.loads(
-            re.sub(r"^\x60\x60\x60(?:json)?\s*|\s*\x60\x60\x60$", "", raw)
-        )
-        if not isinstance(data, dict):
-            raise ValueError("not object")
-    except (ValueError, TypeError):
+    data = answer_object(raw)
+    if data is None:
         data = {
             "cause": "分析结果需要人工复核",
             "action": "请检查告警相关指标及服务日志",
@@ -439,8 +435,16 @@ def card_summary(info):
         lines.append("**诊断状态**  " + ("部分完成" if status == "partial" else "失败"))
     if info.get("_unstructured"):
         # No structured answer (model error fallback, plain text): its first
-        # line carries the reason; the collected evidence is on the Web report.
-        first = str(info.get("analysis") or "").strip().split("\n", 1)[0]
+        # line of text carries the reason (a Markdown heading or code fence
+        # would show as an empty conclusion); the evidence is on the Web report.
+        first = next(
+            (
+                line.strip()
+                for line in str(info.get("analysis") or "").splitlines()
+                if line.strip() and not line.lstrip().startswith(("#", "\x60\x60\x60"))
+            ),
+            "",
+        )
         lines += [
             "**诊断结论**",
             first or "模型未给出结论。",
