@@ -3,67 +3,95 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>首次初始化 · Zabbix AI Ops</title>
-    <link rel="stylesheet" href="/assets/apple.css" />
+    <meta name="color-scheme" content="light dark" />
+    <title>首次初始化 · AI Ops</title>
+    <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg?v=1.3.0" />
+    <link rel="stylesheet" href="/assets/ui-kit.css?v=1.3.0" />
+    <script src="/assets/ui-kit.js?v=1.3.0"></script>
+    <script defer src="/assets/setup.js?v=1.3.0"></script>
   </head>
-  <body class="setup-screen">
-    <main>
-      <h1>首次初始化</h1>
-      <p>
-        仅配置 Web
-        登录所需的项目，完成后此入口自动关闭。其他业务设置继续在管理后台完成。
-      </p>
-      <form id="setup">
-        <label
-          >初始化凭据<input
-            type="password"
-            name="bootstrap_token"
-            autocomplete="off"
-            required
-        /></label>
-        <small
-          >读取持久化目录中的 bootstrap.token；兼容旧部署设置的
-          ADMIN_API_TOKEN。只用于初始化。</small
-        >
-        <label
-          >访问协议<select name="web_protocol">
-            <option value="http">HTTP（仅内部测试）</option>
-            <option value="https">HTTPS（推荐）</option>
-          </select></label
-        >
-        <label
-          >Web 外部访问主机<input
-            name="web_public_host"
-            placeholder="192.0.2.10:8088"
-            required
-        /></label>
-        <label
-          >飞书应用 App ID<input
-            name="lark_app_id"
-            placeholder="cli_xxxxxxxxxxxx"
-            required
-        /></label>
-        <label
-          >飞书应用 App Secret<input
-            type="password"
-            name="lark_app_secret"
-            autocomplete="off"
-            required
-        /></label>
-        <label
-          >管理员 Open ID<input
-            name="feishu_admin_open_ids"
-            placeholder="ou_xxxx,ou_yyyy"
-            required
-        /></label>
-        <small
-          >多个管理员以英文逗号分隔；请包含自己当前飞书账户的 Open ID。</small
-        >
-        <button type="button" id="validate-setup">验证初始化信息</button><button type="submit">保存并完成初始化</button>
-      </form>
-      <div id="status" role="status"></div>
-      <p><a href="/">返回登录页</a></p>
+  <body>
+    <main class="setup-screen">
+      <section class="setup-card">
+        <div class="logo" data-icon="ai"></div>
+        <div class="eyebrow">首次部署</div>
+        <h1>初始化 AI Ops</h1>
+        <p class="muted">
+          仅配置 Web 登录所需的项目，完成后此入口自动关闭。其他业务设置继续在管理后台完成。
+        </p>
+        <form id="setup">
+          <div class="fields">
+            <div class="wide">
+              <label for="bootstrap_token">初始化凭据</label>
+              <input
+                id="bootstrap_token"
+                type="password"
+                name="bootstrap_token"
+                autocomplete="off"
+                required
+              />
+              <div class="help">
+                读取持久化目录中的 bootstrap.token；兼容旧部署设置的
+                ADMIN_API_TOKEN。只用于初始化。
+              </div>
+            </div>
+            <div>
+              <label for="web_protocol">访问协议</label>
+              <select id="web_protocol" name="web_protocol">
+                <option value="http">HTTP（仅内部测试）</option>
+                <option value="https">HTTPS（推荐）</option>
+              </select>
+            </div>
+            <div>
+              <label for="web_public_host">Web 外部访问主机</label>
+              <input
+                id="web_public_host"
+                name="web_public_host"
+                placeholder="192.0.2.10:8088"
+                required
+              />
+            </div>
+            <div>
+              <label for="lark_app_id">飞书应用 App ID</label>
+              <input
+                id="lark_app_id"
+                name="lark_app_id"
+                placeholder="cli_xxxxxxxxxxxx"
+                required
+              />
+            </div>
+            <div>
+              <label for="lark_app_secret">飞书应用 App Secret</label>
+              <input
+                id="lark_app_secret"
+                type="password"
+                name="lark_app_secret"
+                autocomplete="off"
+                required
+              />
+            </div>
+            <div class="wide">
+              <label for="feishu_admin_open_ids">管理员 Open ID</label>
+              <input
+                id="feishu_admin_open_ids"
+                name="feishu_admin_open_ids"
+                placeholder="ou_xxxx,ou_yyyy"
+                required
+              />
+              <div class="help">
+                多个管理员以英文逗号分隔；请包含自己当前飞书账户的 Open ID。
+              </div>
+            </div>
+          </div>
+          <div class="form-actions">
+            <button type="button" class="btn" id="validate-setup">
+              验证初始化信息</button
+            ><button type="submit" class="btn primary">保存并完成初始化</button>
+          </div>
+        </form>
+        <p id="status" class="notice" role="status" hidden></p>
+        <p class="small"><a href="/">返回登录页</a></p>
+      </section>
     </main>
-    <script defer src="/assets/setup.js"></script>
   </body>
 </html>

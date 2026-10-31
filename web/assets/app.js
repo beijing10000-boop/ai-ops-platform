@@ -1,23 +1,21 @@
 "use strict";
 function alertTabs(selected) {
-  const events = selected === "events", mutes = selected === "mutes";
-  return '<div class="alert-tabs" role="group" aria-label="告警中心视图">' +
-    '<button type="button" class="alert-tab' + (events ? ' active' : '') +
-    '" data-action="go-alerts" aria-pressed="' + events + '">告警记录</button>' +
-    (can("alerts.manage") ? '<button type="button" class="alert-tab' +
-    (mutes ? ' active' : '') + '" data-action="go-mutes" aria-pressed="' +
-    mutes + '">暂时屏蔽</button>' : '') +
-    '</div>';
+  const tab = (action, key, text) =>
+    `<button type="button" class="${selected === key ? "active" : ""}" data-action="${action}" aria-pressed="${selected === key}">${text}</button>`;
+  return '<div class="segmented" role="group" aria-label="告警中心视图">' +
+    tab("go-alerts", "events", "告警记录") +
+    (can("alerts.manage") ? tab("go-mutes", "mutes", "暂时屏蔽") : "") +
+    "</div>";
 }
 async function mutesPanel() {
   const [rows, expired] = await Promise.all([
     api("/api/v1/alert-mutes?status=active"),
     api("/api/v1/alert-mutes?status=expired"),
   ]);
-  return alertTabs("mutes") + intro("管理当前平台的飞书告警屏蔽，支持按到期时间自动恢复通知。", btn("refresh", "刷新列表")) +
+  return alertTabs("mutes") + intro("管理当前平台的飞书告警屏蔽，支持按到期时间自动恢复通知。") +
     panel(
     "当前生效的飞书告警屏蔽（" + rows.length + " 条）",
-    `<form id="mute-form"><div class="form-grid">${field("host_id", "Zabbix Host ID")}${field("trigger_id", "触发器 ID")}${field(
+    `<form id="mute-form"><div class="fields">${field("host_id", "Zabbix Host ID")}${field("trigger_id", "触发器 ID")}${field(
       "hours",
       "屏蔽时长",
       "1",
@@ -30,7 +28,7 @@ async function mutesPanel() {
         ["72", "3 天"],
         ["168", "7 天"],
       ],
-    )}</div><div class="form-actions">${btn("validate-mute", "验证屏蔽规则")}<button class="button" type="submit">设置屏蔽</button></div><p role="status" data-verify-result></p></form>` +
+    )}</div><div class="form-actions">${btn("validate-mute", "验证屏蔽规则")}<button class="btn primary" type="submit">设置屏蔽</button></div><p role="status" data-verify-result></p></form>` +
       table(
         ["主机 ID", "触发器 ID", "设置时间", "到期时间（北京时间）", "操作"],
         rows
@@ -68,7 +66,6 @@ const state = {
   alertQuery: "",
   configTab: "general",
   lastHash: "",
-  editor: null,
   includeLogs: false,
   hostRows: [],
 };
@@ -104,15 +101,16 @@ const labels = {
   operator: "运维人员",
   auditor: "只读审计",
 };
+// [page, title, icon, permission, navigation section]
 const nav = [
-  ["overview", "总览", "▦", "overview.read"],
-  ["alerts", "告警中心", "◴", "reports.read"],
-  ["diagnostics", "AI 诊断", "✧", "diagnostics.run"],
-  ["connections", "连接管理", "⇄", "tools.read"],
-  ["skills", "Skill 管理", "◇", "tools.read"],
-  ["history", "分析历史", "◷", "reports.read"],
-  ["settings", "系统配置", "⚙", "settings.manage"],
-  ["audit", "审计日志", "≡", "audit.read"],
+  ["overview", "总览", "overview", "overview.read", "工作台"],
+  ["alerts", "告警中心", "alerts", "reports.read", "工作台"],
+  ["diagnostics", "AI 诊断", "ai", "diagnostics.run", "工作台"],
+  ["history", "分析历史", "history", "reports.read", "工作台"],
+  ["connections", "连接管理", "connections", "tools.read", "配置"],
+  ["skills", "Skill 管理", "skills", "tools.read", "配置"],
+  ["settings", "系统配置", "settings", "settings.manage", "配置"],
+  ["audit", "审计日志", "audit", "audit.read", "治理"],
 ];
 const can = (p) =>
   (state.user?.permissions || []).includes("*") ||
@@ -126,13 +124,15 @@ const date = (v) =>
       ).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false })
     : "—";
 const badge = (s) =>
-  `<span class="tag ${E(s)}">${E(labels[s] || s || "—")}</span>`;
+  `<span class="status ${E(s)}">${E(labels[s] || s || "—")}</span>`;
+// A status chip whose text is not one of the state labels above.
+const chip = (text, tone = "") => `<span class="status ${tone}">${E(text)}</span>`;
 const sourceLabel = value => ({web: "Web 诊断", alert: "告警分析", qa: "监控问答", feishu: "飞书", ui_test: "界面测试"}[value] || value);
 function stageLabel(value) {
   return labels[value] || ({collecting: "收集证据", ai_reasoning: "AI 分析中", skill_analysis: "按 Skill 分析查询步骤", skill_prefetch: "按 Skill 预采集证据", skill_ssh_mcp: "正在查询后台 MCP 服务并进行分析", skill_zabbix_mcp: "正在查询后台 MCP 服务并进行分析", retired: "旧任务已停用"}[value]) || value || "等待执行";
 }
 const btn = (action, text, id = "", kind = "", disabled = false) =>
-  `<button type="button" class="button ${kind}" data-action="${action}" data-id="${E(id)}" ${disabled ? "disabled" : ""}>${text}</button>`;
+  `<button type="button" class="btn ${kind}" data-action="${action}" data-id="${E(id)}" ${disabled ? "disabled" : ""}>${text}</button>`;
 async function paged(path, key, pageSize = 25, filters = {}) {
   const query = new URLSearchParams({
     ...filters, page: state[key], page_size: pageSize,
@@ -148,12 +148,14 @@ async function paged(path, key, pageSize = 25, filters = {}) {
 }
 function pagination(prefix, key) {
   const page = state[key], pages = state[key + "Count"];
-  return `<div class="pagination">${btn(prefix + "-prev", "上一页", "", "small", page <= 1)}<span>第 ${page} 页 / ${pages} 页</span>${btn(prefix + "-next", "下一页", "", "small", page >= pages)}</div>`;
+  return `<div class="pagination"><span>第 ${page} 页 / ${pages} 页</span><div class="actions">${btn(prefix + "-prev", "上一页", "", "small", page <= 1)}${btn(prefix + "-next", "下一页", "", "small", page >= pages)}</div></div>`;
 }
 const intro = (text, actions = "") =>
-  `<div class="page-intro"><p class="muted small">${text}</p><div class="actions">${actions}</div></div>`;
+  `<div class="page-intro"><p>${text}</p>${actions ? `<div class="actions">${actions}</div>` : ""}</div>`;
+const heading = (title, note = "", actions = "") =>
+  `<div class="section-head"><div><h2>${title}</h2>${note ? `<p>${note}</p>` : ""}</div>${actions}</div>`;
 const panel = (title, body, note = "", id = "") =>
-  `<section class="panel" ${id ? `id="${E(id)}"` : ""}><div class="section-heading"><div><h2>${title}</h2>${note ? `<p class="muted small">${note}</p>` : ""}</div></div>${body}</section>`;
+  `<section class="panel" ${id ? `id="${E(id)}"` : ""}>${heading(title, note)}${body}</section>`;
 const table = (heads, rows) =>
   `<div class="table-wrap"><table><thead><tr>${heads.map((x) => `<th>${x}</th>`).join("")}</tr></thead><tbody>${rows || `<tr><td colspan="${heads.length}" class="empty">暂无记录</td></tr>`}</tbody></table></div>`;
 function toast(message) {
@@ -171,6 +173,7 @@ function toast(message) {
   clearTimeout(state.toastTimer);
   state.toastTimer = setTimeout(() => ($("#toast").hidden = true), 6000);
 }
+let fieldSeq = 0;
 async function api(path, method = "GET", body) {
   const response = await fetch(path, {
     method,
@@ -213,22 +216,23 @@ function field(
   options = null,
   wide = false,
 ) {
+  const id = "field-" + ++fieldSeq;
   let control;
   if (type === "checkbox")
-    control = `<label class="check-field"><input name="${name}" type="checkbox" ${value ? "checked" : ""}>${label}</label>`;
+    control = `<label class="check"><input name="${name}" type="checkbox" ${value ? "checked" : ""}>${label}</label>`;
   else if (options)
-    control = `<select aria-label="${E(label)}" name="${name}">${options.map((x) => `<option value="${E(Array.isArray(x) ? x[0] : x)}" ${String(value) === String(Array.isArray(x) ? x[0] : x) ? "selected" : ""}>${E(Array.isArray(x) ? x[1] : x)}</option>`).join("")}</select>`;
+    control = `<select id="${id}" name="${name}">${options.map((x) => `<option value="${E(Array.isArray(x) ? x[0] : x)}" ${String(value) === String(Array.isArray(x) ? x[0] : x) ? "selected" : ""}>${E(Array.isArray(x) ? x[1] : x)}</option>`).join("")}</select>`;
   else if (type === "textarea")
-    control = `<textarea aria-label="${E(label)}" name="${name}" >${E(value)}</textarea>`;
+    control = `<textarea id="${id}" name="${name}">${E(value)}</textarea>`;
   else
-    control = `<input aria-label="${E(label)}" name="${name}" type="${type}" value="${E(value)}" ${type === "password" ? 'autocomplete="new-password"' : ""}>`;
-  return `<div class="field ${wide ? "wide" : ""}">${type === "checkbox" ? "" : `<span>${label}</span>`}${type === "password" ? `<div class="secret-control">${control}${btn("toggle-secret", "显示", "", "quiet small")}</div>` : control}${help ? `<small>${E(help)}</small>` : ""}</div>`;
+    control = `<input id="${id}" name="${name}" type="${type}" value="${E(value)}" ${type === "password" ? 'autocomplete="new-password"' : ""}>`;
+  return `<div class="field ${wide ? "wide" : ""}">${type === "checkbox" ? "" : `<label for="${id}">${label}</label>`}${type === "password" ? `<div class="secret-control">${control}${btn("toggle-secret", "显示", "", "subtle small")}</div>` : control}${help ? `<div class="help">${E(help)}</div>` : ""}</div>`;
 }
 function taskRows(rows) {
   return rows
     .map(
       (r) =>
-        `<tr><td><button class="link-button mono" data-action="report" data-id="${E(r.task_id)}">${E(r.task_id.slice(0, 12))}</button><small>${date(r.created_at)}</small></td><td>${E(PLAY[r.diagnostic_type] || r.diagnostic_type)}<small>${E(sourceLabel(r.source))} · ${E(labels[r.profile] || r.profile)}</small></td><td>${badge(r.status)}<small>${E(stageLabel(r.stage))}</small></td><td>${fmt(r.tools)}</td><td>${r.duration_ms == null ? "—" : (r.duration_ms / 1000).toFixed(1) + " s"}</td><td>${fmt(r.token_total)}<small>${r.token_total == null ? "未返回用量" : "模型实际用量"}</small></td><td>${btn("report", "查看", r.task_id, "small")}</td></tr>`,
+        `<tr><td><button class="text-button mono" data-action="report" data-id="${E(r.task_id)}">${E(r.task_id.slice(0, 12))}</button><small>${date(r.created_at)}</small></td><td>${E(PLAY[r.diagnostic_type] || r.diagnostic_type)}<small>${E(sourceLabel(r.source))} · ${E(labels[r.profile] || r.profile)}</small></td><td>${badge(r.status)}${["queued", "running"].includes(r.status) ? `<small>${E(stageLabel(r.stage))}</small>` : ""}</td><td>${fmt(r.tools)}</td><td>${r.duration_ms == null ? "—" : (r.duration_ms / 1000).toFixed(1) + " s"}</td><td>${fmt(r.token_total)}<small>${r.token_total == null ? "未返回用量" : "模型实际用量"}</small></td><td>${btn("report", "查看", r.task_id, "small")}</td></tr>`,
     )
     .join("");
 }
@@ -252,14 +256,13 @@ async function overview() {
   const readiness = [["model", "AI 模型", "settings/ai"], ["zabbix_mcp", "Zabbix MCP", "connections"], ["ssh_mcp", "SSH MCP", "connections"], ["feishu", "飞书应用", "settings/feishu"], ["webhook", "告警接入", "settings/general"]];
   const health = (provider, title, configured) => {
     const record = o.health.find(row => row.provider === provider);
-    return `<div class="health-row"><div><strong>${title}</strong><p>${record ? "最近检测：" + date(record.checked_at) : "配置完成后，请主动验证连接"}</p></div><span class="tag ${record?.status || ""}">${record ? (record.status === "success" ? "最近检测通过" : "最近检测失败") : configured ? "待验证" : "未配置 / 未启用"}</span></div>`;
+    return `<div class="health-row"><div><strong>${title}</strong><p>${record ? "最近检测：" + date(record.checked_at) : "配置完成后，请主动验证连接"}</p></div>${record ? chip(record.status === "success" ? "最近检测通过" : "最近检测失败", record.status === "success" ? "success" : "failed") : chip(configured ? "待验证" : "未配置 / 未启用", configured ? "pending" : "")}</div>`;
   };
-  return intro("最近 24 小时 · 仅统计本平台收到的事件和执行的分析", btn("refresh", "刷新数据")) +
-    `<div class="hero"><div><span class="eyebrow">运维工作台</span><h2>监控异常，循证诊断。</h2><p class="muted small">从告警定位问题，关联 Zabbix 历史与 Linux 实时证据。</p></div><div class="actions">${btn("go-alerts", "查看告警")}${can("diagnostics.run") ? btn("go-page", "新建诊断 →", "diagnostics", "primary") : ""}</div></div>` +
+  return `<div class="hero"><div><span class="eyebrow">运维工作台 · 最近 24 小时</span><h2>监控异常，循证诊断。</h2><p>从告警定位问题，关联 Zabbix 历史与 Linux 实时证据。仅统计本平台收到的事件和执行的分析。</p></div><div class="actions">${btn("go-alerts", "查看告警")}${can("diagnostics.run") ? btn("go-page", "新建诊断", "diagnostics", "primary") : ""}</div></div>` +
     `<div class="stats">${stat("未收到恢复的事件", fmt(o.unrecovered_received_events), "平台累计接收，非 Zabbix 全量", o.unrecovered_received_events ? "attention" : "")}${stat("AI 分析次数", fmt(o.ai_runs_24h), "最近 24 小时创建")}${stat("AI 分析成功率", o.ai_success_rate_24h == null ? "—" : o.ai_success_rate_24h + "%", "成功 / 已结束的分析")}${stat("实际 Token", fmt(o.token_total_24h), `${fmt(o.usage_available_runs_24h)} 次返回用量`)}</div>` +
-    (can("settings.manage") ? `<div class="readiness-strip"><div><strong>配置检查</strong><small>仅检查是否填写，连接请主动验证</small></div>${readiness.map(([key, label, target]) => `<button class="readiness-item ${o.readiness[key] ? "ready" : ""}" data-action="go-page" data-id="${target}"><span>${o.readiness[key] ? "✓" : "○"}</span>${label}<small>${o.readiness[key] ? "已配置" : "待配置"}</small></button>`).join("")}</div>` : "") +
-    `<div class="grid-two">${panel("MCP 连接状态", health("zabbix_mcp", "Zabbix MCP · 历史监控", o.mcp_configured) + health("ssh_mcp", "SSH MCP · 实时诊断", o.ssh_mcp_configured) + `<p class="muted small footnote">状态代表最近一次主动检测结果；主机通过 Zabbix Host ID 关联。</p>`)}${panel("诊断处理情况", `<div class="health-row"><span>已完成 / 部分完成</span><strong>${fmt(o.completed_24h)} / ${fmt(o.partial_24h)}</strong></div><div class="health-row"><span>执行中 / 等待执行</span><strong>${fmt(o.running)} / ${fmt(o.queued)}</strong></div><div class="health-row"><span>失败任务</span><strong>${fmt(o.failed_24h)}</strong></div><div class="health-row"><span>平均分析耗时</span><strong>${o.average_duration_ms_24h == null ? "—" : (o.average_duration_ms_24h / 1000).toFixed(1) + " 秒"}</strong></div>`)}</div>` +
-    `<div class="panel"><div class="section-heading"><div><h2>最近诊断</h2><p class="muted small">告警分析、问答与手动诊断的统一记录</p></div>${btn("go-history", "全部记录 →", "", "quiet")}</div>${table(["任务 / 时间", "诊断类型 / 来源", "状态", "工具", "耗时", "Token", "操作"], taskRows(t.items))}</div>`;
+    (can("settings.manage") ? `<div class="readiness-strip"><div><strong>配置检查</strong><small>仅检查是否填写，连接请主动验证</small></div>${readiness.map(([key, label, target]) => `<button class="readiness-item ${o.readiness[key] ? "ready" : ""}" data-action="go-page" data-id="${target}"><span class="mark" aria-hidden="true"></span><span>${label}<small>${o.readiness[key] ? "已配置" : "待配置"}</small></span></button>`).join("")}</div>` : "") +
+    `<div class="grid2">${panel("MCP 连接状态", health("zabbix_mcp", "Zabbix MCP · 历史监控", o.mcp_configured) + health("ssh_mcp", "SSH MCP · 实时诊断", o.ssh_mcp_configured) + `<p class="muted small footnote">状态代表最近一次主动检测结果；主机通过 Zabbix Host ID 关联。</p>`)}${panel("诊断处理情况", `<div class="health-row"><span>已完成 / 部分完成</span><strong>${fmt(o.completed_24h)} / ${fmt(o.partial_24h)}</strong></div><div class="health-row"><span>执行中 / 等待执行</span><strong>${fmt(o.running)} / ${fmt(o.queued)}</strong></div><div class="health-row"><span>失败任务</span><strong>${fmt(o.failed_24h)}</strong></div><div class="health-row"><span>平均分析耗时</span><strong>${o.average_duration_ms_24h == null ? "—" : (o.average_duration_ms_24h / 1000).toFixed(1) + " 秒"}</strong></div>`)}</div>` +
+    `<section class="panel">${heading("最近诊断", "告警分析、问答与手动诊断的统一记录", btn("go-history", "全部记录", "", "small"))}${table(["任务 / 时间", "诊断类型 / 来源", "状态", "工具", "耗时", "Token", "操作"], taskRows(t.items))}</section>`;
 }
 async function alerts() {
   const data = await paged(P + "/alerts", "alertPage", 25, {
@@ -268,10 +271,10 @@ async function alerts() {
   });
   state.alertRows = data.items;
   const severities = ["未分类", "信息", "警告", "一般严重", "严重", "灾难"];
-  return alertTabs("events") + intro("平台已接收的告警与恢复记录。恢复状态以收到的 Zabbix 通知为准。", btn("refresh", "刷新")) +
+  return alertTabs("events") + intro("平台已接收的告警与恢复记录。恢复状态以收到的 Zabbix 通知为准。") +
     panel("告警事件",
-      `<form id="alert-filter" class="filter-bar"><input name="q" aria-label="搜索告警" maxlength="160" placeholder="搜索主机、告警名称或事件 ID" value="${E(state.alertQuery)}"><select name="status" aria-label="告警状态">${[["all", "全部状态"], ["active", "未收到恢复"], ["recovered", "已恢复"]].map(([key, label]) => `<option value="${key}" ${key === state.alertStatus ? "selected" : ""}>${label}</option>`).join("")}</select><select name="severity" aria-label="告警级别"><option value="">全部级别</option>${severities.map((label, i) => `<option value="${i}" ${String(i) === state.alertSeverity ? "selected" : ""}>${label}</option>`).join("")}</select><button class="button primary" type="submit">查询</button>${btn("reset-alert-filter", "重置", "", "quiet")}</form><p class="muted small">共 ${fmt(data.total)} 条符合条件的告警</p>` +
-      table(["主机 / 告警", "级别", "当前状态", "通知 / 分析", "操作"], data.items.map(r => `<tr><td><span class="cell-title">${E(r.host_name || "未提供主机名")}</span><small class="event-title">${E(r.event_name)}</small><small>事件 ${E(r.event_id)} · ${date(r.received_at)}</small></td><td><span class="severity s${E(r.severity)}"></span>${severities[r.severity] || "—"}</td><td>${badge(r.status)}${r.recovered_at ? `<small>${date(r.recovered_at)}</small>` : ""}</td><td>${badge(r.notify_status)} ${badge(r.ai_status)}</td><td><div class="row-actions">${r.task_id ? btn("report", "查看分析", r.task_id, "small") : ""}${can("diagnostics.run") ? btn("analyze-event", "AI 分析", r.event_id, "small") : ""}</div></td></tr>`).join("")) + pagination("alert", "alertPage"));
+      `<form id="alert-filter" class="toolbar"><input name="q" aria-label="搜索告警" maxlength="160" placeholder="搜索主机、告警名称或事件 ID" value="${E(state.alertQuery)}"><select name="status" aria-label="告警状态">${[["all", "全部状态"], ["active", "未收到恢复"], ["recovered", "已恢复"]].map(([key, label]) => `<option value="${key}" ${key === state.alertStatus ? "selected" : ""}>${label}</option>`).join("")}</select><select name="severity" aria-label="告警级别"><option value="">全部级别</option>${severities.map((label, i) => `<option value="${i}" ${String(i) === state.alertSeverity ? "selected" : ""}>${label}</option>`).join("")}</select><button class="btn primary" type="submit">查询</button>${btn("reset-alert-filter", "重置", "", "subtle")}<span class="muted small">共 ${fmt(data.total)} 条</span></form>` +
+      table(["主机 / 告警", "级别", "当前状态", "通知 / 分析", "操作"], data.items.map(r => `<tr><td><span class="cell-title">${E(r.host_name || "未提供主机名")}</span><small class="event-title">${E(r.event_name)}</small><small>事件 ${E(r.event_id)} · ${date(r.received_at)}</small></td><td><span class="severity s${E(r.severity)}">${severities[r.severity] || "—"}</span></td><td>${badge(r.status)}${r.recovered_at ? `<small>${date(r.recovered_at)}</small>` : ""}</td><td><div class="actions">${badge(r.notify_status)}${badge(r.ai_status)}</div></td><td><div class="actions">${r.task_id ? btn("report", "查看分析", r.task_id, "small") : ""}${can("diagnostics.run") ? btn("analyze-event", "AI 分析", r.event_id, "small primary") : ""}</div></td></tr>`).join("")) + pagination("alert", "alertPage"));
 }
 async function diagnostics() {
   const options = await api(P + "/diagnostic-options");
@@ -281,7 +284,7 @@ async function diagnostics() {
     ) +
     panel(
       "新建诊断",
-      `<form id="diagnostic-form">${state.selectedEvent ? `<div class="notice context-banner"><div><strong>正在分析告警 ${E(state.selectedEvent)}</strong><p>${E(state.selectedEventTitle || "以告警中记录的主机为诊断目标。")}</p></div>${btn("clear-event", "取消关联", "", "small")}</div>` : ""}<div class="form-grid"><div class="field wide"><span>查询监控主机</span><div class="toolbar"><input id="host-search" data-host-query aria-label="搜索 Zabbix 主机" placeholder="输入主机名称或 Zabbix Host ID">${btn("search-hosts", "查询 Zabbix 主机")}</div><small id="host-search-result" data-host-result role="status">直接从 Zabbix MCP 读取主机，无需在平台登记资产。</small></div>${field("zabbix_hostid", "诊断主机", "", "text", "必须选择监控主机或告警事件；按 IP 直查请用监控问答。选择 Host ID 或关联告警时，以该主机为准。", [["", "未选择主机"], ...state.hostRows.map(h => [h.zabbix_hostid, h.name + " · Host ID " + h.zabbix_hostid + " · " + (labels[h.device_type] || h.device_type)])])}${field("event_id", "告警事件 ID", state.selectedEvent || "", "text", "可选，必须是平台已经接收的事件。")}${field("diagnostic_type", "诊断类型", "auto", "text", "", [["auto", "自动识别告警类型"], ...Object.entries(PLAY)])}${field(
+      `<form id="diagnostic-form">${state.selectedEvent ? `<div class="notice context-banner"><div><strong>正在分析告警 ${E(state.selectedEvent)}</strong><p>${E(state.selectedEventTitle || "以告警中记录的主机为诊断目标。")}</p></div>${btn("clear-event", "取消关联", "", "small")}</div>` : ""}<div class="fields"><div class="field wide"><label for="host-search">查询监控主机</label><div class="toolbar"><input id="host-search" data-host-query placeholder="输入主机名称或 Zabbix Host ID">${btn("search-hosts", "查询 Zabbix 主机")}</div><div class="help" id="host-search-result" data-host-result role="status">直接从 Zabbix MCP 读取主机，无需在平台登记资产。</div></div>${field("zabbix_hostid", "诊断主机", "", "text", "必须选择监控主机或告警事件；按 IP 直查请用监控问答。选择 Host ID 或关联告警时，以该主机为准。", [["", "未选择主机"], ...state.hostRows.map(h => [h.zabbix_hostid, h.name + " · Host ID " + h.zabbix_hostid + " · " + (labels[h.device_type] || h.device_type)])])}${field("event_id", "告警事件 ID", state.selectedEvent || "", "text", "可选，必须是平台已经接收的事件。")}${field("diagnostic_type", "诊断类型", "auto", "text", "", [["auto", "自动识别告警类型"], ...Object.entries(PLAY)])}${field(
         "profile",
         "分析模式",
         options.default_profile,
@@ -292,23 +295,23 @@ async function diagnostics() {
           ["standard", "标准分析"],
           ["deep", "深度分析"],
         ],
-      )}${field("service", "systemd 服务名", "", "text", "服务/日志诊断时填写，如 nginx.service。")}${field("time_window", "日志窗口（分钟）", "30", "number", "范围 1–120 分钟；Skill 按此窗口及原生工具参数查询日志。")}${field("question", "诊断问题", "请根据实际证据诊断故障并给出建议", "textarea", "", null, true)}</div><div class="form-actions">${btn("validate-diagnostic", "验证诊断参数与关联")}<button class="button primary" type="submit">开始诊断 →</button></div><p role="status" data-verify-result></p></form>`,
+      )}${field("service", "systemd 服务名", "", "text", "服务/日志诊断时填写，如 nginx.service。")}${field("time_window", "日志窗口（分钟）", "30", "number", "范围 1–120 分钟；Skill 按此窗口及原生工具参数查询日志。")}${field("question", "诊断问题", "请根据实际证据诊断故障并给出建议", "textarea", "", null, true)}</div><div class="form-actions">${btn("validate-diagnostic", "验证诊断参数与关联")}<button class="btn primary" type="submit">开始诊断</button></div><p role="status" data-verify-result></p></form>`,
     ) +
     panel(
       "监控问答",
-      `<form id="ask-form">${field("question", "查询监控或提出问题", "", "textarea", "启用 Skill 后，可填写 SSH 服务已登记的明确 IP，按指引直接查询实时证据。", null, true)}<div class="form-actions"><button class="button" type="submit">发送问题</button></div></form><div id="ask-result" class="report-answer"></div>`,
+      `<form id="ask-form">${field("question", "查询监控或提出问题", "", "textarea", "启用 Skill 后，可填写 SSH 服务已登记的明确 IP，按指引直接查询实时证据。", null, true)}<div class="form-actions"><button class="btn primary" type="submit">发送问题</button></div></form><div id="ask-result" class="report-answer"></div>`,
     )
   );
 }
-const RISKS = {low: ["低风险", ""], medium: ["中风险", "partial"], high: ["高风险", "failed"]};
+const RISKS = {low: ["低风险", ""], medium: ["中风险", "warning"], high: ["高风险", "failed"]};
 function riskTag(risk) {
   const [text, tone] = RISKS[risk] || ["未标注", ""];
   return `<span class="tag ${tone}">${text}</span>`;
 }
 function authorizationTag(tool) {
-  if (tool.authorized === true) return '<span class="tag success">已授权</span>';
-  if (tool.authorized === false) return '<span class="tag">未授权</span><small>在 SSH MCP 控制台为客户端开启</small>';
-  return '<span class="tag partial">未确认</span><small>SSH MCP 未提供工具目录，调用时由服务端校验</small>';
+  if (tool.authorized === true) return chip("已授权", "success");
+  if (tool.authorized === false) return chip("未授权") + "<small>在 SSH MCP 控制台为客户端开启</small>";
+  return chip("未确认", "pending") + "<small>SSH MCP 未提供工具目录，调用时由服务端校验</small>";
 }
 function sshToolRows(tools) {
   return tools.map(t => {
@@ -331,7 +334,7 @@ function probeForm(tools) {
   const choices = probeChoices(tools);
   const heading = '<h3 class="subsection-heading">诊断测试</h3>';
   if (!choices.length) return heading + '<p class="muted small">SSH MCP 工具目录不可用，或没有除主机外无必填参数的已授权工具，暂不能执行诊断测试。</p>';
-  return heading + `<form id="probe-form"><p class="muted small">按 Zabbix Host ID 解析 SSH 资产后调用一次所选只读工具，仅传 host_id 与 revision；不创建诊断任务、不调用 AI，操作记入审计（tool_probe）。</p><div class="form-grid"><div class="field wide"><span>查询监控主机</span><div class="toolbar"><input data-host-query aria-label="搜索测试主机" placeholder="输入主机名称或 Zabbix Host ID">${btn("search-hosts", "查询 Zabbix 主机")}</div><small data-host-result role="status">从 Zabbix MCP 读取主机；也可在右侧直接填写 Host ID。</small></div>${field("zabbix_hostid", "监控主机", "", "text", "", [["", "未选择主机"], ...state.hostRows.map(h => [h.zabbix_hostid, h.name + " · Host ID " + h.zabbix_hostid + " · " + (labels[h.device_type] || h.device_type)])])}${field("manual_hostid", "或直接填写 Host ID", "", "text", "数字 Zabbix Host ID；填写后优先于左侧选择。")}${field("tool", "诊断工具", choices[0].name, "text", "仅列出已授权、除主机外没有必填参数的只读工具；需要服务名或路径的工具请在 AI 诊断中由 Skill 调用。", choices.map(t => [t.name, t.name + (t.title ? " · " + t.title : "")]))}</div><div class="form-actions"><button class="button primary" type="submit">执行诊断测试</button></div><p class="muted small" role="status" data-probe-status></p><div class="evidence" data-probe-output hidden><pre></pre></div></form>`;
+  return heading + `<form id="probe-form"><p class="muted small">按 Zabbix Host ID 解析 SSH 资产后调用一次所选只读工具，仅传 host_id 与 revision；不创建诊断任务、不调用 AI，操作记入审计（tool_probe）。</p><div class="fields"><div class="field wide"><label for="probe-host-search">查询监控主机</label><div class="toolbar"><input id="probe-host-search" data-host-query placeholder="输入主机名称或 Zabbix Host ID">${btn("search-hosts", "查询 Zabbix 主机")}</div><div class="help" data-host-result role="status">从 Zabbix MCP 读取主机；也可在右侧直接填写 Host ID。</div></div>${field("zabbix_hostid", "监控主机", "", "text", "", [["", "未选择主机"], ...state.hostRows.map(h => [h.zabbix_hostid, h.name + " · Host ID " + h.zabbix_hostid + " · " + (labels[h.device_type] || h.device_type)])])}${field("manual_hostid", "或直接填写 Host ID", "", "text", "数字 Zabbix Host ID；填写后优先于左侧选择。")}${field("tool", "诊断工具", choices[0].name, "text", "仅列出已授权、除主机外没有必填参数的只读工具；需要服务名或路径的工具请在 AI 诊断中由 Skill 调用。", choices.map(t => [t.name, t.name + (t.title ? " · " + t.title : "")]))}</div><div class="form-actions"><button class="btn primary" type="submit">执行诊断测试</button></div><p class="muted small" role="status" data-probe-status></p><div data-probe-output hidden><pre></pre></div></form>`;
 }
 async function runProbe(form, data) {
   const status = form.querySelector("[data-probe-status]"), output = form.querySelector("[data-probe-output]");
@@ -372,7 +375,7 @@ async function diagnosticTools(refresh = false) {
         zabbix
           .map(
             (t) =>
-              `<tr><td><span class="mono">${E(t.name)}</span><small>${E(t.provider)} · ${E(t.required_scope)}</small></td><td>${E(t.device_types.map((x) => labels[x] || x).join(" / "))}</td><td>${E(t.risk)} · ${t.timeout}s<small>输出 ≤ ${fmt(t.max_output_chars)} 字符</small></td><td>${badge(t.enabled ? "已启用" : "已禁用")}</td><td>${E(t.description)}</td></tr>`,
+              `<tr><td><span class="mono">${E(t.name)}</span><small>${E(t.provider)} · ${E(t.required_scope)}</small></td><td>${E(t.device_types.map((x) => labels[x] || x).join(" / "))}</td><td>${E(t.risk)} · ${t.timeout}s<small>输出 ≤ ${fmt(t.max_output_chars)} 字符</small></td><td>${t.enabled ? chip("已启用", "success") : chip("已禁用")}</td><td>${E(t.description)}</td></tr>`,
           )
           .join(""),
       ) +
@@ -400,8 +403,8 @@ async function connections() {
     ["zabbix_mcp", "Zabbix MCP", "监控指标、历史趋势和告警事实。", [["mcp_url", "Zabbix MCP 地址", "text"], ["mcp_token", "Zabbix MCP 令牌", "password"]]],
     ["ssh_mcp", "SSH MCP", "Linux 实时诊断；主机及 SSH 密钥在独立服务维护。", [["ssh_mcp_enabled", "启用 SSH MCP", "select", [["false", "关闭"], ["true", "开启"]]], ["ssh_mcp_url", "SSH MCP 地址", "text"], ["ssh_mcp_token", "SSH MCP 专用令牌", "password"], ["ssh_mcp_timeout_seconds", "单工具超时（秒）", "number"]]],
   ];
-  return intro("分别配置两个 Streamable HTTP MCP。令牌加密保存且不回显原文；HTTP 地址仅用于受信任内网。验证连接检查当前表单，无需先保存。", btn("scroll-section", "查看诊断工具 ↓", "connection-tools")) + groups.map(([provider, title, note, fields]) => panel(title,
-    `<form id="${provider}-form" class="connection-form" data-provider="${provider}"><div class="form-grid">${fields.map(([key, label, type, options]) => field(key, label, values[key] || "", type === "select" ? "text" : type, key.includes("url") ? "例如 http://服务所在服务器:端口/mcp；请填写容器可访问的地址。" : "", options || null)).join("")}</div><div class="form-actions">${btn("validate-connection", "验证填写内容", provider)}${btn("verify-mcp", "验证连接", provider)}<button class="button primary" type="submit">保存连接</button></div><p class="muted small" role="status" data-verify-result></p></form>`, note)).join("") + tools;
+  return intro("分别配置两个 Streamable HTTP MCP。令牌加密保存且不回显原文；HTTP 地址仅用于受信任内网。验证连接检查当前表单，无需先保存。", btn("scroll-section", "查看诊断工具", "connection-tools")) + groups.map(([provider, title, note, fields]) => panel(title,
+    `<form id="${provider}-form" class="connection-form" data-provider="${provider}"><div class="fields">${fields.map(([key, label, type, options]) => field(key, label, values[key] || "", type === "select" ? "text" : type, key.includes("url") ? "例如 http://服务所在服务器:端口/mcp；请填写容器可访问的地址。" : "", options || null)).join("")}</div><div class="form-actions">${btn("validate-connection", "验证填写内容", provider)}${btn("verify-mcp", "验证连接", provider)}<button class="btn primary" type="submit">保存连接</button></div><p class="muted small" role="status" data-verify-result></p></form>`, note)).join("") + tools;
 }
 async function analysisHistory() {
   const [data, usage] = await Promise.all([
@@ -409,11 +412,8 @@ async function analysisHistory() {
     api("/api/v1/ai-token-usage?days=30&limit=20"),
   ]);
   return (
-    intro(
-      "任务、工具调用与证据可按 trace_id 追溯。Token 仅使用模型实际返回数据。",
-      btn("refresh", "刷新"),
-    ) +
-    `<div class="token-grid"><div class="stat"><div class="label">最近 30 天 · 输入 Token</div><div class="value">${fmt(usage.total_input)}</div></div><div class="stat"><div class="label">最近 30 天 · 输出 Token</div><div class="value">${fmt(usage.total_output)}</div></div><div class="stat"><div class="label">最近 30 天 · 总 Token</div><div class="value">${fmt(usage.total_tokens)}</div><div class="hint">未返回用量的请求不计入汇总</div></div></div><div class="panel"><form id="history-filter" class="toolbar"><input name="q" aria-label="搜索分析历史" placeholder="搜索任务、事件或 Trace ID" value="${E(state.taskQuery)}" maxlength="160"><button class="button" type="submit">搜索</button><select id="task-status" aria-label="任务状态"><option value="all">全部任务状态</option>${["queued", "running", "success", "partial", "failed", "cancelled"].map((s) => `<option value="${s}" ${s === state.taskStatus ? "selected" : ""}>${labels[s]}</option>`).join("")}</select><span class="muted small">共 ${data.total} 条</span></form>${table(["任务 / 时间", "诊断类型 / 来源", "状态", "工具", "耗时", "Token", "操作"], taskRows(data.items))}${pagination("task", "taskPage")}</div>` +
+    intro("任务、工具调用与证据可按 trace_id 追溯。Token 仅使用模型实际返回数据。") +
+    `<div class="stats"><div class="stat"><div class="label">最近 30 天 · 输入 Token</div><div class="value">${fmt(usage.total_input)}</div></div><div class="stat"><div class="label">最近 30 天 · 输出 Token</div><div class="value">${fmt(usage.total_output)}</div></div><div class="stat"><div class="label">最近 30 天 · 总 Token</div><div class="value">${fmt(usage.total_tokens)}</div><div class="hint">未返回用量的请求不计入汇总</div></div></div><section class="panel">${heading("分析任务")}<form id="history-filter" class="toolbar"><input name="q" aria-label="搜索分析历史" placeholder="搜索任务、事件或 Trace ID" value="${E(state.taskQuery)}" maxlength="160"><select id="task-status" aria-label="任务状态"><option value="all">全部任务状态</option>${["queued", "running", "success", "partial", "failed", "cancelled"].map((s) => `<option value="${s}" ${s === state.taskStatus ? "selected" : ""}>${labels[s]}</option>`).join("")}</select><button class="btn primary" type="submit">搜索</button><span class="muted small">共 ${data.total} 条</span></form>${table(["任务 / 时间", "诊断类型 / 来源", "状态", "工具", "耗时", "Token", "操作"], taskRows(data.items))}${pagination("task", "taskPage")}</section>` +
     panel(
       "逐轮用量",
       table(
@@ -453,7 +453,7 @@ function readableReportAnswer(raw) {
 function modelInteractionsPanel(data) {
   const items = data?.items || [];
   const introText = "按模型请求记录实际发送内容和模型返回值；脱敏、限长预览。Token 为模型返回的逐轮实际用量；MCP 证据在下方单独查看。";
-  if (!items.length) return panel("与大模型交互记录", '<div class="empty">暂无交互记录。旧任务不会补录；新诊断任务执行后自动保存。</div>', introText);
+  if (!items.length) return panel("与大模型交互记录", `<div class="empty">${E(data?.error || "暂无交互记录。旧任务不会补录；新诊断任务执行后自动保存。")}</div>`, introText);
   const content = items.map((entry) => {
     const payload = entry.payload || {}, request = payload.request || {}, response = payload.response || {};
     const tokenText = `输入 ${fmt(entry.token_input)} / 输出 ${fmt(entry.token_output)} / 合计 ${fmt(entry.token_total)}`;
@@ -480,7 +480,7 @@ async function report(id) {
   try {
     modelHistory = await api(P + "/tasks/" + encodeURIComponent(id) + "/model-interactions" + (can("logs.read") ? "?include_content=true" : ""));
   } catch (err) {
-    modelHistory = {items: [], note: "模型交互记录读取失败：" + (err.message || "未知错误")};
+    modelHistory = {items: [], error: "模型交互记录读取失败：" + (err.message || "未知错误")};
   }
   if (location.hash === "#report/" + id) state.currentTask = t;
   const target = t.report?.target || {};
@@ -499,10 +499,10 @@ async function report(id) {
               : ""
           : "") +
         btn("copy-report", "复制结论") + btn("download-report", "下载报告") +
-        (can("logs.read") ? btn("download-detailed-report", "下载详细报告", id) : "") + btn("refresh", "刷新"),
+        (can("logs.read") ? btn("download-detailed-report", "下载详细报告", id) : ""),
     ) +
     reportProgress(t) +
-    `<div class="stats"${facts ? ' style="grid-template-columns:repeat(5,minmax(0,1fr))"' : ""}><div class="stat"><div class="label">诊断状态</div><div class="value">${badge(t.status)}</div><div class="hint">${E(stageLabel(t.stage))}</div></div><div class="stat"><div class="label">主机 / 事件 ID</div><div class="value">${E(t.alert?.host_id || t.asset?.zabbix_hostid || "—")}</div><div class="hint">事件 ${E(t.event_id || "未关联")}</div></div><div class="stat"><div class="label">实际 Token / 工具调用</div><div class="value">${fmt(t.token_total)}</div><div class="hint">${fmt(t.tools)} 次采集 · 输入 ${fmt(t.token_input)} / 输出 ${fmt(t.token_output)}</div></div><div class="stat"><div class="label">执行耗时</div><div class="value">${t.duration_ms == null ? "—" : (t.duration_ms / 1000).toFixed(1) + " s"}</div><div class="hint">${date(t.created_at)}</div></div>${facts ? `<div class="stat"><div class="label">事实核对</div><div class="value">${fmt(facts.confirmed)}</div><div class="hint">已确认 ${fmt(facts.confirmed)} / 降级 ${fmt(facts.demoted)} / 推断 ${fmt(facts.probable)} / 假设 ${fmt(facts.hypotheses)}</div></div>` : ""}</div>` +
+    `<div class="stats"><div class="stat"><div class="label">诊断状态</div><div class="value">${badge(t.status)}</div><div class="hint">${["queued", "running"].includes(t.status) ? E(stageLabel(t.stage)) : t.completed_at ? "结束于 " + date(t.completed_at) : "—"}</div></div><div class="stat"><div class="label">主机 / 事件 ID</div><div class="value">${E(t.alert?.host_id || t.asset?.zabbix_hostid || "—")}</div><div class="hint">事件 ${E(t.event_id || "未关联")}</div></div><div class="stat"><div class="label">实际 Token / 工具调用</div><div class="value">${fmt(t.token_total)}</div><div class="hint">${fmt(t.tools)} 次采集 · 输入 ${fmt(t.token_input)} / 输出 ${fmt(t.token_output)}</div></div><div class="stat"><div class="label">执行耗时</div><div class="value">${t.duration_ms == null ? "—" : (t.duration_ms / 1000).toFixed(1) + " s"}</div><div class="hint">${date(t.created_at)}</div></div>${facts ? `<div class="stat"><div class="label">事实核对</div><div class="value">${fmt(facts.confirmed)}</div><div class="hint">已确认 ${fmt(facts.confirmed)} / 降级 ${fmt(facts.demoted)} / 推断 ${fmt(facts.probable)} / 假设 ${fmt(facts.hypotheses)}</div></div>` : ""}</div>` +
     reportBudget(t) +
     skillsPanel(t.skills) +
     panel(
@@ -528,12 +528,12 @@ async function report(id) {
       `<div class="timeline"><div>任务创建<small>${date(t.created_at)}</small></div>${t.started_at ? `<div>开始执行<small>${date(t.started_at)}</small></div>` : ""}${t.evidence.map((e) => `<div>${E(e.provider)} · ${E(e.tool)} ${badge(e.status)}<small>${date(e.collected_at)} · ${e.duration_ms} ms</small></div>`).join("")}${t.completed_at ? `<div>任务结束<small>${date(t.completed_at)}</small></div>` : ""}</div>`,
     ) +
     modelInteractionsPanel(modelHistory) +
-    `<div class="panel"><div class="section-heading"><div><h2>证据与工具执行记录</h2><p class="muted small">Zabbix 为监控证据；SSH 为采集当时快照。日志内容需要独立权限。</p></div>${can("logs.read") ? btn("toggle-logs", state.includeLogs ? "隐藏原始日志" : "读取日志证据", id) : ""}</div>${t.evidence.length ? t.evidence.map((e) => {
+    `<section class="panel">${heading("证据与工具执行记录", "Zabbix 为监控证据；SSH 为采集当时快照。日志内容需要独立权限。", can("logs.read") ? btn("toggle-logs", state.includeLogs ? "隐藏原始日志" : "读取日志证据", id, "small") : "")}${t.evidence.length ? t.evidence.map((e) => {
       const meta = e.payload?._meta && typeof e.payload._meta === "object" ? e.payload._meta : {};
       const ident = t.report?.evidence_ids?.[e.id] || meta.evidence_id;
       const args = argumentSummary(meta.arguments);
       return `<details class="evidence" data-evidence="${E(e.id)}"><summary>${ident ? `<strong>${E(ident)}</strong> ` : ""}${E(e.provider)} / ${E(e.tool)} ${badge(e.status)} · ${date(e.collected_at)}${EVIDENCE_KINDS[meta.kind] ? " · " + EVIDENCE_KINDS[meta.kind] : ""}${args ? ` · <span class="mono">${E(args)}</span>` : ""}</summary><pre>${E(JSON.stringify(e.payload, null, 2))}</pre></details>`;
-    }).join("") : '<div class="empty">暂无采集证据</div>'}</div>`
+    }).join("") : '<div class="empty">暂无采集证据</div>'}</section>`
   );
 }
 const DIAGNOSTIC_PATHS = {"zabbix+ssh": "Zabbix + SSH 联合", "zabbix-only": "仅 Zabbix", "ssh-only": "仅 SSH", none: "无可用数据源"};
@@ -568,7 +568,7 @@ function capabilityPanel(caps) {
   const row = (key, title) => {
     const state = caps[key] && typeof caps[key] === "object" ? caps[key] : {};
     const [text, tone] = CAPABILITY_STATES[state.status] || [state.status || "未记录", ""];
-    return `<div class="health-row"><div><strong>${title}</strong><p>${E(state.reason || "—")}${state.error_code ? ` · <span class="mono">${E(state.error_code)}</span>` : ""}</p></div><span class="tag ${tone}">${E(text)}</span></div>`;
+    return `<div class="health-row"><div><strong>${title}</strong><p>${E(state.reason || "—")}${state.error_code ? ` · <span class="mono">${E(state.error_code)}</span>` : ""}</p></div>${chip(text, tone)}</div>`;
   };
   const denied = Array.isArray(caps.unauthorized_tools) ? caps.unauthorized_tools : [];
   return panel(
@@ -639,9 +639,9 @@ function reportAnswer(task) {
 }
 function reportProgress(task) {
   const active = ["queued", "running"].includes(task.status);
-  const reasons = {QueueUnavailable: "诊断队列连接失败。请检查 Redis 和诊断 Worker，恢复后可重试此任务。", WorkerLost: "执行超过允许时间，Worker 可能已退出。请检查服务状态，已有证据仍可查看。", PermissionRevoked: "提交者的诊断权限已撤销，请联系管理员。", LocalSSHRemoved: "此任务使用已停用的旧版执行方式，请重新发起诊断。", ModelTimeout: "AI 模型请求超时；已保留已有证据，可调整单次请求超时后重试。", ModelRateLimited: "模型接口受到限流；请检查部署容量、配额或稍后重试。", ModelConnectionError: "模型连接失败；请检查服务连通性。", ModelServiceError: "模型服务返回 5xx；请检查供应商状态。", ModelRequestError: "模型请求被拒绝；请检查部署名及请求参数。"};
+  const reasons = {QueueUnavailable: "诊断队列连接失败。请检查 Redis 和诊断 Worker，恢复后可重试此任务。", WorkerLost: "执行超过允许时间，Worker 可能已退出。请检查服务状态，已有证据仍可查看。", PermissionRevoked: "提交者的诊断权限已撤销，请联系管理员。", LocalSSHRemoved: "此任务使用已停用的旧版执行方式，请重新发起诊断。", MultipleTargets: "问题中包含多台主机，一次只诊断一台，请分别提问。", ModelTimeout: "AI 模型请求超时；已保留已有证据，可调整单次请求超时后重试。", ModelRateLimited: "模型接口受到限流；请检查部署容量、配额或稍后重试。", ModelConnectionError: "模型连接失败；请检查服务连通性。", ModelServiceError: "模型服务返回 5xx；请检查供应商状态。", ModelRequestError: "模型请求被拒绝；请检查部署名及请求参数。"};
   const text = task.cancel_requested && active ? "已请求取消，正在停止后续采集。已开始的远端操作受其自身超时控制。" : active ? stageLabel(task.stage) : task.error_type ? reasons[task.error_type] || "分析未完成。请验证模型、两个 MCP 连接以及主机授权，再重试。" : task.status === "partial" ? "已保存可用证据；请查看诊断不足，补足信息后再判断。" : "分析已结束，可核验依据或下载报告。";
-  return `<div class="report-progress ${active ? "is-active" : ""}"><span class="progress-mark">${active ? "◌" : task.status === "success" ? "✓" : "i"}</span><div><strong>${E(text)}</strong><p id="report-refresh-state">${active ? "每 5 秒检查进度，保留展开的证据与阅读位置。" : "历史监控与实时采集分别记录，AI 结论需要结合证据核验。"}</p></div>${task.error_type ? `<span class="mono">${E(task.error_type)}</span>` : ""}</div>`;
+  return `<div class="report-progress ${active ? "is-active" : ""}"><span class="progress-mark ${E(task.status)}">${active ? '<span class="spinner"></span>' : task.status === "success" ? "✓" : "i"}</span><div><strong>${E(text)}</strong><p id="report-refresh-state">${active ? "每 5 秒检查进度，保留展开的证据与阅读位置。" : "历史监控与实时采集分别记录，AI 结论需要结合证据核验。"}</p></div>${task.error_type ? `<span class="mono">${E(task.error_type)}</span>` : ""}</div>`;
 }
 function reportText() {
   const task = state.currentTask;
@@ -740,19 +740,20 @@ const configGroups = {
 function budgetFields(values, options) {
   let custom = {};
   try { custom = JSON.parse(values.ai_profile_budgets || "{}"); } catch {}
+  // Saving starts from the stored budgets so keys without an input here
+  // (follow_up_calls, extension_rounds — set through the API) are kept.
+  state.storedBudgets = custom && typeof custom === "object" && !Array.isArray(custom) ? custom : {};
   const names = {rounds: "最大轮次", calls: "采集次数", per_round: "每轮调用", result_chars: "每次结果字符", seconds: "总时间（秒）", tokens: "Token 阈值"};
   return `<h3>分析预算</h3><p class="muted small">各项预算无固定数值上限，仍保留整数和最小值校验。任务按保存的预算执行；修改后用于新任务或重试任务。SSH 主机解析也计入采集次数。</p>` + table(["分析模式", ...Object.values(names)], Object.entries(options.profiles).map(([profile, limits]) => `<tr><td>${labels[profile]}</td>${Object.keys(names).map(key => `<td><input class="budget-input" type="number" name="budget_${profile}_${key}" aria-label="${labels[profile]} ${names[key]}" min="${options.ranges[key][0]}" ${options.ranges[key][1] == null ? "" : `max="${options.ranges[key][1]}"`} step="1" required value="${E(custom[profile]?.[key] ?? limits[key])}"></td>`).join("")}</tr>`).join(""));
 }
 function toolFields(values, options) {
   let disabled = [];
   try { disabled = JSON.parse(values.disabled_tools || "[]"); } catch {}
-  return `<fieldset class="group-picker"><legend>允许 AI 使用的 Zabbix 只读工具</legend><div class="group-options">${options.tools.map(name => `<label class="check-field"><input type="checkbox" name="enabled_tool" value="${E(name)}" ${disabled.includes(name) ? "" : "checked"}>${E(name)}</label>`).join("")}</div><p class="muted small">取消勾选可禁用；任何远端写入工具始终不获授权。</p></fieldset>`;
+  return `<fieldset class="group-picker"><legend>允许 AI 使用的 Zabbix 只读工具</legend><div class="group-options">${options.tools.map(name => `<label class="check mono"><input type="checkbox" name="enabled_tool" value="${E(name)}" ${disabled.includes(name) ? "" : "checked"}>${E(name)}</label>`).join("")}</div><p class="muted small">取消勾选可禁用；任何远端写入工具始终不获授权。</p></fieldset>`;
 }
 function formValues(form) {
   const data = Object.fromEntries(new FormData(form));
-  if (form.id === "editor-form") {
-    if (state.editor.type === "member") data.enabled = form.elements.enabled.checked;
-  }
+  if (form.id === "editor-form") data.enabled = form.elements.enabled.checked;
   if (form.id === "diagnostic-form") {
     data.zabbix_hostid = data.zabbix_hostid || null;
     data.event_id = data.event_id || null; data.service = data.service || null;
@@ -761,7 +762,7 @@ function formValues(form) {
   }
   if (form.classList.contains("settings-form")) {
     if (form.dataset.group === "ai") {
-      const budgets = {};
+      const budgets = structuredClone(state.storedBudgets || {});
       for (const [key, value] of Object.entries(data)) if (key.startsWith("budget_")) {
         const [, profile, ...parts] = key.split("_");
         (budgets[profile] ||= {})[parts.join("_")] = Number(value); delete data[key];
@@ -812,14 +813,14 @@ function configSection(group, values, options) {
     ai: "仅配置模型、执行超时与预算。诊断规则统一在 Skill 管理中维护；已保存的旧提示词不再参与新分析。",
   };
   const actions = group === "ai"
-    ? btn("test-model", "验证模型连接") + '<a class="button" href="#skills">管理诊断 Skill</a>'
+    ? btn("test-model", "验证模型连接") + '<a class="btn" href="#skills">管理诊断 Skill</a>'
     : group === "feishu"
       ? btn("verify-feishu", "验证飞书应用") + btn("verify-feishu-groups", "验证群访问权限")
       : "";
   const fields = configGroups[group].filter(x => can("*") || x[0] !== "feishu_admin_open_ids");
   return panel(
     titles[group],
-    `<form id="${group}-settings-form" class="settings-form" data-group="${group}"><div class="form-grid">${fields.map(([key, label, type, choices]) => field(key, label, values[key] || "", type === "select" ? "text" : type || "text", configHelp[key] || "", choices || null, type === "textarea")).join("")}</div>${group === "ai" ? budgetFields(values, options) : ""}${group === "settings" && can("*") ? toolFields(values, options) : ""}<div class="form-actions">${btn("validate-settings", "验证填写内容")}${actions}<button class="button primary" type="submit">保存${group === "settings" ? "基础" : group === "feishu" ? "飞书" : "AI"}配置</button></div><p class="muted small" role="status" data-verify-result></p></form>`,
+    `<form id="${group}-settings-form" class="settings-form" data-group="${group}"><div class="fields">${fields.map(([key, label, type, choices]) => field(key, label, values[key] || "", type === "select" ? "text" : type || "text", configHelp[key] || "", choices || null)).join("")}</div>${group === "ai" ? budgetFields(values, options) : ""}${group === "settings" && can("*") ? toolFields(values, options) : ""}<div class="form-actions">${btn("validate-settings", "验证填写内容")}${actions}<button class="btn primary" type="submit">保存${group === "settings" ? "基础" : group === "feishu" ? "飞书" : "AI"}配置</button></div><p class="muted small" role="status" data-verify-result></p></form>`,
     hints[group],
     "settings-" + (group === "settings" ? "general" : group),
   );
@@ -831,11 +832,11 @@ async function systemSettings() {
   if (can("*")) {
     const members = await api(P + "/members");
     state.members = members;
-    feishuExtra = `<div class="panel"><div class="section-heading"><div><h2>授权成员</h2><p class="muted small">超级管理员通过上方名单管理；其他角色由后端授权。</p></div>${btn("new-member", "添加成员")}</div>${table(["Open ID", "角色", "状态", "操作"], members.map((m) => `<tr><td class="mono">${E(m.open_id)}</td><td>${E(labels[m.role])}</td><td>${badge(m.enabled ? "已启用" : "已停用")}</td><td>${btn("edit-member", "编辑", m.open_id, "small")}</td></tr>`).join(""))}</div>`;
+    feishuExtra = `<section class="panel">${heading("授权成员", "超级管理员通过上方名单管理；其他角色由后端授权。", btn("new-member", "添加成员", "", "primary small"))}${table(["Open ID", "角色", "状态", "操作"], members.map((m) => `<tr><td class="mono">${E(m.open_id)}</td><td>${E(labels[m.role])}</td><td>${m.enabled ? chip("已启用", "success") : chip("已停用")}</td><td>${btn("edit-member", "编辑", m.open_id, "small")}</td></tr>`).join(""))}</section>`;
   }
   return (
     intro("在同一处管理平台、飞书与 AI。各分区独立保存；切换分区保留填写内容。") +
-    `<div class="section-tabs" role="tablist" aria-label="系统配置分区">${[["general", "基础设置"], ["feishu", "飞书配置"], ["ai", "AI 配置"], ["maintenance", "服务与维护"]].map(([key, label]) => `<button type="button" role="tab" id="tab-${key}" aria-controls="region-${key}" aria-selected="${state.configTab === key}" data-action="settings-tab" data-id="${key}" class="section-tab ${state.configTab === key ? "active" : ""}">${label}</button>`).join("")}</div>` +
+    `<div class="segmented" role="tablist" aria-label="系统配置分区">${[["general", "基础设置"], ["feishu", "飞书配置"], ["ai", "AI 配置"], ["maintenance", "服务与维护"]].map(([key, label]) => `<button type="button" role="tab" id="tab-${key}" aria-controls="region-${key}" aria-selected="${state.configTab === key}" data-action="settings-tab" data-id="${key}" class="${state.configTab === key ? "active" : ""}">${label}</button>`).join("")}</div>` +
     configRegion("general", configSection("settings", values, options)) +
     configRegion("feishu", configSection("feishu", values, options) + feishuExtra) +
     configRegion("ai", configSection("ai", values, options)) +
@@ -865,10 +866,7 @@ function selectConfigTab(key) {
 async function auditPage() {
   const data = await paged(P + "/audit", "auditPage", 50);
   return (
-    intro(
-      "登录、配置变更、报告访问和诊断操作",
-      btn("refresh", "刷新"),
-    ) +
+    intro("登录、配置变更、报告访问和诊断操作") +
     panel(
       "操作记录",
       table(
@@ -910,19 +908,13 @@ async function navigate(options = {}) {
   if (page === "settings" && ["general", "feishu", "ai", "maintenance"].includes(parts[1])) state.configTab = parts[1];
   if (page !== "report" || state.currentTask?.task_id !== parts[1]) state.includeLogs = false;
   state.lastHash = location.hash || "#overview";
-  const item = nav.find((x) => x[0] === page);
-  $("#page-title").textContent =
-    page === "report" ? "诊断详情" : item?.[1] || "总览";
+  const item = nav.find((x) => x[0] === (page === "report" ? "history" : page)) || nav[0];
+  $("#page-title").textContent = page === "report" ? "诊断详情" : item[1];
+  $("#breadcrumb-section").textContent = item[4];
   document
-    .querySelectorAll("nav button")
-    .forEach((b) =>
-      b.classList.toggle(
-        "active",
-        b.dataset.page === page ||
-          (page === "report" && b.dataset.page === "history"),
-      ),
-    );
-  if (!options.quiet) $("#content").innerHTML = '<div class="loading-state" role="status"><span class="loading-dot"></span>正在加载…</div>';
+    .querySelectorAll("#nav .nav-link")
+    .forEach((b) => b.classList.toggle("active", b.dataset.page === item[0]));
+  if (!options.quiet) $("#content").innerHTML = '<div class="loading-panel" role="status"><span class="spinner"></span>正在加载…</div>';
   try {
     let html;
     if (page === "overview") html = await overview();
@@ -948,9 +940,7 @@ async function navigate(options = {}) {
       document.querySelectorAll("details.evidence").forEach(el => { el.open = openEvidence.includes(el.dataset.evidence); });
       window.scrollTo(0, scrollY);
     } else window.scrollTo(0, 0);
-    if (
-      (page === "report" && ["running", "queued"].includes(state.currentTask?.status))
-    )
+    if (page === "report" && ["running", "queued"].includes(state.currentTask?.status))
       scheduleReportPoll(parts[1], current);
   } catch (err) {
     if (current === generation && !options.quiet)
@@ -984,29 +974,21 @@ function go(page) {
   if (location.hash === "#" + page) navigate();
   else location.hash = page;
 }
-async function openEditor(type, id) {
-  state.editor = { type, id };
-  let title,
-    fields,
-    note = "";
-  if (type === "member") {
-    const member = (state.members || []).find((m) => m.open_id === id);
-    title = id ? "编辑成员" : "授权成员";
-    fields =
-      field("open_id", "飞书 Open ID", member?.open_id || "") +
-      field("role", "角色", member?.role || "operator", "text", "", [
-        ["ops_admin", "运维管理员"],
-        ["operator", "运维人员"],
-        ["auditor", "只读审计"],
-      ]) +
-      field("enabled", "启用该成员", member ? !!member.enabled : true, "checkbox");
-  }
-  $("#editor-title").textContent = title;
-  $("#editor-fields").innerHTML = fields;
-  $("#editor-note").textContent = note;
+// The editor dialog only edits authorized members.
+function openMemberEditor(id) {
+  const member = (state.members || []).find((m) => m.open_id === id);
+  $("#editor-title").textContent = id ? "编辑成员" : "授权成员";
+  $("#editor-fields").innerHTML =
+    field("open_id", "飞书 Open ID", member?.open_id || "") +
+    field("role", "角色", member?.role || "operator", "text", "", [
+      ["ops_admin", "运维管理员"],
+      ["operator", "运维人员"],
+      ["auditor", "只读审计"],
+    ]) +
+    field("enabled", "启用该成员", member ? !!member.enabled : true, "checkbox");
   $("#editor-feedback").textContent = "";
   $("#editor-feedback").hidden = true;
-  if (type === "member" && id) $("#editor-form").elements.open_id.readOnly = true;
+  if (id) $("#editor-form").elements.open_id.readOnly = true;
   $("#editor").showModal();
 }
 document.addEventListener("click", async (event) => {
@@ -1063,7 +1045,7 @@ document.addEventListener("click", async (event) => {
       toast("屏蔽已解除");
       await navigate();
     } else if (action === "new-member" || action === "edit-member")
-      await openEditor("member", id);
+      openMemberEditor(id);
     else if (action === "search-hosts") {
       // Shared by the diagnostic form and the connection page's diagnostic test.
       const form = b.closest("form"), output = form.querySelector("[data-host-result]");
@@ -1211,16 +1193,8 @@ document.addEventListener("submit", async (event) => {
     } else if (form.id === "probe-form") {
       await runProbe(form, data);
     } else {
-      const { type, id } = state.editor;
-      let path,
-        method = id ? "PUT" : "POST",
-        payload = data;
-      if (type === "member") {
-        path = "/members";
-        method = "PUT";
-        data.enabled = form.elements.enabled.checked;
-      }
-      await api(P + path, method, payload);
+      // The editor dialog: formValues() already read the member's enabled box.
+      await api(P + "/members", "PUT", data);
       $("#editor").close();
       toast("已保存");
       await navigate({preserveDrafts: true});
@@ -1233,12 +1207,7 @@ document.addEventListener("submit", async (event) => {
   }
 });
 $("#close-editor").addEventListener("click", () => $("#editor").close());
-$("#theme-toggle").addEventListener("click", () => {
-  const theme =
-    document.documentElement.dataset.theme === "dark" ? "light" : "dark";
-  document.documentElement.dataset.theme = theme;
-  localStorage.setItem("aiops-theme", theme);
-});
+$("#toast").addEventListener("click", () => ($("#toast").hidden = true));
 $("#logout").addEventListener("click", async () => {
   try {
     if (OpsUI.dirty() && !window.confirm("有配置尚未保存，仍然退出登录？")) return;
@@ -1249,9 +1218,22 @@ $("#logout").addEventListener("click", async () => {
   }
 });
 window.addEventListener("hashchange", navigate);
+function renderNavigation() {
+  let section = "";
+  $("#nav").innerHTML = nav
+    .filter((x) => can(x[3]))
+    .map(([page, title, icon, , group]) => {
+      const caption = group === section ? "" : `<div class="nav-caption">${group}</div>`;
+      section = group;
+      return `${caption}<button type="button" class="nav-link" data-page="${page}">${UIKit.icon(icon)}<span>${title}</span></button>`;
+    })
+    .join("");
+  $("#nav").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-page]");
+    if (b) go(b.dataset.page);
+  });
+}
 (async () => {
-  const theme = localStorage.getItem("aiops-theme");
-  if (theme) document.documentElement.dataset.theme = theme;
   try {
     state.user = await api("/api/v1/auth/me");
     state.csrf = state.user.csrf || "";
@@ -1267,27 +1249,23 @@ window.addEventListener("hashchange", navigate);
     $("#login").hidden = true;
     $("#app").hidden = false;
     $("#username").textContent = state.user.name;
+    $("#avatar").textContent = String(state.user.name || "?").slice(0, 1);
     $("#role-label").textContent = labels[state.user.role] || "管理员";
-    $("#navigation").innerHTML = nav
-      .filter((x) => can(x[3]))
-      .map(
-        ([page, title, icon]) =>
-          `<button data-page="${page}"><span class="nav-icon" aria-hidden="true">${icon}</span>${title}</button>`,
-      )
-      .join("");
-    $("#navigation").addEventListener("click", (e) => {
-      const b = e.target.closest("[data-page]");
-      if (b) go(b.dataset.page);
-    });
+    renderNavigation();
     const h = await api("/healthz");
     $("#version").textContent = "v" + h.version;
     await navigate();
   } catch (err) {
-    $("#login-error").textContent = err.message;
+    const error = $("#login-error");
+    // Not being signed in yet is the normal state of this screen, not an error.
+    if (err.status !== 401) error.textContent = err.message;
     try {
-      if ((await api("/api/v1/setup/status")).setup_required)
-        $("#login-error").textContent = "首次部署，请点击下方「首次初始化」。";
+      if ((await api("/api/v1/setup/status")).setup_required) {
+        error.textContent = "系统尚未初始化，请先进入初始化向导。";
+        error.className = "notice";
+      }
     } catch {}
+    error.hidden = !error.textContent;
   }
 })();
 
