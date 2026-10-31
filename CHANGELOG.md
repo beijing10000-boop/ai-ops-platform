@@ -1,5 +1,9 @@
 # 更新记录
 
+## 未发布
+
+- 模型在 JSON 结论的字符串里直接换行（如 `"cause": "……负载超阈值：` 换行后接 `1. ……"`）时仍按结构化结论处理。标准 JSON 不允许字符串中出现未转义的换行，此前整个回答被当作非结构化文本：飞书“AI 分析结果”卡片的诊断结论只显示原始 JSON 的第一行（`{"host_groups": [...], "cause": "……`），处理建议变成兜底的“请打开完整诊断报告核验……”，网页报告显示原始 JSON，证据引用核对也没有执行。`evidence_check.answer_object()` 改用宽松解析（`strict=False`，只放宽字符串内的控制字符）。
+
 ## 1.4.0 — 2026-10-31
 
 - **接入日志分析平台，作为第三个 MCP 证据源**（与 Zabbix MCP、SSH MCP 并列）：连接管理新增“日志 MCP”表单（`log_mcp_url`、`log_mcp_token`，令牌加密保存，须以 `logmcp_` 开头）与“验证连接”按钮，验证时握手并列出本令牌获授权的日志工具。平台只放行 `log_` 开头、标记 `readOnlyHint=true`、参数里没有 command / sql / script / url 的工具，并按 `log_list_tool_catalog` 隐藏令牌未授权的工具（读取目录失败时保留完整列表，由日志平台拒绝未授权调用）。日志工具返回单个 JSON 文本块（没有 structuredContent），按结构化结果解析；`status=failed` 的回复记为失败证据。

@@ -27,6 +27,25 @@ def test_structured_answer_found_after_a_heading_or_in_a_fence():
         assert answer_object(text) == ANSWER, text[:30]
 
 
+def test_raw_line_breaks_inside_strings_still_parse():
+    """Production (v1.4.0): the model broke "cause" across lines inside the
+    JSON string. Strict JSON rejected the whole answer, so the Feishu card
+    showed the first line of the raw JSON as its conclusion and the fallback
+    action instead of the model's."""
+    raw = (
+        '{"host_groups": ["Linux servers"], "cause": "PostgreSQL 多进程持续消耗 CPU：\n\n'
+        '1. 5 分钟负载 3.43（E1）\n2. CPU 利用率 92%（E2）", '
+        '"action": ["核查慢查询"], "analysis": "负载与 CPU 同步上升（E1）。"}'
+        "\n\n诊断范围\n- E1 Zabbix MCP / history_get"
+    )
+    parsed = answer_object(raw)
+    assert parsed["cause"].startswith("PostgreSQL") and "\n2. CPU" in parsed["cause"]
+    assert parsed["action"] == ["核查慢查询"]
+    card = worker.card_summary(parsed)
+    assert "核查慢查询" in card and "host_groups" not in card
+    assert readable_report_answer(raw).startswith("诊断结论\n")
+
+
 def test_prose_quoting_json_stays_prose():
     assert answer_object("纯文本结论") is None
     assert answer_object('日志里有 {"level": "error"} 一行') is None
