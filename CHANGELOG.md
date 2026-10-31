@@ -1,6 +1,6 @@
 # 更新记录
 
-## 未发布
+## 1.4.0 — 2026-10-31
 
 - **接入日志分析平台，作为第三个 MCP 证据源**（与 Zabbix MCP、SSH MCP 并列）：连接管理新增“日志 MCP”表单（`log_mcp_url`、`log_mcp_token`，令牌加密保存，须以 `logmcp_` 开头）与“验证连接”按钮，验证时握手并列出本令牌获授权的日志工具。平台只放行 `log_` 开头、标记 `readOnlyHint=true`、参数里没有 command / sql / script / url 的工具，并按 `log_list_tool_catalog` 隐藏令牌未授权的工具（读取目录失败时保留完整列表，由日志平台拒绝未授权调用）。日志工具返回单个 JSON 文本块（没有 structuredContent），按结构化结果解析；`status=failed` 的回复记为失败证据。
 - **新增平台维护的 Skill `platform-logs`（日志证据）**：所有任务加载，安装时只勾选日志 MCP，停用它即关闭日志证据。告警与 Web 诊断在预采集阶段 B 用主机 IP（任务的 IP、告警的 `{HOST.IP}` 或 Zabbix 主机主接口）调 `log_resolve_target`，与 SSH 资产解析并行；找到来源后在阶段 C 与 SSH 诊断、历史并行调 `log_overview`（告警时刻前后各 30 分钟）；网络设备追加 `log_network_events`，Nginx 告警追加 `log_nginx_summary` 与 `log_compare`，Java 告警追加 `log_java_exceptions` 与 `log_compare`。来源近 7 天没有对应类型日志的专题跳过并写明原因。
