@@ -1,5 +1,22 @@
 # 升级说明
 
+## v1.3.1 → v1.3.2
+
+没有数据库迁移，不改配置，Skill 不变，SSH MCP 无需升级。修复：进程等清单在模型视图里能放下全部行时就全部列出（v1.3.1 中“省略了哪些字段”的说明没计入上限，13 个 Java 进程在 6000 字符下仍只给模型看 10 个）。在平台部署目录执行：
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://服务器IP:8088/healthz
+```
+
+healthz 应返回 version 1.3.2。验收：对运行十几个 Java 进程的主机提问“这些 java 进程是什么”，回答列出全部进程的应用名与 -Xmx，不再写“另有 N 个未列出”（标准档默认 4000 字符下约可列 11 个，需要全部列出时在“系统配置 → AI 配置”把该档的“每次结果字符”调到 6000）。
+
+回滚：没有表结构变化，切回 v1.3.1（`a2db7e3`）后按同样命令重建即可。
+
 ## v1.3.0 → v1.3.1
 
 没有数据库迁移，不改配置，Skill 不变。修复分析质量问题：结论放在标题之后时飞书卡片显示为空、SSH 不可用的主机上模型仍尝试 SSH 而使任务“部分完成”、Java 进程清单被截到只剩 1 个。建议同时把 SSH MCP 升级到 v0.7.1（Java 启动命令解析与 `memory_processes` 退出码修复）。在平台部署目录执行：
