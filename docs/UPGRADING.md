@@ -1,5 +1,22 @@
 # 升级说明
 
+## v1.4.4 → v1.4.5
+
+没有数据库迁移，不改配置，SSH MCP 与日志 MCP 无需升级。修复：纯文本回答的飞书卡片不再把“诊断结论”等小节名当作结论；整数百分比不再显示成“90.00%”；平台维护的 Skill `platform-java` 要求建议写明命令前提（如 `jcmd … VM.native_memory` 需要启动参数 `-XX:NativeMemoryTracking`），升级后第一次创建诊断任务或打开“Skill 管理”时自动刷新。在平台部署目录执行：
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://服务器IP:8088/healthz
+```
+
+healthz 应返回 version 1.4.5。验收：“Skill 管理”中 platform-java 的版本号加 1；之后的告警卡片里阈值等整数百分比显示为“90%”。
+
+回滚：没有表结构变化，切回 v1.4.4（`b635a62`）后按同样命令重建即可。
+
 ## v1.4.3 → v1.4.4
 
 没有数据库迁移，不改配置，SSH MCP 与日志 MCP 无需升级。飞书“AI 分析结果”卡片只保留诊断结论与最多 4 条处理建议，容量统一以 GiB 显示；模型回答的 JSON 少括号或被截断时仍能解析。平台维护的 Skill `platform-linux`（未配置 Swap 按正常处理、不再提及）与 `platform-base` 正文有更新，升级后第一次创建诊断任务或打开“Skill 管理”时自动刷新（版本号加 1；管理员停用的仍保持停用）。在平台部署目录执行：
