@@ -1,14 +1,15 @@
-# 按 Skill 查询双 MCP
+# 按 Skill 查询 MCP 数据源
 
-Skill 是**唯一的 AI 诊断策略来源**：数据源选择、工具顺序、分析与报告要求都写在 Skill 中，平台不再有固定的兼容诊断流程。平台以不可编辑的代码约束只读安全边界、飞书告警 JSON 输出字段、授权、Token 预算和证据脱敏。
+Skill 是**唯一的 AI 诊断策略来源**：数据源选择、工具顺序、分析与报告要求都写在 Skill 中，平台不再有固定的兼容诊断流程。平台以不可编辑的代码约束只读安全边界、飞书告警 JSON 输出字段、授权、Token 预算和证据脱敏。数据源有三个：Zabbix MCP（监控历史）、SSH MCP（Linux 实时快照）与日志 MCP（[日志分析平台](https://github.com/beijing10000-boop/log-analysis-platform) 的历史日志），Skill 的“允许使用的后台服务”分别对应 `zabbix_mcp`、`ssh_mcp`、`logs`。
 
 ## 平台维护的 Skill 与补充 Skill
 
-- **平台维护的 Skill**：随平台版本维护，升级后自动更新，默认对飞书问答、Web 诊断、告警分析三个场景启用。正文只读，不能删除；可以调整启用状态、适用场景与优先级（这些选择在升级时保留）。内容来源是 [SSH MCP Server](https://github.com/beijing10000-boop/ssh-mcp-server) 和 [initMAX Zabbix MCP Server](https://github.com/initMAX/zabbix-mcp-server) 的真实只读工具。v1.2 起共 8 个：
+- **平台维护的 Skill**：随平台版本维护，升级后自动更新，默认对飞书问答、Web 诊断、告警分析三个场景启用。正文只读，不能删除；可以调整启用状态、适用场景与优先级（这些选择在升级时保留）。内容来源是 [SSH MCP Server](https://github.com/beijing10000-boop/ssh-mcp-server) 和 [initMAX Zabbix MCP Server](https://github.com/initMAX/zabbix-mcp-server) 的真实只读工具。v1.2 起共 8 个，接入日志 MCP 后增加 platform-logs，共 9 个：
 
   | Skill | 适用范围（`devices` / `types`） | 内容 |
   | --- | --- | --- |
   | platform-base | 所有任务 | 四阶段诊断流程、证据深度、按设备类型选择数据源、报告分级 |
+  | platform-logs | 所有任务（只使用日志 MCP） | 日志证据：按告警 IP 定位日志来源、告警前后 30 分钟概览，网络设备 / Nginx / Java 专题与基线对比；没有日志证据时不发给模型 |
   | platform-linux | 设备：Linux、未识别 | CPU / 内存 / 磁盘 / I/O / 网络 / 系统 / 不可达告警的 Zabbix + SSH 取证 |
   | platform-windows | 设备：Windows | 只用 Zabbix 性能计数器、服务与可用性监控项 |
   | platform-network | 设备：网络设备 | SNMP 接口状态、错误与丢弃、带宽、CPU / 内存、ICMP、重启 |
@@ -22,6 +23,7 @@ Skill 是**唯一的 AI 诊断策略来源**：数据源选择、工具顺序、
   - **补充**（推荐）：与基础 Skill 一起加载，只写本环境特有的规则；平台升级时基础规则自动更新，不再需要手工合并模板。
   - **替代**：该场景不再加载基础 Skill，自定义 Skill 需自行维护全部规则。v1.0 之前导入的 Skill 升级后默认为“替代”，行为与升级前完全一致。
 - 设备类与告警类平台 Skill 是基础 Skill 的延伸：停用 platform-base（或它不服务某个场景）时，其余平台 Skill 在该场景也不加载。某个场景没有任何已启用的 Skill（例如停用了基础 Skill 且没有自定义 Skill）时，该场景的诊断任务会直接失败并提示启用。
+- 日志 MCP 只由 platform-logs 开放（安装时它的后台服务只勾选 `logs`，其余平台 Skill 不含 `logs`）：停用 platform-logs 即关闭日志证据。“替代”模式的自定义 Skill 需要日志证据时，自行勾选 `logs` 并写明用法。
 
 ## 使用步骤
 
@@ -66,21 +68,24 @@ devices: [linux, unknown] # 只在这些设备类型的任务中交给模型（l
 prefetch:
 - scopes: [alert]                 # alert / qa / web
   types: [cpu]                    # 诊断类型，或 * 表示全部
+  devices: [linux]                # 可选：只对这些设备类型生效，省略表示全部
   ssh: [ssh_diagnose_cpu, ssh_diagnose_processes]   # SSH 诊断，最多 6 个
   zabbix_items: [system.cpu.load, system.cpu.util]  # 对任务主机按 key 片段执行 item_get
   history: ["system.cpu.load[all,avg5]", system.cpu.util]  # 在 item_get 结果里按精确 key 或 * 模式选项，预采集历史与趋势
+  logs: [log_overview]            # 日志工具，对目标的日志来源按告警时间执行，最多 6 个
   schemas: [history_get, trend_get]                 # 提前给模型的工具参数结构，最多 4 个
 ```
 
 平台的执行顺序：
 
 1. **阶段 A（Zabbix）**：有 Host ID 时并行执行 `host_get`（判定设备类型）、按告警触发器 ID 的 `item_get` 与近 24 小时 `event_get`。触发器监控项 key 会校正告警类型（例如文本像 CPU、key 是 `nginx.*`），也会推导 systemd 服务名（`systemd.unit.info["xxx.service",...]`）。
-2. **阶段 B**：按设备类型与校正后的类型合并适用 Skill 的规则；并行执行 zabbix_items 的 `item_get`、同一对象的相关监控项（触发器 key 里的网口索引、文件系统、磁盘名），以及 SSH 资产解析（只对 Linux 或未识别设备；Windows / 网络设备不连接 SSH）。
-3. **阶段 C**：SSH 诊断与历史并行。可以组合的固定诊断用 `ssh_collect` 在同一 SSH 会话执行；带时间窗口的日志类工具自动使用告警前后 15 分钟（since / until）；需要服务名的工具在推导不出服务名时跳过并写入 `coverage.skipped`；`busy` / `timeout` 自动重试一次。history 依次取触发器监控项、同一对象的相关监控项、再按声明顺序匹配（`*` 为通配，`[`、`,` 按原文匹配），最多 8 项：history_get 取告警时间前后各 30 分钟（超过 1000 行自动翻页），trend_get 取近 7 天小时趋势（跳过 `system.cpu.num` 等常量项）。发给模型的是统计值、告警前后分段（alert_split）与样本。
+2. **阶段 B**：按设备类型与校正后的类型合并适用 Skill 的规则；并行执行 zabbix_items 的 `item_get`、同一对象的相关监控项（触发器 key 里的网口索引、文件系统、磁盘名）、SSH 资产解析（只对 Linux 或未识别设备；Windows / 网络设备不连接 SSH），以及有 logs 规则时的日志来源定位：用任务的 IP、告警的 `{HOST.IP}` 或 Zabbix 主机主接口 IP 调 `log_resolve_target`（任何设备类型都做）。
+3. **阶段 C**：SSH 诊断、历史与日志工具并行。日志工具的 `target` 取定位到的来源，时间取告警时刻前后 30 分钟（`around` + `minutes`；Web 诊断没有告警时间时取诊断窗口到现在）；来源近 7 天没有对应类型日志的专题工具（如没有 Nginx 访问日志时的 `log_nginx_summary`）跳过并写入 `coverage.skipped`。可以组合的固定诊断用 `ssh_collect` 在同一 SSH 会话执行；带时间窗口的日志类工具自动使用告警前后 15 分钟（since / until）；需要服务名的工具在推导不出服务名时跳过并写入 `coverage.skipped`；`busy` / `timeout` 自动重试一次。history 依次取触发器监控项、同一对象的相关监控项、再按声明顺序匹配（`*` 为通配，`[`、`,` 按原文匹配），最多 8 项：history_get 取告警时间前后各 30 分钟（超过 1000 行自动翻页），trend_get 取近 7 天小时趋势（跳过 `system.cpu.num` 等常量项）。发给模型的是统计值、告警前后分段（alert_split）与样本。
 
 - zabbix_items 只在任务有 Zabbix Host ID 时执行；写 `"*"` 表示不按 key 过滤、取该主机的监控项（最多 60 个，含最近采集时间），平台据此在 signals 里给出 `collection_freshness`。
 - 预采集计入采集次数，但模型始终保留 `follow_up_calls` 次补查（AI 配置 → 分析预算；保底次数不超过配置的采集次数）。预采集已解析的 SSH 目标、已取得的证据被模型再次请求时直接复用，不再调用。
 - SSH 解析失败、设备不适用、SSH MCP 未启用或连接失败时，不视为诊断缺口，而是写入 `capabilities` 与报告“诊断范围 → 能力说明”；令牌未授权的工具写入 `capabilities.unauthorized_tools`。
+- 日志证据同理：未配置日志 MCP（`capabilities.logs.status=disabled`）、连接失败或令牌被拒（`unreachable`）、来源定位失败（`unavailable`）、该 IP 近 7 天没有日志进入日志平台（`not_onboarded`）都只写入能力说明，任务不因此变为“部分完成”；这些情况下模型拿不到日志工具，只使用日志 MCP 的 Skill（platform-logs）也不发给模型。日志令牌未授权的工具不在目录中出现，写入 `capabilities.unauthorized_log_tools`。
 - 主机本身不具备的采集能力（SSH MCP 以 `CAPABILITY_MISSING` 加退出码 69 标明，例如内核未启用 PSI、未安装 Nginx、诊断账号无 journal 权限）同样不算诊断缺口：写入 `coverage.unavailable` 与 `capabilities.host_limits`，报告“能力说明”列出“主机不支持的采集项”。超时、截断、其他退出码与没有返回的步骤仍记入 `coverage.failed`，任务为“部分完成”。
 
 名称用 1–64 位小写字母、数字、连字符，platform-base 由平台保留。可创建多个 Skill，同一场景按优先级从高到低提供给模型；各 Skill 应说明自己的适用范围，减少冲突。启停、修改适用范围或正文都会产生新版本；修改参考资料时重新导入 ZIP。
@@ -88,10 +93,10 @@ prefetch:
 ## 平台如何执行
 
 - list_mcp_tools：query 为空列工具名称，填完整工具名读取实际参数结构。
-- call_mcp_tool：provider 为 ssh_mcp 或 zabbix_mcp，name 为原生工具名，arguments 为已发现结构的参数。
+- call_mcp_tool：provider 为 ssh_mcp、zabbix_mcp 或 logs，name 为原生工具名，arguments 为已发现结构的参数。
 - read_skill_resource：按 Skill 名称与包内相对路径，读取对应参考资料。
 
-两个 MCP 均按实际需求才连接；SSH 工具须有只读标记及受限参数，目标从授权资产目录精确核验，平台固定 expected_revision；不接受任意 Shell。Zabbix 仍限制为九种安全查询，适配 initMAX 的 output 字符串与 extra_params 差异，历史监控项需先经 item_get 返回。查询来源与先后次序写在 Skill 中，授权和参数边界保留在平台与 MCP 服务端。
+三个 MCP 均按实际需求才连接；SSH 工具须有只读标记及受限参数，目标从授权资产目录精确核验，平台固定 expected_revision；不接受任意 Shell。Zabbix 仍限制为九种安全查询，适配 initMAX 的 output 字符串与 extra_params 差异，历史监控项需先经 item_get 返回。日志工具只放行 `log_` 开头、标记 `readOnlyHint=true`、参数里没有 command / sql / script / url 的工具，并按 `log_list_tool_catalog` 只保留本令牌获授权的工具；参数须在工具的实际参数结构内，日志平台再按令牌的工具、日志类型与来源分组限定范围。查询来源与先后次序写在 Skill 中，授权和参数边界保留在平台与 MCP 服务端。
 
 每次 MCP 原生调用（含预采集）计入采集预算；`list_mcp_tools` 只读取本任务已加载的工具目录，与本地 Skill 参考资料读取一样不计采集次数；所有模型响应按实际返回记录 Token。多层目录分析需要多次工具调用，请在“系统配置 → AI 配置 → 分析预算”按需增加轮次、次数、时间及单次结果长度。快速模式原有小预算也适用于 Skill，因此复杂诊断宜选标准或深度模式并调整预算。Skill 不能越过预算、服务端路径白名单或 Token 授权。
 
@@ -102,6 +107,6 @@ prefetch:
 - 平台用代码核对引用：编号必须存在且对应成功的采集结果；quote 中的每个数字都要在对应证据的测量值里找到（按 quote 自身的小数位比较，如 12% 可对应 12.4；itemid、clock、pid 等标识字段不参与比对），没有数字时按至少 4 个字符的原文包含判断。核不上的引用会被剔除并列在报告中；没有有效引用的“已确认事实”自动降为推断。
 - 依据可信度由核对结果决定，不由模型自评：至少 2 条有效引用且覆盖两类数据源（或 3 条以上覆盖不同查询）为“高”，有有效引用为“中”，没有为“低”。告警结论的有效引用少于 2 条或有被降级的事实时，平台会先要求模型补证一次。报告末尾的“证据核对”一节列出有效引用、被剔除的引用和三类陈述。
 - 报告中的“诊断范围（平台生成）”列出目标、设备类型与诊断路径、采集时间、模型实际使用的 Zabbix 历史查询窗口、各数据源成功与失败的证据条数，以及不可用的能力与原因。模型正文不需要复述这些内容，也不必逐条罗列证据数值，只写结论、关键依据（注明编号）、建议和尚未证实的方向；告警的 `action` 为数组，由平台编号。自定义 Skill 若仍要求“写明目标和时间范围”，可以删去这一条。
-- 预采集结果之外，平台会附带 `evidence.signals`：SSH MCP 返回的 warning/critical 发现；Zabbix 最新值中的负载 / CPU 背离、内存与文件系统利用率超过 90%；告警窗口均值与 7 天基线的倍数（alert_vs_baseline）、告警后相对告警前的升高（rise_at_alert）或告警前已偏高（elevated_before_alert）；以及触发器近 24 小时反复触发（recurrence）。每条都带来源证据编号，模型可直接引用。
+- 预采集结果之外，平台会附带 `evidence.signals`：SSH MCP 返回的 warning/critical 发现；Zabbix 最新值中的负载 / CPU 背离、内存与文件系统利用率超过 90%；告警窗口均值与 7 天基线的倍数（alert_vs_baseline）、告警后相对告警前的升高（rise_at_alert）或告警前已偏高（elevated_before_alert）；以及触发器近 24 小时反复触发（recurrence）；日志概览中错误数达到上一等长窗口 2 倍且不少于 10 条（error_surge）、出现窗口内首次出现的错误模板（new_error_templates）。每条都带来源证据编号，模型可直接引用。
 
 报告显示创建时保存的 Skill 名称、版本、SHA256、目标 SSH 资产 ID、预算及来源证据。更新/停用/删除 Skill 不会更改已创建任务；重试创建新任务，加载当前启用版本。正文与包文件加密存储；加载版本保存在加密任务快照。日志原文继续受 logs.read 控制。AI 执行存在模型判断差异，以报告的实际工具执行记录核验；工具缺失或证据不足应如实说明，不能将失败解释为正常。

@@ -8,6 +8,7 @@ coverage reporting. The Skill text decides which evidence matters.
 import asyncio
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime
+import ipaddress
 import json
 import re
 import time
@@ -21,7 +22,7 @@ from .ai_reliability import (
 )
 from .orchestrator import tasks
 from .orchestrator.budgets import with_defaults
-from .skill_mcp import SkillMCP, root_cause
+from .skill_mcp import LABELS, SkillMCP, root_cause
 from .evidence_check import (
     check as check_citations,
     render as render_citations,
@@ -38,6 +39,7 @@ from .skill_context import (
 from .skill_store import applies, prefetch_plan, scope_of, summary
 from .model_interactions import traced_response
 from .security.redact import redact, redact_data
+from .integrations import log_mcp
 from .integrations.ssh_mcp import IntegrationError
 from .integrations.zabbix import infer_device
 from .diagnostics.playbooks import classify_keys
@@ -91,6 +93,19 @@ NON_LINUX = {"windows", "network", "vmware", "other"}
 # SSH states, set while resolving the task's own target, in which the model is
 # not offered SSH tools.
 SSH_CLOSED = {"unavailable", "not_ready", "not_applicable", "disabled"}
+# Log evidence states in which the model gets neither log tools nor a Skill
+# that only uses them: no log MCP configured, unreachable, or the target sends
+# no logs. Each is a capability note, never an evidence gap.
+LOGS_CLOSED = {"disabled", "unreachable", "unavailable", "not_onboarded"}
+# Prefetched log tools read the alert moment ±30 minutes.
+LOG_MINUTES = 30
+# Topic tools and the log type each reads; skipped for a source without it.
+LOG_TOPICS = {
+    "log_network_events": ("network", "网络设备"),
+    "log_nginx_summary": ("nginx_access", "Nginx 访问"),
+    "log_java_exceptions": ("java", "Java"),
+    "log_os_events": ("os", "操作系统"),
+}
 
 
 @asynccontextmanager
@@ -239,6 +254,51 @@ def fill_arguments(schema, base, *, clock, now, service=None):
     return None if required - set(args) else args
 
 
+def log_address(target, event, hosts):
+    """The IP that names the target's log source: the task's own IP, else the
+    alert's {HOST.IP}, else the verified Zabbix host's main interface."""
+    candidates = [target[1] if target and target[0] == "ip" else None]
+    candidates.append(event.get("host_ip"))
+    for row in hosts:
+        interfaces = row.get("interfaces") if isinstance(row, dict) else None
+        rows = [item for item in interfaces or [] if isinstance(item, dict)]
+        candidates.extend(
+            item.get("ip")
+            for item in sorted(rows, key=lambda i: str(i.get("main")) != "1")
+        )
+    for value in candidates:
+        try:
+            address = ipaddress.ip_address(str(value or "").strip())
+        except ValueError:
+            continue  # empty, an unexpanded {HOST.IP} macro or a DNS name
+        if not (address.is_loopback or address.is_unspecified):
+            return str(address)
+    return None
+
+
+def log_arguments(schema, target, *, clock, now, minutes):
+    """Arguments the platform supplies for a prefetched log tool, or None.
+
+    `target` is the source log_resolve_target confirmed; the window is the
+    alert moment ±30 minutes, or the task's window up to now without an alert.
+    Any other required parameter means the tool cannot be pre-collected.
+    """
+    props = (schema or {}).get("properties") or {}
+    required = set((schema or {}).get("required") or [])
+    if "target" not in props:
+        return None
+    args = {"target": target}
+    if clock and "around" in props:
+        args["around"] = str(clock)
+        if "minutes" in props:
+            args["minutes"] = LOG_MINUTES
+    elif "start" in props:
+        args["start"] = str(now - minutes * 60)
+        if "end" in props:
+            args["end"] = str(now)
+    return None if required - set(args) else args
+
+
 def host_limits(outcome):
     """[(step, capability)] when a missing host prerequisite alone left an SSH
     result incomplete, else None.
@@ -376,6 +436,9 @@ def related_token(keys):
 
 
 def is_sensitive(provider, tool, entry=None):
+    if provider == "logs":
+        # Log statistics carry sample lines; full evidence needs logs.read.
+        return True
     if provider != "ssh_mcp":
         return False
     if isinstance(entry, dict) and "sensitive" in entry:
@@ -439,6 +502,7 @@ async def run(
             "openai_api_key",
             "mcp_token",
             "ssh_mcp_token",
+            "log_mcp_token",
             "lark_app_secret",
             "zabbix_webhook_secret",
         )
@@ -534,6 +598,13 @@ async def run(
         },
         "unauthorized_tools": [],
     }
+    if "logs" in providers:
+        # Only tasks whose Skills may use the log MCP report on it.
+        capabilities["logs"] = (
+            {"status": "available"}
+            if log_mcp.configured(read_setting)
+            else {"status": "disabled", "reason": "未配置日志 MCP 地址和令牌"}
+        )
     coverage = {
         "planned": [],
         "collected": [],
@@ -542,7 +613,7 @@ async def run(
         # Checks the host itself cannot run (PSI off, no nginx, no journal access).
         "unavailable": [],
     }
-    used = {"zabbix_mcp": False, "ssh_mcp": False}
+    used = {"zabbix_mcp": False, "ssh_mcp": False, "logs": False}
     rounds_limit, extensions_left = limits["rounds"], limits["extension_rounds"]
 
     def check():
@@ -594,7 +665,8 @@ async def run(
         )
         if ident is None:
             return None
-        if not failed(outcome):
+        # Finding the log source (or listing sources) is not log evidence yet.
+        if not failed(outcome) and not (provider == "logs" and native in log_mcp.META):
             used[provider] = True
         # Only explicit, successful Zabbix windows are reported as queried ranges.
         span = (
@@ -627,11 +699,21 @@ async def run(
         served (not registered, not ready, not Linux, SSH MCP disabled)."""
         return bool(target) and capabilities["ssh_mcp"].get("status") in SSH_CLOSED
 
+    def logs_closed():
+        """No log evidence for this task: log MCP not configured or not
+        reachable, or the target's logs are not in the log platform."""
+        return (capabilities.get("logs") or {}).get("status") in LOGS_CLOSED
+
     def note_gap(label, outcome):
         if outcome.get("ssh_closed"):
             # Refused before any call: the reason is already in 能力说明.
             coverage["skipped"].append(
                 {"tool": str(label), "reason": "目标主机的 SSH 实时诊断不可用，未调用"}
+            )
+            return
+        if outcome.get("logs_closed"):
+            coverage["skipped"].append(
+                {"tool": str(label), "reason": "本任务的日志证据不可用，未调用"}
             )
             return
         if outcome.get("budget"):
@@ -725,15 +807,13 @@ async def run(
             if state.get("status") in (None, "not_applicable", "available"):
                 state.update(
                     {
-                        "status": "disabled" if "未启用" in reason else "unreachable",
+                        "status": "disabled"
+                        if "未启用" in reason or "未配置" in reason
+                        else "unreachable",
                         "reason": reason[:200],
                     }
                 )
-                notes.append(
-                    ("SSH MCP" if provider == "ssh_mcp" else "Zabbix MCP")
-                    + "不可用："
-                    + reason[:200]
-                )
+                notes.append(LABELS[provider] + "不可用：" + reason[:200])
             return {}
 
     def signature_of(provider, native, arguments):
@@ -848,6 +928,8 @@ async def run(
         stage = []
         zabbix_tools = {}
         trigger_keys = []
+        # The verified host record; its interfaces may name the log source.
+        hosts = []
         by_hostid = bool(target and target[0] == "hostid" and "zabbix_mcp" in providers)
         if by_hostid:
             zabbix_tools = await catalog("zabbix_mcp")
@@ -914,6 +996,7 @@ async def run(
                     if len(rows) == 1 and isinstance(rows[0], dict):
                         capabilities["device_type"] = infer_device(rows[0])
                         bridge.note_device(target[1], rows[0])
+                        hosts = rows
             trigger_keys = [
                 str(row.get("key_", ""))
                 for native, arguments, outcome in stage
@@ -946,6 +1029,83 @@ async def run(
             and capabilities["device_type"] not in NON_LINUX
         )
         ssh_catalog = await catalog("ssh_mcp") if ssh_wanted else {}
+        # The log MCP session opens here for the same reason; the target's log
+        # source is resolved alongside the SSH asset, its log tools run in
+        # stage C. Logs serve every device type, network devices included.
+        log_ip = log_address(target, event, hosts)
+        logs_wanted = bool(
+            log_ip
+            and plan["logs"]
+            and (capabilities.get("logs") or {}).get("status") == "available"
+        )
+        log_catalog = await catalog("logs") if logs_wanted else {}
+
+        async def resolve_log():
+            """The target's log source as log_resolve_target confirms it, or
+            None with the reason in capabilities (a note, never a gap)."""
+            if not logs_wanted or logs_closed():
+                # Not planned, or the session failed (catalog() noted why).
+                return None
+            if "log_resolve_target" not in log_catalog:
+                state = {
+                    "status": "unavailable",
+                    "reason": "日志 MCP 未提供 log_resolve_target，请升级日志分析平台",
+                }
+            else:
+                arguments = {"ip": log_ip}
+                outcome, ident = await execute("logs", "log_resolve_target", arguments)
+                data = (
+                    outcome.get("data") if isinstance(outcome.get("data"), dict) else {}
+                )
+                if not failed(outcome):
+                    # The model asking for the same lookup gets this evidence.
+                    signature = signature_of("logs", "log_resolve_target", arguments)
+                    cache[signature], cited_ids[signature] = outcome, ident
+                if (
+                    not failed(outcome)
+                    and data.get("found") is True
+                    and data.get("target") == log_ip
+                ):
+                    types = sorted(
+                        {
+                            str(kind)
+                            for match in data.get("matches") or []
+                            if isinstance(match, dict)
+                            for kind in match.get("types") or []
+                        }
+                    )
+                    capabilities["logs"] = {
+                        "status": "available",
+                        "target": log_ip,
+                        "source_types": types,
+                    }
+                    found["log_target"] = shown(
+                        ident, {"target": log_ip, "source_types": types}
+                    )
+                    return {"target": log_ip, "types": set(types)}
+                if failed(outcome):
+                    state = {
+                        "status": "unavailable",
+                        "reason": "日志来源定位失败："
+                        + str(outcome.get("error") or "日志 MCP 返回失败")[:180],
+                        **(
+                            {"error_code": str(data["error_code"])[:40]}
+                            if data.get("error_code")
+                            else {}
+                        ),
+                    }
+                else:
+                    state = {
+                        "status": "not_onboarded",
+                        "reason": log_ip
+                        + " "
+                        + str(data.get("hint") or "最近 7 天没有来自该目标的日志")[
+                            :180
+                        ],
+                    }
+            capabilities["logs"] = state
+            notes.append("日志证据未采集：" + state["reason"])
+            return None
 
         async def resolve_ssh():
             """Bind the target's SSH asset; returns (binding, authorized tools)."""
@@ -1069,8 +1229,8 @@ async def run(
                 )
             )
             coverage["planned"].append("item_get")
-        (binding, ssh_tools), key_stage = await asyncio.gather(
-            resolve_ssh(), collect(key_jobs, room)
+        (binding, ssh_tools), key_stage, log_source = await asyncio.gather(
+            resolve_ssh(), collect(key_jobs, room), resolve_log()
         )
         stage += key_stage
         # SSH resolution may settle a device type Zabbix could not.
@@ -1078,6 +1238,11 @@ async def run(
             skills, scope, diagnostic_type, capabilities["device_type"]
         )
         ssh_jobs = ssh_prefetch_jobs(plan["ssh"], ssh_tools, binding) if binding else []
+        log_jobs = (
+            log_prefetch_jobs(plan["logs"], log_catalog, log_source)
+            if log_source
+            else []
+        )
 
         def item_ids(match):
             return [
@@ -1104,9 +1269,14 @@ async def run(
         )
         coverage["planned"].extend(job[1] for job in ssh_jobs)
         coverage["planned"].extend(job[1] for job in history)
+        coverage["planned"].extend(job[1] for job in log_jobs)
         # Alert window and 7-day baseline: the trigger's own items first, then
         # the item keys the Skills name, so a typical alert needs no history round.
-        await asyncio.gather(collect(ssh_jobs, room), paged_history(history, room))
+        await asyncio.gather(
+            collect(ssh_jobs, room),
+            paged_history(history, room),
+            collect(log_jobs, room),
+        )
         if prefetched:
             found["prefetched"] = prefetched
         signals = derive_signals(collected, clock)
@@ -1114,7 +1284,15 @@ async def run(
             found["signals"] = signals
         definitions = []
         for name in plan["schemas"]:
-            provider = "ssh_mcp" if name.startswith("ssh_") else "zabbix_mcp"
+            provider = (
+                "ssh_mcp"
+                if name.startswith("ssh_")
+                else "logs"
+                if name.startswith("log_")
+                else "zabbix_mcp"
+            )
+            if provider == "logs" and logs_closed():
+                continue
             if provider in providers and name in await catalog(provider):
                 definitions.extend(
                     {**tool, "provider": provider}
@@ -1130,9 +1308,42 @@ async def run(
             )
             found["preloaded_tool_schemas"] = preloaded
         capabilities["unauthorized_tools"] = bridge.unauthorized_tools()
+        if bridge.unauthorized_log_tools() and not logs_closed():
+            capabilities["unauthorized_log_tools"] = bridge.unauthorized_log_tools()
         if service:
             found["service"] = service
         return found
+
+    def log_prefetch_jobs(planned, log_tools, source):
+        """Log tools on the resolved source around the alert; a topic tool for
+        a log type the source has not sent in 7 days is skipped, not run empty."""
+        jobs = []
+        for tool in planned:
+            if tool not in log_tools:
+                coverage["skipped"].append(
+                    {"tool": tool, "reason": "日志 MCP 未提供或令牌未授权"}
+                )
+                continue
+            kind, label = LOG_TOPICS.get(tool, (None, ""))
+            if kind and source["types"] and kind not in source["types"]:
+                coverage["skipped"].append(
+                    {"tool": tool, "reason": f"该日志来源近 7 天没有{label}日志"}
+                )
+                continue
+            args = log_arguments(
+                getattr(log_tools[tool], "inputSchema", None) or {},
+                source["target"],
+                clock=clock,
+                now=now,
+                minutes=int(request.get("time_window") or LOG_MINUTES),
+            )
+            if args is None:
+                coverage["skipped"].append(
+                    {"tool": tool, "reason": "需要平台无法推导的参数"}
+                )
+                continue
+            jobs.append(("logs", tool, args))
+        return jobs
 
     def ssh_prefetch_jobs(planned, ssh_tools, binding):
         """SSH jobs for the verified asset: a single ssh_collect session for
@@ -1232,22 +1443,34 @@ async def run(
         }
 
     def path():
-        if used["zabbix_mcp"] and used["ssh_mcp"]:
-            return "zabbix+ssh"
-        if used["zabbix_mcp"]:
-            return "zabbix-only"
-        if used["ssh_mcp"]:
-            return "ssh-only"
-        return "none"
+        """zabbix-only, ssh-only, logs-only, or the sources joined by "+"."""
+        sources = [
+            name
+            for provider, name in (
+                ("zabbix_mcp", "zabbix"),
+                ("ssh_mcp", "ssh"),
+                ("logs", "logs"),
+            )
+            if used[provider]
+        ]
+        if not sources:
+            return "none"
+        return "+".join(sources) if len(sources) > 1 else sources[0] + "-only"
 
     def report():
         spent = budget()
         citations = check_citations(answer, evidence_index)
         capabilities["diagnostic_path"] = path()
-        for provider in ("zabbix_mcp", "ssh_mcp"):
-            state = capabilities[provider]
+        for provider in ("zabbix_mcp", "ssh_mcp", "logs"):
+            state = capabilities.get(provider)
+            if state is None:
+                continue
             if used[provider]:
-                capabilities[provider] = {"status": "used"}
+                capabilities[provider] = {
+                    "status": "used",
+                    # The log source the evidence came from.
+                    **({"target": state["target"]} if state.get("target") else {}),
+                }
             elif state.get("status") == "available":
                 state["status"] = "unused"
         metadata = bridge.target_metadata if bridge else {}
@@ -1378,6 +1601,18 @@ async def run(
                     + (f"（{reason}）" if reason else "")
                     + "，请只依据 Zabbix 数据分析",
                     "ssh_closed": True,
+                },
+                None,
+            )
+        if provider == "logs" and logs_closed():
+            reason = str(capabilities["logs"].get("reason") or "")[:120]
+            return (
+                args,
+                {
+                    "error": "本任务的日志证据不可用"
+                    + (f"（{reason}）" if reason else "")
+                    + "，请依据其它数据源分析",
+                    "logs_closed": True,
                 },
                 None,
             )
@@ -1623,6 +1858,7 @@ async def run(
                     for key in (
                         "verified_ssh_target",
                         "ssh_target",
+                        "log_target",
                         "signals",
                         "prefetched",
                     )
@@ -1635,18 +1871,30 @@ async def run(
                         **untrusted,
                     }
                 # The device type and the (possibly corrected) alert type decide
-                # which device/alert-type Skills the model receives.
+                # which device/alert-type Skills the model receives; a Skill that
+                # only uses the log MCP is not sent when this task has no log
+                # evidence (platform-logs on a host that sends no logs).
                 applied_skills = [
                     row
                     for row in skills
                     if applies(row, diagnostic_type, capabilities["device_type"])
+                    and not (set(row["providers"]) == {"logs"} and logs_closed())
                 ] or list(skills)
                 instructions = build_instructions(applied_skills)
-                if ssh_closed():
+                closed = {
+                    provider
+                    for provider, shut in (
+                        ("ssh_mcp", ssh_closed()),
+                        ("logs", logs_closed()),
+                    )
+                    if shut
+                }
+                if closed:
                     # The target's SSH check already failed: the model works
                     # from Zabbix alone instead of reaching the host another
-                    # way (it once tried the host's public IP).
-                    open_providers = [p for p in providers if p != "ssh_mcp"]
+                    # way (it once tried the host's public IP). Without log
+                    # evidence the log tools are not offered either.
+                    open_providers = [p for p in providers if p not in closed]
                     tools[:] = [
                         tool
                         for tool in tools

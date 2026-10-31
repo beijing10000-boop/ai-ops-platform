@@ -1,5 +1,35 @@
 # 升级说明
 
+## v1.3.1 → 未发布版本：接入日志分析平台 MCP
+
+没有数据库迁移。升级后平台自动安装第 9 个平台 Skill `platform-logs`（日志证据，默认启用，后台服务只有日志 MCP），并刷新 platform-base、platform-network 的正文。日志 MCP 未配置时平台不会发起任何日志调用，报告“能力说明”里会有一行“日志 MCP未启用：未配置日志 MCP 地址和令牌”，任务状态不受影响；不打算接入日志平台的环境可以在 Skill 管理停用 platform-logs，这一行随之消失。
+
+1. 按常规命令升级平台：
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://服务器IP:8088/healthz
+```
+
+2. 日志分析平台完成初始化后，在它的“MCP 接入”页签发一个给本平台用的令牌（`logmcp_` 开头，只显示一次）。工具建议勾选 `log_overview`、`log_compare`、`log_error_spikes`、`log_network_events`、`log_nginx_summary`、`log_java_exceptions`、`log_os_events`、`log_patterns`、`log_search`、`log_context`；目录、来源与定位三个基础工具始终可用。可按需限定日志类型与来源分组。
+3. 本平台“连接管理 → 日志 MCP”：地址填 `http://日志平台IP:7077/mcp`，粘贴令牌，点“验证连接”应显示“连接成功，N 个授权工具”，再点“保存连接”。之后在日志平台修改令牌授权时，点本平台“诊断工具”的“刷新目录”或重新验证连接。
+4. 验收：
+   - 对一台日志已接入日志平台的主机或网络设备的告警点“AI 分析”：证据里有预采集的 `log_resolve_target` 与 `log_overview`（网络设备还有 `log_network_events`），报告“证据来源与能力”中日志 MCP 为“已使用”，诊断路径含“日志”；日志平台的审计里有本平台令牌的调用记录。
+   - 对一台没有日志接入的主机告警点“AI 分析”：“能力说明”写“日志 MCP目标未接入：<IP> 最近 7 天没有来自该目标的日志……”，任务状态不因此变为“部分完成”，“本次不适用的 Skill”中有 platform-logs。
+   - 把日志 MCP 令牌改成一个已撤销的令牌后点“验证连接”：提示“日志 MCP 拒绝令牌（HTTP 401）……”。
+
+回滚：没有表结构变化，但 v1.3.1 不认识 prefetch 的 `logs` / `devices` 两项，读到 platform-logs 会让所有新任务创建失败，所以切回旧版本前先删除 platform-logs（自定义 Skill 若用了这两项，也先删掉对应规则），再切换提交并重建。platform-base 与 platform-network 的正文由旧版本启动时自动改回：
+
+```bash
+docker compose exec -T web python -c "import sqlite3; db=sqlite3.connect('/app/data/app.sqlite3'); print(db.execute(\"DELETE FROM platform_skills WHERE name='platform-logs' AND managed=1\").rowcount); db.commit()"
+git switch --detach a2db7e3
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+```
+
 ## v1.3.0 → v1.3.1
 
 没有数据库迁移，不改配置，Skill 不变。修复分析质量问题：结论放在标题之后时飞书卡片显示为空、SSH 不可用的主机上模型仍尝试 SSH 而使任务“部分完成”、Java 进程清单被截到只剩 1 个。建议同时把 SSH MCP 升级到 v0.7.1（Java 启动命令解析与 `memory_processes` 退出码修复）。在平台部署目录执行：

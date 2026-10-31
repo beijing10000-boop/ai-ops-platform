@@ -93,7 +93,7 @@ async def connect(
     HTTP must be explicitly enabled for isolated testing. No redirects, automatic
     retries, environment proxy, or fallback to local SSH. TLS verification stays on.
     """
-    validate_endpoint(url, ssh=True)
+    validate_endpoint(url, mcp_path=True)
     if (
         (urlsplit(url).scheme == "http" and not allow_http)
         or not token
@@ -119,7 +119,8 @@ async def connect(
             yield SSHMCPAdapter(session, timeout)
 
 
-def validate_endpoint(url, *, ssh=False):
+def validate_endpoint(url, *, mcp_path=False):
+    """`mcp_path`: the SSH and log MCP services serve Streamable HTTP at /mcp."""
     try:
         parsed = urlsplit(url)
         valid = (
@@ -131,22 +132,22 @@ def validate_endpoint(url, *, ssh=False):
             and not parsed.fragment
             and not any(c.isspace() for c in url)
             and (parsed.port is None or 1 <= parsed.port <= 65535)
-            and (not ssh or parsed.path.rstrip("/") == "/mcp")
+            and (not mcp_path or parsed.path.rstrip("/") == "/mcp")
         )
     except ValueError:
         valid = False
     if not valid:
         raise IntegrationError(
-            "MCP 地址无效：请填写不含用户名、密码、查询参数的 HTTP(S) 地址；SSH MCP 路径为 /mcp"
+            "MCP 地址无效：请填写不含用户名、密码、查询参数的 HTTP(S) 地址；SSH MCP 与日志 MCP 的路径为 /mcp"
         )
 
 
 def validate_settings(values):
     try:
-        for key in ("mcp_url", "ssh_mcp_url"):
+        for key in ("mcp_url", "ssh_mcp_url", "log_mcp_url"):
             if values.get(key):
-                validate_endpoint(values[key], ssh=key == "ssh_mcp_url")
-        for key in ("mcp_token", "ssh_mcp_token"):
+                validate_endpoint(values[key], mcp_path=key != "mcp_url")
+        for key in ("mcp_token", "ssh_mcp_token", "log_mcp_token"):
             value = values.get(key, "")
             if (
                 value

@@ -1,5 +1,15 @@
 # 更新记录
 
+## 未发布
+
+- **接入日志分析平台，作为第三个 MCP 证据源**（与 Zabbix MCP、SSH MCP 并列）：连接管理新增“日志 MCP”表单（`log_mcp_url`、`log_mcp_token`，令牌加密保存，须以 `logmcp_` 开头）与“验证连接”按钮，验证时握手并列出本令牌获授权的日志工具。平台只放行 `log_` 开头、标记 `readOnlyHint=true`、参数里没有 command / sql / script / url 的工具，并按 `log_list_tool_catalog` 隐藏令牌未授权的工具（读取目录失败时保留完整列表，由日志平台拒绝未授权调用）。日志工具返回单个 JSON 文本块（没有 structuredContent），按结构化结果解析；`status=failed` 的回复记为失败证据。
+- **新增平台维护的 Skill `platform-logs`（日志证据）**：所有任务加载，安装时只勾选日志 MCP，停用它即关闭日志证据。告警与 Web 诊断在预采集阶段 B 用主机 IP（任务的 IP、告警的 `{HOST.IP}` 或 Zabbix 主机主接口）调 `log_resolve_target`，与 SSH 资产解析并行；找到来源后在阶段 C 与 SSH 诊断、历史并行调 `log_overview`（告警时刻前后各 30 分钟）；网络设备追加 `log_network_events`，Nginx 告警追加 `log_nginx_summary` 与 `log_compare`，Java 告警追加 `log_java_exceptions` 与 `log_compare`。来源近 7 天没有对应类型日志的专题跳过并写明原因。
+- Skill 的 prefetch 规则新增 `logs`（日志工具）与 `devices`（只对这些设备类型生效）；Skill 可选的后台服务新增 `logs`（日志 MCP）。
+- 日志 MCP 未配置、连接失败或令牌被拒（HTTP 401 时写明“令牌无效、已过期或已撤销”）、目标 IP 近 7 天没有日志进入日志平台时，只在报告“诊断范围 → 能力说明”中注明（`capabilities.logs`），不算诊断不足，任务不因此“部分完成”；这些情况下模型拿不到日志工具，platform-logs 也不发给模型、不消耗 Token。
+- 日志证据带证据编号、参与引用核对；发给模型的视图按条目截短列表与日志原文（时间序列均匀取点），不从 JSON 中间截断；`signals` 新增日志错误突增（`error_surge`）与窗口内首次出现的错误模板（`new_error_templates`）。日志证据全文仍需 logs.read 权限。
+- 报告的诊断路径新增含日志的组合（如“Zabbix 历史 + 日志联合分析”）；飞书卡片的依据行标注“日志”来源，仍不显示证据编号。总览的配置检查与 MCP 连接状态增加日志 MCP。
+- platform-base、platform-network 文案：不做 SSH 诊断的设备“监控数据只用 Zabbix”，日志证据可用时作为另一类证据。此前写“只用 Zabbix 数据”，会让模型忽略网络设备的日志。
+
 ## 1.3.1 — 2026-10-31
 
 - 模型把 JSON 结论放在标题之后（如“## 诊断结果”加 JSON 代码块）时仍按结构化结论处理。此前平台三处解析都要求回答以 JSON 或代码块开头，这种回答被当作非结构化文本：飞书告警卡片的“诊断结论”只取原文第一行，显示成一个空的“诊断结果”标题，网页报告显示原始 JSON，事实核对也没有执行。三处解析合并为 `evidence_check.answer_object()`；非结构化兜底卡片选取结论时跳过标题与代码块行。

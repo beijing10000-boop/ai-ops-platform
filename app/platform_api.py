@@ -12,7 +12,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 from . import skill_mcp
 from .platform_db import row_dict, archived_asset
-from .integrations import ssh_mcp, zabbix
+from .integrations import log_mcp, ssh_mcp, zabbix
 from .main import (
     connection,
     draft_reader,
@@ -119,6 +119,7 @@ def overview(who=Depends(require("overview.read"))):
             and configured.get("ssh_mcp_token")
             and configured.get("ssh_mcp_enabled") == "true"
         ),
+        "log_mcp_configured": log_mcp.configured(configured.get),
         "health": health,
         "running": counts.get("running", 0),
         "queued": counts.get("queued", 0),
@@ -130,6 +131,7 @@ def overview(who=Depends(require("overview.read"))):
             "zabbix_mcp": bool(configured.get("mcp_url")),
             "ssh_mcp": configured.get("ssh_mcp_enabled") == "true"
             and all(configured.get(k) for k in ("ssh_mcp_url", "ssh_mcp_token")),
+            "logs": log_mcp.configured(configured.get),
             "feishu": all(
                 configured.get(k) for k in ("lark_app_id", "lark_app_secret")
             ),
@@ -748,7 +750,7 @@ async def discover(
     who=Depends(require("settings.manage")),
 ):
     reader = draft_reader(body, who)
-    if provider not in {"zabbix_mcp", "ssh_mcp"}:
+    if provider not in {"zabbix_mcp", "ssh_mcp", "logs"}:
         raise HTTPException(422, "MCP 提供方无效")
     try:
         async with asyncio.timeout(20):
@@ -760,6 +762,8 @@ async def discover(
                     )
                 if not names:
                     raise ValueError("未发现授权的 Zabbix 只读工具")
+            elif provider == "logs":
+                names = await _log_tools(reader)
             else:
                 async with ssh_mcp.configured(reader, timeout=15) as adapter:
                     listed = await _list_tools(adapter.session)
@@ -790,20 +794,22 @@ async def discover(
         # Errors raised inside the MCP session arrive wrapped by anyio.
         exc = _root(exc)
         detail = (
-            str(exc)
+            log_mcp.reason(exc)
+            if provider == "logs"
+            else str(exc)
             if isinstance(exc, (ValueError, ssh_mcp.IntegrationError))
             else type(exc).__name__
         )[:250]
-    keys = (
-        ("mcp_url", "mcp_token", "disabled_tools")
-        if provider == "zabbix_mcp"
-        else (
+    keys = {
+        "zabbix_mcp": ("mcp_url", "mcp_token", "disabled_tools"),
+        "ssh_mcp": (
             "ssh_mcp_url",
             "ssh_mcp_token",
             "ssh_mcp_enabled",
             "ssh_mcp_timeout_seconds",
-        )
-    )
+        ),
+        "logs": ("log_mcp_url", "log_mcp_token"),
+    }[provider]
     # A successful unsaved draft must not claim the active configuration is healthy.
     if all(reader(key) == read_setting(key) for key in keys):
         with connection() as db:
@@ -811,7 +817,7 @@ async def discover(
                 "INSERT INTO integration_health(provider,status,detail) VALUES (?,?,?) ON CONFLICT(provider) DO UPDATE SET status=excluded.status,checked_at=CURRENT_TIMESTAMP,detail=excluded.detail",
                 (provider, status, detail),
             )
-        if provider == "ssh_mcp":
+        if provider != "zabbix_mcp":
             # The registry and later diagnostics re-read the token's catalog.
             _forget_ssh_catalogs()
     audit(who["open_id"], "mcp_connection_test", provider)
@@ -822,6 +828,30 @@ async def discover(
         "detail": detail,
         "note": "发现工具仅验证连接和协议；主机映射、远端动作授权及 SSH 连通性在实际诊断时核验",
     }
+
+
+async def _log_tools(read):
+    """Log tools the platform keeps and this log MCP token may run."""
+    async with log_mcp.connect(read, timeout=15) as session:
+        listed = [tool for tool in await _list_tools(session) if log_mcp.allowed(tool)]
+        available = {tool.name for tool in listed}
+        if "log_resolve_target" not in available:
+            raise ValueError(
+                "日志 MCP 未提供 log_resolve_target，请确认地址指向日志分析平台"
+            )
+        granted = None
+        if "log_list_tool_catalog" in available:
+            response = await session.call_tool("log_list_tool_catalog", {})
+            if response.isError:
+                raise ValueError("日志 MCP 拒绝读取工具目录；请检查令牌")
+            granted = log_mcp.authorized_tools(payload(response, "日志 MCP"))
+            if granted is None:
+                raise ValueError("日志 MCP 工具目录格式无效")
+    return sorted(
+        name
+        for name in available
+        if granted is None or name in granted or name in log_mcp.META
+    )
 
 
 class ProbeRejected(ValueError):

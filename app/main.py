@@ -45,6 +45,7 @@ SENSITIVE = {
     "openai_api_key",
     "mcp_token",
     "ssh_mcp_token",
+    "log_mcp_token",
     "lark_app_secret",
     "zabbix_webhook_secret",
 }
@@ -52,6 +53,7 @@ ALLOWED = SENSITIVE | {
     "openai_base_url",
     "openai_model",
     "mcp_url",
+    "log_mcp_url",
     "lark_app_id",
     "allowed_chat_ids",
     "ai_min_severity",
@@ -595,6 +597,8 @@ def update_settings(body: SettingsUpdate, identity=Depends(require_admin)):
                 db.execute("DELETE FROM integration_health WHERE provider='zabbix_mcp'")
             elif key.startswith("ssh_mcp_"):
                 db.execute("DELETE FROM integration_health WHERE provider='ssh_mcp'")
+            elif key.startswith("log_mcp_"):
+                db.execute("DELETE FROM integration_health WHERE provider='logs'")
             db.execute(
                 "INSERT INTO audit(action,key,actor) VALUES(?,?,?)",
                 ("settings_update", key, identity["open_id"]),

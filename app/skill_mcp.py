@@ -6,8 +6,14 @@ import hashlib
 import json
 import time
 
-from .integrations import ssh_mcp, zabbix
+from .integrations import log_mcp, ssh_mcp, zabbix
 
+LABELS = {"zabbix_mcp": "Zabbix MCP", "ssh_mcp": "SSH MCP", "logs": "日志 MCP"}
+SETTINGS = {
+    "zabbix_mcp": ("mcp_url", "mcp_token"),
+    "ssh_mcp": ("ssh_mcp_enabled", "ssh_mcp_url", "ssh_mcp_token"),
+    "logs": ("log_mcp_url", "log_mcp_token"),
+}
 SSH_META = {
     "ssh_list_hosts",
     "ssh_list_groups",
@@ -111,22 +117,43 @@ def clear_catalog_cache():
     _CATALOGS.clear()
 
 
-def payload(response):
+def payload(response, source="SSH MCP"):
+    """structuredContent, or the single JSON text block FastMCP sends for tools
+    returning a dict (the log platform's tools have no structuredContent)."""
     data = getattr(response, "structuredContent", None)
     if data is None:
         texts = [part.text for part in response.content if part.type == "text"]
         if len(texts) != 1 or len(texts[0]) > 1_000_000:
-            raise ValueError("SSH MCP 返回格式或长度无效")
+            raise ValueError(source + " 返回格式或长度无效")
         try:
             data = json.loads(texts[0])
         except ValueError:
-            raise ValueError("SSH MCP 返回非 JSON 内容") from None
+            raise ValueError(source + " 返回非 JSON 内容") from None
     # FastMCP wraps list return values in structuredContent.result.
     if isinstance(data, dict) and set(data) == {"result"}:
         data = data["result"]
     if not isinstance(data, (dict, list)) or len(json.dumps(data)) > 1_000_000:
-        raise ValueError("SSH MCP 返回格式或长度无效")
+        raise ValueError(source + " 返回格式或长度无效")
     return data
+
+
+def reply(data, source):
+    """A decoded tool reply; the tool itself may report failed or cancelled."""
+    failed = isinstance(data, dict) and data.get("status") in {"failed", "cancelled"}
+    return {
+        "is_error": failed,
+        "data": data,
+        **(
+            {"error": str(data.get("error") or source + " 返回失败")}
+            if failed and isinstance(data, dict)
+            else {}
+        ),
+        "status": "failed"
+        if failed
+        else data.get("status", "success")
+        if isinstance(data, dict)
+        else "success",
+    }
 
 
 class SkillMCP:
@@ -145,14 +172,12 @@ class SkillMCP:
         # tools the server offers that the token may not run.
         self.ssh_catalog = {}
         self.hidden_ssh_tools = set()
+        # Log tools the server offers that this log MCP token may not run.
+        self.hidden_log_tools = set()
         self.failures = {}
 
     def config(self, provider):
-        keys = (
-            ("ssh_mcp_enabled", "ssh_mcp_url", "ssh_mcp_token")
-            if provider == "ssh_mcp"
-            else ("mcp_url", "mcp_token")
-        )
+        keys = SETTINGS.get(provider, SETTINGS["zabbix_mcp"])
         return tuple(self.read_setting(key) for key in keys)
 
     def check(self, provider):
@@ -184,8 +209,11 @@ class SkillMCP:
                 self.failures[provider] = (
                     root
                     if isinstance(root, (ValueError, ssh_mcp.IntegrationError))
+                    # A rejected log MCP token says so (HTTP 401), not just the class.
+                    else ssh_mcp.IntegrationError(log_mcp.reason(root))
+                    if provider == "logs"
                     else ssh_mcp.IntegrationError(
-                        ("SSH MCP" if provider == "ssh_mcp" else "Zabbix MCP")
+                        LABELS.get(provider, "Zabbix MCP")
                         + " 连接失败："
                         + type(root).__name__
                     )
@@ -202,6 +230,10 @@ class SkillMCP:
                     ssh_mcp.configured(self.read_setting)
                 )
                 session = adapter.session
+            elif provider == "logs":
+                session = await self.stack.enter_async_context(
+                    log_mcp.connect(self.read_setting)
+                )
             else:
                 session = await self.stack.enter_async_context(
                     zabbix.connect(self.read_setting)
@@ -225,6 +257,8 @@ class SkillMCP:
                 if provider == "ssh_mcp":
                     self.ssh_catalog = dict(cached["entries"])
                     self.hidden_ssh_tools = set(cached["hidden"])
+                elif provider == "logs":
+                    self.hidden_log_tools = set(cached["hidden"])
                 return
             tools, cursor, seen = {}, None, set()
             for _ in range(20):
@@ -237,6 +271,8 @@ class SkillMCP:
                     if (
                         ssh_allowed(tool)
                         if provider == "ssh_mcp"
+                        else log_mcp.allowed(tool)
+                        if provider == "logs"
                         else tool.name in zabbix.enabled_names(self.read_setting)
                     ):
                         tools[tool.name] = tool
@@ -250,6 +286,8 @@ class SkillMCP:
                 raise ValueError("MCP 工具分页超过限制")
             if provider == "ssh_mcp" and "ssh_list_tool_catalog" in tools:
                 tools = await self.authorized(session, tools)
+            elif provider == "logs" and "log_list_tool_catalog" in tools:
+                tools = await self.authorized_logs(session, tools)
             self.tools[provider] = tools
             _CATALOGS[key] = {
                 "at": time.monotonic(),
@@ -257,6 +295,8 @@ class SkillMCP:
                 "entries": dict(self.ssh_catalog) if provider == "ssh_mcp" else {},
                 "hidden": set(self.hidden_ssh_tools)
                 if provider == "ssh_mcp"
+                else set(self.hidden_log_tools)
+                if provider == "logs"
                 else set(),
             }
 
@@ -288,6 +328,30 @@ class SkillMCP:
             name: tool
             for name, tool in tools.items()
             if name in SSH_META or name in allowed
+        }
+
+    async def authorized_logs(self, session, tools):
+        """The same for log tools, from log_list_tool_catalog: base tools stay,
+        and a catalog error keeps the full list (the log platform still refuses
+        tools the token was not granted)."""
+        try:
+            response = await session.call_tool("log_list_tool_catalog", {})
+            allowed = (
+                None
+                if response.isError
+                else log_mcp.authorized_tools(payload(response, "日志 MCP"))
+            )
+        except Exception:
+            allowed = None
+        if not allowed:
+            return tools
+        self.hidden_log_tools = {
+            name for name in tools if name not in log_mcp.META and name not in allowed
+        }
+        return {
+            name: tool
+            for name, tool in tools.items()
+            if name in log_mcp.META or name in allowed
         }
 
     def ssh_entry(self, name):
@@ -324,6 +388,9 @@ class SkillMCP:
 
     def unauthorized_tools(self):
         return sorted(self.hidden_ssh_tools)
+
+    def unauthorized_log_tools(self):
+        return sorted(self.hidden_log_tools)
 
     def note_device(self, host_id, row):
         """Record the verified Zabbix host for the report, from a prefetch host_get."""
@@ -484,6 +551,24 @@ class SkillMCP:
                         if str(r.get("itemid", "")).isdigit()
                     )
                 return result
+            if provider == "logs":
+                # Any in-scope source may be read (an Nginx upstream on another
+                # host); the log platform applies the token's tools and groups.
+                if set(args) - set(tool.inputSchema.get("properties", {})):
+                    raise ValueError("日志工具参数不在实际 Schema 中")
+                zabbix.validate_remote_schema(name, args, tool.inputSchema)
+                response = await asyncio.wait_for(
+                    session.call_tool(name, args), timeout=log_mcp.TIMEOUT
+                )
+                if response.isError:
+                    return {
+                        "error": "日志 MCP 拒绝调用："
+                        + "\n".join(
+                            str(getattr(part, "text", "")) for part in response.content
+                        )[:2000],
+                        "is_error": True,
+                    }
+                return reply(payload(response, "日志 MCP"), "日志 MCP")
             if name not in SSH_META:
                 ident = args.get("host_id")
                 binding = self.bindings.get(ident) if type(ident) is int else None
@@ -527,23 +612,7 @@ class SkillMCP:
             ):
                 raise ValueError("SSH MCP 返回的主机与任务绑定不匹配")
             # isError replies returned above; a tool can still report failure.
-            failed = isinstance(data, dict) and data.get("status") in {
-                "failed",
-                "cancelled",
-            }
-            if not failed:
+            result = reply(data, "SSH MCP")
+            if not result["is_error"]:
                 self.bind(name, args, data)
-            return {
-                "is_error": failed,
-                "data": data,
-                **(
-                    {"error": str(data.get("error") or "SSH MCP 返回失败")}
-                    if failed and isinstance(data, dict)
-                    else {}
-                ),
-                "status": "failed"
-                if failed
-                else data.get("status", "success")
-                if isinstance(data, dict)
-                else "success",
-            }
+            return result
