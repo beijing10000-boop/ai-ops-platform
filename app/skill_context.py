@@ -144,51 +144,74 @@ def _row_sizes(value, sizes):
             _row_sizes(item, sizes)
 
 
-def _without_fields(value, fields):
-    """Copy of ``value`` whose WIDE_ROW_LISTS rows lack ``fields``."""
+def _map_rows(value, change):
+    """Copy of ``value`` whose WIDE_ROW_LISTS rows went through ``change``."""
     if isinstance(value, dict):
         result = {}
         for key, item in value.items():
             if key in WIDE_ROW_LISTS and isinstance(item, list):
                 result[key] = [
-                    {k: v for k, v in row.items() if k not in fields}
-                    if isinstance(row, dict)
-                    else row
-                    for row in item
+                    change(row) if isinstance(row, dict) else row for row in item
                 ]
             else:
-                result[key] = _without_fields(item, fields)
+                result[key] = _map_rows(item, change)
         return result
     if isinstance(value, list):
-        return [_without_fields(x, fields) for x in value]
+        return [_map_rows(x, change) for x in value]
     return value
 
 
+def _set_members(row):
+    """``row`` without null or empty members, nested ones included."""
+    result = {}
+    for key, item in row.items():
+        if isinstance(item, dict):
+            item = _set_members(item)
+        if item not in (None, "", [], {}):
+            result[key] = item
+    return result
+
+
+def _noted(view, emptied, dropped):
+    """``view`` with a note on what its rows leave out."""
+    left_out = ["值为空的字段（未设置或未采集到）"] if emptied else []
+    if dropped:
+        left_out.append("字段：" + "、".join(dropped))
+    if not left_out:
+        return view
+    return {
+        **view,
+        "fields_note": "为列出全部行，每行省略了"
+        + "及".join(left_out)
+        + "；完整内容在任务证据中",
+    }
+
+
 def _slim_rows(view, max_chars):
-    """Drop the bulkiest row fields, largest total first, until the view fits
-    or rows are lean, so wide inventories keep every row: a Java inventory's
-    command lines, log paths and -XX flags would otherwise leave room for one
-    process out of thirteen."""
+    """Keep every row of wide inventories: leave out members that are not set,
+    then drop the bulkiest row fields, largest total first, until the view
+    with its note fits or rows are lean. Thirteen Java processes would
+    otherwise leave room for ten: each heap carries four unset options and
+    each row its command line, log paths and -XX flags."""
+    slim = _map_rows(view, _set_members)
+    emptied, view = slim != view, slim
     sizes = Counter()
     _row_sizes(view, sizes)
     rows = sizes.pop("", 0)
     remaining, dropped = sum(sizes.values()), []
     for field, total in sizes.most_common():
-        if _fits(view, max_chars) or not rows or remaining / rows <= ROW_CHARS:
+        if (
+            _fits(_noted(view, emptied, dropped), max_chars)
+            or not rows
+            or remaining / rows <= ROW_CHARS
+        ):
             break
         if field in ROW_KEPT:
             continue
         dropped.append(field)
         remaining -= total
-        view = _without_fields(view, {field})
-    if dropped:
-        view = {
-            **view,
-            "fields_note": "为列出全部行，每行省略了字段："
-            + "、".join(dropped)
-            + "；完整内容在任务证据中",
-        }
-    return view
+        view = _map_rows(view, lambda row: {k: v for k, v in row.items() if k != field})
+    return _noted(view, emptied, dropped)
 
 
 def ssh_view(outcome, max_chars):
@@ -212,12 +235,15 @@ def ssh_view(outcome, max_chars):
     view = _slim_rows(view, max_chars)
     if _fits(view, max_chars):
         return view
-    # Even one row per list may not fit; the one-row view is the smallest.
-    for keep in (20, 10, 5, 3, 1):
-        shorter = _shrink_lists(view, keep)
+    # As many rows as fit; even one row per list may not, and that view is the
+    # smallest.
+    for keep in range(20, 0, -1):
+        shorter = {
+            **_shrink_lists(view, keep),
+            "view_note": "列表已按模型视图上限截短；完整证据在任务记录中",
+        }
         if _fits(shorter, max_chars):
             break
-    shorter["view_note"] = "列表已按模型视图上限截短；完整证据在任务记录中"
     return shorter
 
 
