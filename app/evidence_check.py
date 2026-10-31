@@ -134,11 +134,14 @@ def answer_object(answer):
     put a heading before it ("## 诊断结果" + a fenced block); the object is then
     taken from the fence, or from the first "{" to the last "}", and only when
     it carries one of the answer fields, so prose quoting JSON stays prose.
+    Raw line breaks inside strings are accepted (``strict=False``): models
+    write a multi-line "cause" that way, and strict JSON rejects it.
     """
     text = str(answer or "").strip()
     try:
         parsed = json.loads(
-            re.sub(r"^\x60\x60\x60(?:json)?\s*|\s*\x60\x60\x60$", "", text)
+            re.sub(r"^\x60\x60\x60(?:json)?\s*|\s*\x60\x60\x60$", "", text),
+            strict=False,
         )
     except ValueError:
         parsed = None
@@ -150,7 +153,7 @@ def answer_object(answer):
         candidates.append(text[start : end + 1])
     for candidate in candidates:
         try:
-            parsed = json.loads(candidate)
+            parsed = json.loads(candidate, strict=False)
         except ValueError:
             continue
         if isinstance(parsed, dict) and any(key in parsed for key in ANSWER_FIELDS):
