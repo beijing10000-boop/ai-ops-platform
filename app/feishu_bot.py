@@ -13,15 +13,17 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 )
 from .alert_mute import handle_mute_action
 from .alert_actions import (
+    card_after_mute,
     handle_analyze_action,
     handle_choose_mute,
     handle_unmute_action,
 )
 from .main import read_setting, REDIS_URL
+from .orchestrator import queues
 
 log = logging.getLogger(__name__)
 redis = Redis.from_url(REDIS_URL)
-queue = Queue("ai-questions", connection=redis)
+queue = Queue(queues.QUESTIONS, connection=redis)
 
 
 def on_message(data: P2ImMessageReceiveV1):
@@ -127,8 +129,6 @@ def on_card_action(data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
             ok, message = handle_mute_action(value, open_id)
             log.info("FEISHU_MUTE_ACTION success=%s", ok)
             if ok:
-                from .alert_actions import card_after_mute
-
                 card = card_after_mute(value, open_id)
                 return P2CardActionTriggerResponse(
                     {

@@ -1,12 +1,10 @@
 """Feishu tenant app message and interactive card operations."""
 
 import json
-import logging
 import httpx
 from .main import read_setting
 from .feishu_cards import MessageID, message_ids, split_card
 
-log = logging.getLogger(__name__)
 ROOT = "https://open.feishu.cn/open-apis"
 
 
@@ -66,15 +64,6 @@ async def get_token(client):
         },
     )
     return data["tenant_access_token"]
-
-
-async def send_card(chat_id, title, text, template="blue"):
-    async with httpx.AsyncClient(timeout=30) as client:
-        token = await get_token(client)
-        result = await send_rendered_card(
-            client, token, make_card(title, text, template), chat_id=chat_id
-        )
-        return result.get("data", {}).get("message_id")
 
 
 async def send_rendered_card(client, token, card, *, chat_id=None, reply_to=None):
@@ -144,38 +133,3 @@ async def update_card(message_id, title, text, template="green"):
         if isinstance(message_id, MessageID):
             message_id.message_ids = tuple(ids)
         return response
-
-
-async def send_text(chat_id, text):
-    async with httpx.AsyncClient(timeout=30) as client:
-        token = await get_token(client)
-        return await request(
-            client,
-            "POST",
-            ROOT + "/im/v1/messages",
-            token,
-            params={"receive_id_type": "chat_id"},
-            json={
-                "receive_id": chat_id,
-                "msg_type": "text",
-                "content": json.dumps({"text": text}, ensure_ascii=False),
-            },
-        )
-
-
-async def get_message_chat_id(message_id):
-    """Fetch the source chat to bind follow-up context to that exact Feishu group."""
-    if not message_id or not str(message_id).startswith("om_"):
-        return None
-    async with httpx.AsyncClient(timeout=20) as client:
-        token = await get_token(client)
-        result = await request(
-            client, "GET", ROOT + "/im/v1/messages/" + message_id, token
-        )
-    for message in (result.get("data") or {}).get("items") or []:
-        if (
-            message.get("message_id") == message_id
-            or len((result.get("data") or {}).get("items") or []) == 1
-        ):
-            return message.get("chat_id")
-    return None

@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from .main import REDIS_URL
-from .orchestrator import tasks
+from .orchestrator import queues, tasks
 from .security.rbac import permits
 
 
@@ -58,4 +58,4 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO)
     redis = Redis.from_url(REDIS_URL)
-    Worker([Queue("ai-diagnostics", connection=redis)], connection=redis).work()
+    Worker([Queue(queues.DIAGNOSTICS, connection=redis)], connection=redis).work()

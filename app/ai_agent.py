@@ -14,9 +14,8 @@ async def ask(
     question, extra_context="", return_usage=False, event=None, actor="system"
 ):
     """`event` set: a follow-up in that alert's thread (same host, chat question)."""
-    prompt = QA_OUTPUT_CONTRACT
     result = await run(
-        prompt,
+        QA_OUTPUT_CONTRACT,
         question[:3000],
         context=extra_context,
         return_usage=return_usage,

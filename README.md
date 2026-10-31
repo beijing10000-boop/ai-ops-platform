@@ -71,7 +71,7 @@ docker compose --profile feishu up -d feishu-receiver
 | --- | --- |
 | [安装部署](docs/INSTALLATION.md) | 首次部署、HTTP 内网访问、初始化与启动 |
 | [升级与回滚](docs/UPGRADING.md) | 旧 SSH 配置清理、备份与恢复 |
-| [Web 配置与验证](docs/CONFIGURATION.md) | 表单、验证按钮与默认提示词 |
+| [Web 配置与验证](docs/CONFIGURATION.md) | 表单、验证按钮与分析预算 |
 | [需求复核记录](docs/REQUIREMENTS-AUDIT.md) | 已实现功能、补充修复、验证结果与生产验收边界 |
 | [架构](docs/ARCHITECTURE.md) / [SSH MCP 接入](docs/LINUX-DIAGNOSTICS.md) | 双 MCP、身份映射、预算与失败处理 |
 | [Zabbix](docs/ZABBIX.md) / [飞书](docs/FEISHU.md) | 告警、恢复、群与卡片 |

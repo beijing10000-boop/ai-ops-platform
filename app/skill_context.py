@@ -134,12 +134,11 @@ def ssh_view(outcome, max_chars):
         view["data"]["output_note"] = "原文已省略，完整内容在任务证据中"
         if _fits(view, max_chars):
             return view
+    # Even one row per list may not fit; the one-row view is the smallest.
     for keep in (20, 10, 5, 3, 1):
         shorter = _shrink_lists(view, keep)
         if _fits(shorter, max_chars):
-            shorter["view_note"] = "列表已按模型视图上限截短；完整证据在任务记录中"
-            return shorter
-    shorter = _shrink_lists(view, 1)
+            break
     shorter["view_note"] = "列表已按模型视图上限截短；完整证据在任务记录中"
     return shorter
 
@@ -324,7 +323,7 @@ def model_view(provider, tool, outcome, max_chars=None, event_clock=None):
     return result
 
 
-def _ratio_signal(evidence_id, metric, value, hint, level="warning"):
+def _zabbix_signal(evidence_id, metric, value, hint, level="warning"):
     return {
         "source": "zabbix_mcp",
         "evidence_id": evidence_id,
@@ -343,18 +342,14 @@ def _history_signals(collected, event_clock):
     for provider, tool, outcome, evidence_id in collected:
         if provider != "zabbix_mcp" or not isinstance(outcome, dict):
             continue
-        if outcome.get("is_error"):
+        series = {"history_get": history, "trend_get": trend}.get(tool)
+        if series is None or outcome.get("is_error"):
             continue
         for row in outcome.get("records") or []:
-            if not isinstance(row, dict):
-                continue
-            ident = str(row.get("itemid", ""))
-            if tool == "history_get":
-                history.setdefault(ident, {"rows": [], "evidence_id": evidence_id})
-                history[ident]["rows"].append(row)
-            elif tool == "trend_get":
-                trend.setdefault(ident, {"rows": [], "evidence_id": evidence_id})
-                trend[ident]["rows"].append(row)
+            if isinstance(row, dict):
+                ident = str(row.get("itemid", ""))
+                series.setdefault(ident, {"rows": [], "evidence_id": evidence_id})
+                series[ident]["rows"].append(row)
     for ident, item in history.items():
         rows = item["rows"]
         window = _numbers(rows, ("value",)).get("value")
@@ -363,35 +358,33 @@ def _history_signals(collected, event_clock):
         base = _numbers(trend.get(ident, {}).get("rows", []), ("value_avg",)).get(
             "value_avg"
         )
-        if base and base["avg"] > 0 and window["avg"] / base["avg"] >= 1.5:
-            signals.append(
-                _ratio_signal(
-                    item["evidence_id"],
-                    "alert_vs_baseline",
-                    {
-                        "itemid": ident,
-                        "window_avg": round(window["avg"], 4),
-                        "baseline_avg": round(base["avg"], 4),
-                        "ratio": round(window["avg"] / base["avg"], 2),
-                    },
-                    f"监控项 {ident} 告警窗口均值是近 7 天小时均值的 {window['avg'] / base['avg']:.1f} 倍：属于突发升高而非常态",
+        if base and base["avg"] > 0:
+            ratio = window["avg"] / base["avg"]
+            value = {
+                "itemid": ident,
+                "window_avg": round(window["avg"], 4),
+                "baseline_avg": round(base["avg"], 4),
+                "ratio": round(ratio, 2),
+            }
+            if ratio >= 1.5:
+                signals.append(
+                    _zabbix_signal(
+                        item["evidence_id"],
+                        "alert_vs_baseline",
+                        value,
+                        f"监控项 {ident} 告警窗口均值是近 7 天小时均值的 {ratio:.1f} 倍：属于突发升高而非常态",
+                    )
                 )
-            )
-        elif base and base["avg"] > 0 and window["avg"] / base["avg"] <= 1.1:
-            signals.append(
-                _ratio_signal(
-                    item["evidence_id"],
-                    "alert_vs_baseline",
-                    {
-                        "itemid": ident,
-                        "window_avg": round(window["avg"], 4),
-                        "baseline_avg": round(base["avg"], 4),
-                        "ratio": round(window["avg"] / base["avg"], 2),
-                    },
-                    f"监控项 {ident} 告警窗口均值与近 7 天基线接近（{window['avg'] / base['avg']:.2f} 倍）：长期处于该水平，更可能是容量或阈值问题",
-                    level="info",
+            elif ratio <= 1.1:
+                signals.append(
+                    _zabbix_signal(
+                        item["evidence_id"],
+                        "alert_vs_baseline",
+                        value,
+                        f"监控项 {ident} 告警窗口均值与近 7 天基线接近（{ratio:.2f} 倍）：长期处于该水平，更可能是容量或阈值问题",
+                        level="info",
+                    )
                 )
-            )
         if event_clock:
             before = _segment(
                 [r for r in rows if (_clock(r) or 0) < event_clock], "value"
@@ -400,30 +393,27 @@ def _history_signals(collected, event_clock):
                 [r for r in rows if (_clock(r) or 0) >= event_clock], "value"
             )
             if before and after and before["count"] >= 2 and after["count"] >= 2:
+                value = {
+                    "itemid": ident,
+                    "before_avg": round(before["avg"], 4),
+                    "after_avg": round(after["avg"], 4),
+                }
                 if before["avg"] > 0 and after["avg"] / before["avg"] >= 1.5:
                     signals.append(
-                        _ratio_signal(
+                        _zabbix_signal(
                             item["evidence_id"],
                             "rise_at_alert",
-                            {
-                                "itemid": ident,
-                                "before_avg": round(before["avg"], 4),
-                                "after_avg": round(after["avg"], 4),
-                            },
+                            value,
                             f"监控项 {ident} 告警后均值是告警前的 {after['avg'] / before['avg']:.1f} 倍：异常在告警时刻附近开始",
                             level="info",
                         )
                     )
                 elif before["max"] > 0 and before["avg"] >= 0.9 * after["avg"]:
                     signals.append(
-                        _ratio_signal(
+                        _zabbix_signal(
                             item["evidence_id"],
                             "elevated_before_alert",
-                            {
-                                "itemid": ident,
-                                "before_avg": round(before["avg"], 4),
-                                "after_avg": round(after["avg"], 4),
-                            },
+                            value,
                             f"监控项 {ident} 告警前 30 分钟已处于相近水平：问题早于告警时刻出现，触发只是跨过阈值",
                             level="info",
                         )
@@ -431,7 +421,7 @@ def _history_signals(collected, event_clock):
     return signals
 
 
-def _event_signals(collected, event_clock):
+def _event_signals(collected):
     for provider, tool, outcome, evidence_id in collected:
         if provider != "zabbix_mcp" or tool != "event_get":
             continue
@@ -444,14 +434,12 @@ def _event_signals(collected, event_clock):
         ]
         if len(problems) >= 3:
             return [
-                {
-                    "source": "zabbix_mcp",
-                    "evidence_id": evidence_id,
-                    "level": "warning",
-                    "metric": "recurrence",
-                    "value": {"problem_events_24h": len(problems)},
-                    "hint": f"该触发器近 24 小时触发了 {len(problems)} 次：反复抖动或阈值贴近常态，应核对基线与阈值而不只是本次峰值",
-                }
+                _zabbix_signal(
+                    evidence_id,
+                    "recurrence",
+                    {"problem_events_24h": len(problems)},
+                    f"该触发器近 24 小时触发了 {len(problems)} 次：反复抖动或阈值贴近常态，应核对基线与阈值而不只是本次峰值",
+                )
             ]
     return []
 
@@ -508,28 +496,23 @@ def derive_signals(collected, event_clock=None):
     if len(clocks) >= 3:
         now = int(time.time())
         fresh = sum(1 for clock in clocks if now - clock <= FRESH_SECONDS)
-        newest = max(clocks)
+        newest = datetime.fromtimestamp(max(clocks), BEIJING)
         signals.append(
-            {
-                "source": "zabbix_mcp",
-                "evidence_id": clock_evidence,
-                "level": "warning" if fresh == 0 else "info",
-                "metric": "collection_freshness",
-                "value": {
+            _zabbix_signal(
+                clock_evidence,
+                "collection_freshness",
+                {
                     "items": len(clocks),
                     "updated_within_10m": fresh,
-                    "newest_lastclock_local": datetime.fromtimestamp(
-                        newest, BEIJING
-                    ).isoformat(),
+                    "newest_lastclock_local": newest.isoformat(),
                 },
-                "hint": (
-                    f"该主机 {len(clocks)} 个监控项全部停止更新，最后一次采集在 "
-                    f"{datetime.fromtimestamp(newest, BEIJING).strftime('%H:%M:%S')}"
-                    "：整机不可达或 Zabbix 到该主机的采集链路中断，而不只是单个监控项"
-                    if fresh == 0
-                    else f"该主机 {fresh}/{len(clocks)} 个监控项在最近 10 分钟内仍有新数据：主机或采集链路至少部分可用，问题更可能在未更新的那部分（如 agent 服务本身）"
-                ),
-            }
+                f"该主机 {len(clocks)} 个监控项全部停止更新，最后一次采集在 "
+                f"{newest.strftime('%H:%M:%S')}"
+                "：整机不可达或 Zabbix 到该主机的采集链路中断，而不只是单个监控项"
+                if fresh == 0
+                else f"该主机 {fresh}/{len(clocks)} 个监控项在最近 10 分钟内仍有新数据：主机或采集链路至少部分可用，问题更可能在未更新的那部分（如 agent 服务本身）",
+                level="warning" if fresh == 0 else "info",
+            )
         )
 
     def number(key):
@@ -551,17 +534,15 @@ def derive_signals(collected, event_clock=None):
         and util < 50
     ):
         signals.append(
-            {
-                "source": "zabbix_mcp",
-                "evidence_id": latest["system.cpu.util"][1],
-                "level": "warning",
-                "metric": "load_cpu_divergence",
-                "value": {
+            _zabbix_signal(
+                latest["system.cpu.util"][1],
+                "load_cpu_divergence",
+                {
                     "load_per_core_5m": round(load5 / cores, 2),
                     "cpu_util_percent": round(util, 2),
                 },
-                "hint": "Zabbix 最新值：每核 5 分钟负载偏高但 CPU 利用率不高，负载可能来自 D 状态任务或宿主机 CPU 争抢，而不是计算繁忙",
-            }
+                "Zabbix 最新值：每核 5 分钟负载偏高但 CPU 利用率不高，负载可能来自 D 状态任务或宿主机 CPU 争抢，而不是计算繁忙",
+            )
         )
     for key, (value, evidence_id) in latest.items():
         try:
@@ -570,28 +551,24 @@ def derive_signals(collected, event_clock=None):
             continue
         if key.startswith("vm.memory.utilization") and figure >= 90:
             signals.append(
-                {
-                    "source": "zabbix_mcp",
-                    "evidence_id": evidence_id,
-                    "level": "warning",
-                    "metric": "memory_utilization",
-                    "value": {"key": key, "percent": round(figure, 2)},
-                    "hint": "Zabbix 最新内存利用率已超过 90%：核对 RSS 排行、Swap 与 OOM 记录",
-                }
+                _zabbix_signal(
+                    evidence_id,
+                    "memory_utilization",
+                    {"key": key, "percent": round(figure, 2)},
+                    "Zabbix 最新内存利用率已超过 90%：核对 RSS 排行、Swap 与 OOM 记录",
+                )
             )
         elif key.startswith("vfs.fs") and "pused" in key and figure >= 90:
             signals.append(
-                {
-                    "source": "zabbix_mcp",
-                    "evidence_id": evidence_id,
-                    "level": "warning",
-                    "metric": "filesystem_utilization",
-                    "value": {"key": key, "percent": round(figure, 2)},
-                    "hint": "文件系统使用率超过 90%：核对增长来源与目录占用",
-                }
+                _zabbix_signal(
+                    evidence_id,
+                    "filesystem_utilization",
+                    {"key": key, "percent": round(figure, 2)},
+                    "文件系统使用率超过 90%：核对增长来源与目录占用",
+                )
             )
     signals.extend(_history_signals(collected, event_clock))
-    signals.extend(_event_signals(collected, event_clock))
+    signals.extend(_event_signals(collected))
     return signals[:14]
 
 

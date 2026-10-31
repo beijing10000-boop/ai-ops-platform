@@ -87,6 +87,7 @@ def _record(task_id, round_number, model, status, duration_ms, usage, payload):
     from .main import connection
     from .orchestrator.tasks import encode, store_blob
 
+    usage = usage or {}
     try:
         with connection() as db:
             request = payload.get("request") or {}
@@ -107,9 +108,9 @@ def _record(task_id, round_number, model, status, duration_ms, usage, payload):
                     str(model)[:120],
                     status,
                     duration_ms,
-                    (usage or {}).get("input"),
-                    (usage or {}).get("output"),
-                    (usage or {}).get("total"),
+                    usage.get("input"),
+                    usage.get("output"),
+                    usage.get("total"),
                     encode(payload),
                 ),
             )
@@ -126,7 +127,7 @@ async def traced_response(
     **kwargs,
 ):
     """Record one logical model request; bounded transient retries are internal."""
-    from .ai_reliability import request_response
+    from .ai_reliability import model_failure_code, request_response
     from .mcp_runtime import usage_counts
 
     model = kwargs.get("model", "")
@@ -145,8 +146,6 @@ async def traced_response(
     try:
         response = await request_response(client, **kwargs)
     except Exception as exc:
-        from .ai_reliability import model_failure_code
-
         _record(
             task_id,
             round_number,

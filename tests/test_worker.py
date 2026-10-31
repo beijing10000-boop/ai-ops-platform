@@ -712,9 +712,6 @@ def test_manual_analysis_progress_updates_and_context_for_both_states(monkeypatc
     async def update(message_id, title, detail, template="green"):
         events.append(("update", message_id, title, detail))
 
-    async def chat(message_id):
-        return "oc_group"
-
     saved = []
     monkeypatch.setattr(worker, "analyze", analyze)
     monkeypatch.setattr(feishu_client, "reply_card", reply)
