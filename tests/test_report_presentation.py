@@ -13,6 +13,10 @@ def test_human_metrics_convert_iec_values_and_percentage_precision():
     assert human_metrics("50.00 MiB / 1.00 GiB") == "0.05 GiB / 1.00 GiB"
     # Under 0.01 GiB a size stays in MiB rather than reading 0.00 GiB.
     assert human_metrics("RSS 5120 KiB") == "RSS 5.00 MiB"
+    # Whole and short percentages stay as written: no "90.00% 的告警阈值".
+    assert human_metrics("阈值 90%，可用 9.4%，余量 20%–30%") == (
+        "阈值 90%，可用 9.4%，余量 20%–30%"
+    )
 
 
 def test_byte_sizes_read_in_gib_without_repeating_the_models_own_conversion():

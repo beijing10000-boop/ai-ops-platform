@@ -379,7 +379,16 @@ def source_line(info):
 # the scope are on the Web report it links to.
 CAUSE_CHARS, ACTION_ROWS, ACTION_CHARS = 200, 4, 80
 LIST_MARK = re.compile(r"^\s*(?:\d{1,2}\s*[.、)）](?!\d)\s*|[-•·*]\s+)")
-HEADING = re.compile(r"^(?:#|\x60\x60\x60)|^\*\*[^*]{1,20}\*\*[：:]?$")
+# Report section names, which models also write as bare heading lines.
+SECTIONS = r"(?:诊断结论|诊断结果|结论|故障原因|原因分析|根因分析|处理建议|建议|分析与依据|诊断范围|证据核对)"
+HEADING = re.compile(
+    r"^(?:#|\x60\x60\x60)|^\*\*[^*]{1,20}\*\*[：:]?$"
+    r"|^" + SECTIONS + r"(?:（[^）]{1,10}）)?[：:]?$"
+)
+# "诊断结论：……" on one line: the label is the card's own heading already.
+CONCLUSION_LABEL = re.compile(
+    r"^[#*\s]*(?:诊断结论|诊断结果|结论|故障原因)(?:（[^）]{1,10}）)?\**[：:]\s*"
+)
 ADVICE_HEADING = re.compile(r"^[#*\s]*(?:处理|操作|修复)?(?:建议|措施)[*：:\s]*$")
 # What to do when the analysis did not finish, by the reason its answer gives.
 RETRY = "在原告警卡片上点「🤖 AI分析」重新分析"
@@ -414,14 +423,16 @@ def action_items(value):
 def plain_answer_parts(text):
     """Conclusion and actions of an answer that is not JSON.
 
-    The conclusion is its first line of text (a heading or code fence would
-    show as an empty conclusion); the actions are the list under a heading
-    that names suggestions. An analysis that did not finish gets the steps
-    that address why, never a bare "check the report".
+    The conclusion is its first line of text (a heading, bare section name or
+    code fence would show as an empty conclusion); the actions are the list
+    under a heading that names suggestions. An analysis that did not finish
+    gets the steps that address why, never a bare "check the report".
     """
     text = str(text or "")
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    prose = [line for line in lines if not HEADING.match(line)]
+    prose = [
+        CONCLUSION_LABEL.sub("", line) for line in lines if not HEADING.match(line)
+    ]
     actions, listing = [], False
     for line in lines:
         if ADVICE_HEADING.match(line):
