@@ -1,8 +1,8 @@
 # 升级说明
 
-## v1.3.2 → 未发布版本：接入日志分析平台 MCP
+## v1.3.2 → v1.4.0：接入日志分析平台 MCP
 
-没有数据库迁移。升级后平台自动安装第 9 个平台 Skill `platform-logs`（日志证据，默认启用，后台服务只有日志 MCP），并刷新 platform-base、platform-network 的正文。日志 MCP 未配置时平台不会发起任何日志调用，报告“能力说明”里会有一行“日志 MCP未启用：未配置日志 MCP 地址和令牌”，任务状态不受影响；不打算接入日志平台的环境可以在 Skill 管理停用 platform-logs，这一行随之消失。
+没有数据库迁移，SSH MCP 无需升级。升级后平台自动安装第 9 个平台 Skill `platform-logs`（日志证据，默认启用，后台服务只有日志 MCP），并刷新 platform-base、platform-network 的正文。日志 MCP 未配置时平台不会发起任何日志调用，报告“能力说明”里会有一行“日志 MCP未启用：未配置日志 MCP 地址和令牌”，任务状态不受影响；不打算接入日志平台的环境可以在 Skill 管理停用 platform-logs，这一行随之消失。
 
 1. 按常规命令升级平台：
 
@@ -14,6 +14,8 @@ git pull --ff-only origin main
 docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
 curl -fsS http://服务器IP:8088/healthz
 ```
+
+   healthz 应返回 version 1.4.0。静态资源地址改为 `?v=1.4.0`，刷新页面即可看到“连接管理”中的日志 MCP 表单；“Skill 管理”中多了 platform-logs（优先级 52，后台服务 logs）。
 
 2. 日志分析平台完成初始化后，在它的“MCP 接入”页签发一个给本平台用的令牌（`logmcp_` 开头，只显示一次）。工具建议勾选 `log_overview`、`log_compare`、`log_error_spikes`、`log_network_events`、`log_nginx_summary`、`log_java_exceptions`、`log_os_events`、`log_patterns`、`log_search`、`log_context`；目录、来源与定位三个基础工具始终可用。可按需限定日志类型与来源分组。
 3. 本平台“连接管理 → 日志 MCP”：地址填 `http://日志平台IP:7077/mcp`，粘贴令牌，点“验证连接”应显示“连接成功，N 个授权工具”，再点“保存连接”。之后在日志平台修改令牌授权时，点本平台“诊断工具”的“刷新目录”或重新验证连接。

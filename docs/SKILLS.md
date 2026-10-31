@@ -1,6 +1,6 @@
 # 按 Skill 查询 MCP 数据源
 
-Skill 是**唯一的 AI 诊断策略来源**：数据源选择、工具顺序、分析与报告要求都写在 Skill 中，平台不再有固定的兼容诊断流程。平台以不可编辑的代码约束只读安全边界、飞书告警 JSON 输出字段、授权、Token 预算和证据脱敏。数据源有三个：Zabbix MCP（监控历史）、SSH MCP（Linux 实时快照）与日志 MCP（[日志分析平台](https://github.com/beijing10000-boop/log-analysis-platform) 的历史日志），Skill 的“允许使用的后台服务”分别对应 `zabbix_mcp`、`ssh_mcp`、`logs`。
+Skill 是**唯一的 AI 诊断策略来源**：数据源选择、工具顺序、分析与报告要求都写在 Skill 中，平台不再有固定的兼容诊断流程。平台以不可编辑的代码约束只读安全边界、飞书告警 JSON 输出字段、授权、Token 预算和证据脱敏。数据源有三个：Zabbix MCP（监控历史）、SSH MCP（Linux 实时快照）与日志 MCP（日志分析平台的历史日志），Skill 的“允许使用的后台服务”分别对应 `zabbix_mcp`、`ssh_mcp`、`logs`。
 
 ## 平台维护的 Skill 与补充 Skill
 
