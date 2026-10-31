@@ -475,8 +475,9 @@ try:
         page.get_by_role("tab", name="AI 配置", exact=True).click()
         page.screenshot(path=str(OUT / "settings-ai-1440.png"), full_page=True)
         page.get_by_role("tab", name="服务与维护", exact=True).click()
-        page.locator('[data-action="runtime-status"]').click()
+        # Shown on opening the section; there is no button to press.
         page.locator("#runtime-result .runtime-summary").wait_for()
+        assert not page.locator('[data-action="runtime-status"]').count()
         assert not page.locator("#runtime-result pre").count()
         page.locator('[data-page="alerts"]').click()
         page.locator("#alert-filter").wait_for()

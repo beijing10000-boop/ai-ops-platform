@@ -848,7 +848,7 @@ async function systemSettings() {
     configRegion("maintenance",
     panel(
       "服务状态与备份",
-      `<p class="muted small">检查队列连接、排队任务与 Worker 注册状态。升级前备份数据库与配对主密钥，操作步骤见仓库 docs/UPGRADING.md。</p>${btn("runtime-status", "查看服务与队列状态")}<div id="runtime-result" role="status"></div>`,
+      `<p class="muted small">队列连接、排队任务与 Worker 注册状态，打开本分区时读取，点顶栏刷新按钮可更新。升级前备份数据库与配对主密钥，操作步骤见仓库 docs/UPGRADING.md。</p><div id="runtime-result" role="status"></div>`,
       "",
       "settings-maintenance",
     ))
@@ -867,6 +867,18 @@ function selectConfigTab(key) {
   window.history.replaceState(null, "", "#settings/" + key);
   state.lastHash = location.hash;
   window.scrollTo(0, 0);
+  if (key === "maintenance") runtimeStatus();
+}
+async function runtimeStatus() {
+  const output = $("#runtime-result");
+  if (!output) return;
+  output.textContent = "正在检查服务…";
+  try {
+    const result = await api("/api/v1/status");
+    if (output.isConnected) output.innerHTML = OpsUI.runtime(result);
+  } catch (err) {
+    if (output.isConnected) output.textContent = "读取服务状态失败：" + err.message;
+  }
 }
 async function auditPage() {
   const data = await paged(P + "/audit", "auditPage", 50);
@@ -947,6 +959,7 @@ async function navigate(options = {}) {
     } else window.scrollTo(0, 0);
     if (page === "report" && ["running", "queued"].includes(state.currentTask?.status))
       scheduleReportPoll(parts[1], current);
+    if (page === "settings" && state.configTab === "maintenance") runtimeStatus();
   } catch (err) {
     if (current === generation && !options.quiet)
       $("#content").innerHTML =
@@ -1075,10 +1088,6 @@ document.addEventListener("click", async (event) => {
       const html = await diagnosticTools(true);
       const section = document.getElementById("connection-tools");
       if (section) { section.outerHTML = html; toast("已重新读取 SSH MCP 工具目录"); }
-    } else if (action === "runtime-status") {
-      const output = $("#runtime-result"); output.textContent = "正在检查服务…";
-      const result = await api("/api/v1/status");
-      if (output.isConnected) output.innerHTML = OpsUI.runtime(result);
     }
     else if (action === "alert-prev" || action === "alert-next") {
       state.alertPage = Math.max(1, Math.min(state.alertPageCount, state.alertPage + (action === "alert-next" ? 1 : -1)));
