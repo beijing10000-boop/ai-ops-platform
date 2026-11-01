@@ -1178,7 +1178,10 @@ def test_base_skill_is_installed_and_refreshed_but_keeps_admin_choices(monkeypat
     assert base["scopes"] == ["alert", "qa", "web"] and base["mode"] == "base"
     assert (
         client_for()
-        .put(P + "/" + base["id"], json={"enabled": False, "priority": 7})
+        .put(
+            P + "/" + base["id"],
+            json={"enabled": False, "priority": 7, "confirm": True},
+        )
         .status_code
         == 200
     )
@@ -1244,7 +1247,9 @@ def test_standalone_skill_replaces_base_and_supplement_loads_with_it():
 
 
 def test_scope_without_any_enabled_skill_fails_explicitly(rig):
-    client_for().put(P + "/" + base_row()["id"], json={"enabled": False})
+    client_for().put(
+        P + "/" + base_row()["id"], json={"enabled": False, "confirm": True}
+    )
     # Device and alert-type Skills extend the base Skill: not loaded without it.
     assert skills.snapshot({}, "web") == []
     create = AsyncMock()
