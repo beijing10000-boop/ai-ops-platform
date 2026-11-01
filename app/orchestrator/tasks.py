@@ -44,6 +44,59 @@ def recover_stalled(db):
             )
 
 
+def stall_seconds():
+    """What still runs after the longest configured analysis budget (at least
+    ten minutes, as recover_stalled) has lost its worker."""
+    from ..main import read_setting
+    from .budgets import PROFILES, profile
+
+    longest = max(profile(name, read_setting)["seconds"] for name in PROFILES)
+    return max(600, longest + 120)
+
+
+# RQ job states of a job that will still run, or is running.
+WAITING = ("queued", "started", "deferred", "scheduled")
+
+
+def reconcile(job_state=None):
+    """Close tasks killed workers left behind; nothing is queued or run again.
+
+    A running task past its deadline lost its worker (recover_stalled, which
+    otherwise only runs when a task is read). A task queued for over ten
+    minutes whose RQ job (job id = task id) is gone or over will never start:
+    the job failed before starting it, its worker died, or Redis lost it.
+    `job_state(job_id)` gives the RQ status, None for a missing job; without
+    it (no Redis) queued tasks are left alone.
+    """
+    from ..main import connection
+
+    with connection() as db:
+        recover_stalled(db)
+        queued = [
+            row[0]
+            for row in db.execute(
+                "SELECT task_id FROM diagnostic_tasks WHERE status='queued' "
+                "AND created_at<datetime('now','-10 minutes')"
+            )
+        ]
+    if job_state is None:
+        return
+    lost = [task_id for task_id in queued if job_state(task_id) not in WAITING]
+    if not lost:
+        return
+    report = encode(
+        {"message": "排队中的任务未能执行（Worker 中断或队列数据丢失），请重新发起分析"}
+    )
+    with connection() as db:
+        for task_id in lost:
+            db.execute(
+                "UPDATE diagnostic_tasks SET status='failed',stage='failed',"
+                "error_type='QueueLost',report=?,completed_at=CURRENT_TIMESTAMP "
+                "WHERE task_id=? AND status='queued'",
+                (report, task_id),
+            )
+
+
 def progress(task_id):
     from ..main import connection
 

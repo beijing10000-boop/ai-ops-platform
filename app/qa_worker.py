@@ -4,7 +4,7 @@ import asyncio
 import logging
 import json
 from redis import Redis
-from rq import Worker, Queue
+from rq import Queue
 from .main import REDIS_URL, record_ai_question
 from .ai_agent import ask
 from .alert_context import resolve_replied_event
@@ -28,18 +28,34 @@ def reply_text(report, answer):
 
     Ids only mean something next to the Web report's evidence list; that page,
     linked from the reply, keeps them and the citation check (as alert cards do).
+    Both parts read as feishu_text() shows model and tool text.
     """
     from .mcp_runtime import readable_report_answer
-    from .worker import without_evidence_ids
+    from .worker import feishu_text
 
     return "\n\n".join(
         part
         for part in (
-            without_evidence_ids(readable_report_answer(answer)),
-            report.get("chat_scope"),
+            feishu_text(readable_report_answer(answer)),
+            feishu_text(report.get("chat_scope") or ""),
         )
         if part
     )
+
+
+def unfinished_text(report, answer):
+    """Reply for an analysis that did not finish: why, and what to do next.
+
+    Its answer lists the tools that ran and points to the Web report "below";
+    in a chat that reads as a dead end, and the report link follows anyway.
+    """
+    from .worker import QA_RETRY, feishu_text, plain_answer_parts
+
+    reason, steps = plain_answer_parts(answer, QA_RETRY)
+    lines = [feishu_text(reason) or "分析未完成，没有形成结论。", "", "**处理建议**"]
+    lines += [f"{n}. {feishu_text(step)}" for n, step in enumerate(steps, 1)]
+    scope = feishu_text(report.get("chat_scope") or "")
+    return "\n".join(lines) + ("\n\n" + scope if scope else "")
 
 
 async def execute(
@@ -116,12 +132,16 @@ async def execute(
     )
     progress_id = None
     try:
+        from .worker import lark_safe
+
         progress_id = await reply_card(
             message_id,
             "AI 分析中",
-            "**问题：** " + question[:180] + "\n\n⏳ 正在查询后台MCP服务并进行分析……",
+            "**问题：** "
+            + lark_safe(question[:180])
+            + "\n\n⏳ 正在查询后台MCP服务并进行分析……",
         )
-        mark_pending(chat_id, progress_id)
+        mark_pending(chat_id, progress_id, "qa")
         log.info("FEISHU_PROGRESS_SENT message_id=%s", message_id)
     except Exception:
         log.exception("FEISHU_PROGRESS_FAILED message_id=%s", message_id)
@@ -136,7 +156,7 @@ async def execute(
             actor=sender_open_id or "feishu",
             **({"event": verified_event} if verified_event else {}),
         )
-        from .worker import report_url
+        from .worker import UNFINISHED, feishu_text, report_url
         from .orchestrator import tasks
 
         task = tasks.get(usage.get("task_id")) if usage.get("task_id") else None
@@ -146,10 +166,18 @@ async def execute(
             "failed": ("AI 分析未完成", "red"),
         }.get(state, ("AI 分析完成", "green"))
         report = (task or {}).get("report") or {}
-        display_result = reply_text(report, result)
-        if report.get("limitations"):
+        if state in ("partial", "failed") and any(
+            marker in str(result) for marker in UNFINISHED
+        ):
+            display_result = unfinished_text(report, result)
+        else:
+            display_result = reply_text(report, result)
+        # Tool errors are quoted in the limitations: they read as the answer does.
+        limitations = [feishu_text(item) for item in report.get("limitations") or []]
+        limitations = [item for item in limitations if item]
+        if limitations:
             display_result += "\n\n**诊断不足与待核验**\n" + "\n".join(
-                "- " + str(item) for item in report["limitations"]
+                "- " + item for item in limitations
             )
         if task and task.get("duration_ms") is not None:
             display_result += f"\n\n执行耗时：{task['duration_ms'] / 1000:.1f} 秒"
@@ -191,22 +219,18 @@ async def execute(
             root_id=root_id or parent_id or message_id,
         )
     except Exception as exc:
+        from .worker import QA_RETRY, failure_text
+
         record_ai_question("feishu", message_id, question, "failed", type(exc).__name__)
         log.exception("FEISHU_QA_FAILED message_id=%s", message_id)
+        failure = failure_text(exc, QA_RETRY)
         if progress_id:
             try:
-                await update_card(
-                    progress_id,
-                    "AI 分析失败",
-                    "分析失败，请稍后重试或联系管理员。",
-                    "red",
-                )
+                await update_card(progress_id, "AI 分析失败", failure, "red")
                 return
             except Exception:
                 log.exception("FEISHU_ERROR_UPDATE_FAILED message_id=%s", message_id)
-        await reply_card(
-            message_id, "AI 分析失败", "分析失败，请稍后重试或联系管理员。", "red"
-        )
+        await reply_card(message_id, "AI 分析失败", failure, "red")
     finally:
         clear_pending(chat_id, progress_id)
 
@@ -220,8 +244,12 @@ def process_question(
 
 
 if __name__ == "__main__":
+    from .worker import MaintainedWorker
+
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
     redis = Redis.from_url(REDIS_URL)
-    Worker([Queue(queues.QUESTIONS, connection=redis)], connection=redis).work()
+    MaintainedWorker(
+        [Queue(queues.QUESTIONS, connection=redis)], connection=redis
+    ).work()

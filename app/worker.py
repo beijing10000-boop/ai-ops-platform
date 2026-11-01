@@ -10,6 +10,7 @@ from urllib.parse import urlencode, urlsplit
 import httpx
 from redis import Redis
 from rq import Worker, Queue
+from rq.exceptions import NoSuchJobError
 from rq.job import Job
 from .alert_mute import action_signature
 from .evidence_check import answer_object
@@ -75,6 +76,43 @@ def cfg(key):
     return read_setting(key)
 
 
+# Names models give the card fields instead of the contract's.
+FIELD_ALIASES = {
+    "cause": ("conclusion", "summary", "diagnosis", "root_cause", "结论", "诊断结论"),
+    "action": (
+        "actions",
+        "suggestions",
+        "recommendations",
+        "advice",
+        "steps",
+        "处理建议",
+        "建议",
+    ),
+    "analysis": ("details", "reasoning", "explanation", "分析", "分析与依据"),
+}
+
+
+def card_fields(raw):
+    """The answer's JSON object under the contract's field names, or None for
+    prose and for an object holding none of the card fields (which then reads
+    as text instead of an empty "model gave no conclusion" card)."""
+    data = answer_object(raw)
+    if data is None:
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return None
+    if not isinstance(data, dict):
+        return None
+    data = dict(data)
+    for key, names in FIELD_ALIASES.items():
+        if not data.get(key):
+            alias = next((data[name] for name in names if data.get(name)), None)
+            if alias:
+                data[key] = alias
+    return data if any(key in data for key in FIELD_ALIASES) else None
+
+
 async def analyze(event, task_id=None):
     key = cfg("openai_api_key")
     model = cfg("openai_model")
@@ -94,7 +132,7 @@ async def analyze(event, task_id=None):
         task_id=task_id,
     )
     raw = raw.strip()
-    data = answer_object(raw)
+    data = card_fields(raw)
     if data is None:
         data = {
             "cause": "分析结果需要人工复核",
@@ -184,13 +222,20 @@ def recent_analysis(event):
     }
 
 
-def daily_budget():
+def daily_budget(task_id=None):
     """(used, limit) Token of today's automatic alert analyses, or None if unlimited.
 
-    Manual analyses carry the clicking user as actor and are not counted;
-    analyses still running have no Token total yet.
+    Finished analyses count with the total the model reported; analyses still
+    queued or running have none yet and count with their task Token budget, so
+    an alert storm cannot pass this check many times before the first analysis
+    ends. `task_id` is that queued analysis rechecking as it starts: it counts
+    finished and already running analyses besides itself, not the ones queued
+    with it (each rechecks when it starts). Manual analyses carry the clicking
+    user as actor and are not counted.
     """
     from .main import connection
+    from .orchestrator.budgets import PROFILES
+    from .orchestrator.tasks import decode
 
     try:
         limit = int(cfg("ai_daily_token_limit") or "0")
@@ -198,12 +243,26 @@ def daily_budget():
         return None
     if limit <= 0:
         return None
+    today = (
+        "source='alert' AND actor='system' "
+        "AND date(created_at,'+8 hours')=date('now','+8 hours')"
+    )
+    active = "('running')" if task_id else "('queued','running')"
     with connection() as db:
         used = db.execute(
-            "SELECT COALESCE(SUM(token_total),0) FROM diagnostic_tasks "
-            "WHERE source='alert' AND actor='system' "
-            "AND date(created_at,'+8 hours')=date('now','+8 hours')"
+            "SELECT COALESCE(SUM(token_total),0) FROM diagnostic_tasks WHERE " + today
         ).fetchone()[0]
+        requests = db.execute(
+            "SELECT request FROM diagnostic_tasks WHERE "
+            + today
+            + " AND status IN "
+            + active
+            + " AND task_id!=?",
+            (task_id or "",),
+        ).fetchall()
+    for (request,) in requests:
+        limits = (decode(request) or {}).get("limits") or {}
+        used += limits.get("tokens") or PROFILES["standard"]["tokens"]
     return used, limit
 
 
@@ -259,12 +318,14 @@ def safe(value, n):
     return str(value or "未提供").replace("\n", " ")[:n]
 
 
-def report_url(info):
-    task_id = str(
-        info.get("_task_id") or (info.get("_token_usage") or {}).get("task_id") or ""
-    )
-    if not re.fullmatch(r"[0-9a-f]{32}", task_id):
-        return ""
+def event_text(value, n):
+    """An alert field for a lark_md card. Zabbix values can be log lines, so
+    markup in them is shown as text."""
+    return lark_safe(safe(value, n))
+
+
+def report_base():
+    """scheme://host of the Web reports, or "" when the host is not usable."""
     scheme = cfg("web_protocol") or "http"
     host = cfg("web_public_host")
     parts = urlsplit(scheme + "://" + host)
@@ -278,7 +339,17 @@ def report_url(info):
         or parts.fragment
     ):
         return ""
-    return scheme + "://" + parts.netloc + "/#report/" + task_id
+    return scheme + "://" + parts.netloc
+
+
+def report_url(info):
+    task_id = str(
+        info.get("_task_id") or (info.get("_token_usage") or {}).get("task_id") or ""
+    )
+    if not re.fullmatch(r"[0-9a-f]{32}", task_id):
+        return ""
+    base = report_base()
+    return base + "/#report/" + task_id if base else ""
 
 
 def analysis_summary(info):
@@ -341,6 +412,117 @@ def without_evidence_ids(text):
     return re.sub(r"(?<=\S)[ \t]{2,}", " ", text).strip()
 
 
+# Sizes human_metrics leaves as written: decimal-looking names (kB, MB, GB, TB),
+# `free -h` forms (Ki, Mi, Gi, Ti) and sizes written next to Chinese text.
+# Linux tools and Zabbix count these in 1024s, so they are binary sizes. Rates
+# (MB/s), bits (Mb, Gb) and bare letters (4G, -Xmx512m) stay as written.
+CAPACITY = re.compile(
+    r"(?<![A-Za-z0-9_.])(?P<number>\d[\d,]*(?:\.\d+)?)\s*"
+    r"(?P<unit>[kK]i?B|[MT]i?B|GB|[KMGT]i)(?![A-Za-z0-9_/])"
+)
+
+
+def _capacity(match):
+    """In GiB with two decimals; under 0.01 GiB in MiB, as human_metrics does."""
+    size = float(match["number"].replace(",", "")) * 1024 ** (
+        "KMGT".index(match["unit"][0].upper()) + 1
+    )
+    if not size:
+        return "0 GiB"
+    gib = size / 1024**3
+    return f"{gib:.2f} GiB" if gib >= 0.01 else f"{size / 1024**2:.2f} MiB"
+
+
+# The platform's hosts run without Swap on purpose, so advice to set it up and
+# notes that it is absent are noise. Only text saying just that is dropped.
+SWAP = r"(?:[Ss][Ww][Aa][Pp]|交换(?:分区|空间|内存))(?:\s*(?:分区|空间|文件))?"
+SETUP = r"(?:配置|启用|开启|增加|添加|创建|设置|扩容|扩大|调大|分配|挂载)"
+WORDS = r"[^，,；;。！？\n]"
+# A suggestion to set up Swap ("建议配置 2 GiB Swap 作为缓冲").
+SWAP_SETUP = re.compile(
+    SETUP + WORDS + "{0,12}?" + SWAP + "|" + SWAP + WORDS + "{0,6}?" + SETUP
+)
+# A clause saying only that Swap is absent or should be set up: "且未配置 Swap",
+# "Swap：未启用（总量 0 B）", "Swap 总量为 0", "建议开启 swap 作为缓冲".
+SWAP_CLAUSE = re.compile(
+    r"(?:且|并且|同时|另外|此外|而且|并|也|但)?\s*(?:主机|系统|服务器|节点|该机)?\s*(?:"
+    + "|".join(
+        (
+            r"(?:未|没有|无|不)" + SETUP + r"?\s*" + SWAP,
+            SWAP + r"\s*[:：]?\s*(?:均|也|都|当前)?\s*(?:未|没有|无|不)" + SETUP + "?",
+            SWAP + r"\s*(?:总量|大小|容量|空间)?\s*[:：]?\s*(?:为|是)?\s*"
+            r"0(?:\.0+)?\s*(?:B|KiB|MiB|GiB|kB)?",
+            r"(?:(?:建议|可以?|应(?:该|当)?|需要?|考虑|评估|酌情)\s*)*"
+            + SETUP
+            + WORDS
+            + "{0,12}?"
+            + SWAP
+            + WORDS
+            + "{0,10}",
+        )
+    )
+    + r")\s*(?:（[^）]{0,30}）|\([^)]{0,30}\))?"
+)
+CLAUSE = re.compile(r"([^，,；;。！？!?\n]*)([，,；;。！？!?]?)")
+COMMAS = ("，", ",", "；", ";")
+
+
+def without_swap_notes(text):
+    """Drop clauses that only say Swap is absent or should be set up; a clause
+    saying anything else stays whole ("内存不足且未配置 Swap" is kept)."""
+    lines = []
+    for line in str(text).split("\n"):
+        mark = LIST_MARK.match(line)
+        head, body = (line[: mark.end()], line[mark.end() :]) if mark else ("", line)
+        kept, dropped = [], False
+        for clause, end in CLAUSE.findall(body):
+            if not SWAP_CLAUSE.fullmatch(clause.strip()):
+                if clause or end:
+                    kept.append([clause, end])
+                continue
+            dropped = True
+            # "A，且未配置 Swap。" keeps "A。"; a sentence of only Swap goes.
+            if end not in COMMAS and kept and kept[-1][1] in COMMAS:
+                kept[-1][1] = end
+        if dropped:
+            body = "".join(clause + end for clause, end in kept).strip()
+            if not body:
+                continue
+            line = head + body
+        lines.append(line)
+    return "\n".join(lines)
+
+
+# lark_md markup a model, a tool result or a user could slip into a card:
+# mentions (<at id=all></at>), tags (<font>, <a>) and markdown links.
+MD_LINK = re.compile(r"\[([^\[\]\n]*)\]\(([^()\s]*)\)")
+TAG_OPEN = re.compile(r"<|&(?:lt|#0*60|#x0*3c);", re.I)
+
+
+def lark_safe(text):
+    """Untrusted text for a lark_md card: no mention, tag or link except to the
+    platform's own reports. The platform's own markup is added after this."""
+    text = str(text or "")
+    if MD_LINK.search(text):
+        base = report_base()
+        text = MD_LINK.sub(
+            lambda link: (
+                link[0] if base and link[2].startswith(base + "/#report/") else link[1]
+            ),
+            text,
+        )
+    return TAG_OPEN.sub("＜", text)
+
+
+def feishu_text(text):
+    """Model and tool text as Feishu shows it: no evidence ids, sizes in GiB,
+    no Swap notes and no markup it could slip into the card."""
+    from .report_presentation import human_metrics
+
+    text = CAPACITY.sub(_capacity, human_metrics(without_evidence_ids(text)))
+    return lark_safe(without_swap_notes(text))
+
+
 def source_line(info):
     """Which data sources the conclusion rests on, and which were unavailable."""
     caps = info.get("_capabilities") or {}
@@ -392,6 +574,8 @@ CONCLUSION_LABEL = re.compile(
 ADVICE_HEADING = re.compile(r"^[#*\s]*(?:处理|操作|修复)?(?:建议|措施)[*：:\s]*$")
 # What to do when the analysis did not finish, by the reason its answer gives.
 RETRY = "在原告警卡片上点「🤖 AI分析」重新分析"
+# A chat question runs again when it is asked again where it was asked.
+QA_RETRY = "在群里重新发送该问题（追问告警时，回复原告警或上一条 AI 回复）"
 UNFINISHED_STEPS = (
     ("请求超时", [RETRY, "反复超时时，在 系统配置 → AI 配置 调高「AI 单次请求超时」"]),
     (
@@ -411,6 +595,45 @@ UNFINISHED_STEPS = (
         ],
     ),
 )
+# The answer of an analysis that did not finish (evidence fallback, no final
+# answer). Its pointers to the Web report ("请查看诊断不足与预算", "请在下方…
+# 核验") mean nothing in Feishu, where the steps say what to do instead.
+UNFINISHED = ("模型未完成最终诊断", "未形成完整结论")
+REPORT_POINTER = re.compile(r"(?:请(?:在下方|查看|打开|到)|详见)[^。！？\n]*[。！？]?")
+
+
+def unfinished_steps(text, retry=RETRY):
+    """The steps for the reason an unfinished answer gives; `retry` is how this
+    channel runs the analysis again."""
+    steps = next(steps for marker, steps in UNFINISHED_STEPS if marker in text)
+    return [step.replace(RETRY, retry) for step in steps]
+
+
+def failure_text(exc, retry=RETRY):
+    """Body of a failure card: what stopped the analysis and what to do next."""
+    from .orchestrator import tasks
+
+    if isinstance(exc, tasks.Cancelled):
+        reason, steps = "分析已在平台上取消，没有形成结论。", ["需要时" + retry]
+    elif isinstance(exc, tasks.AlreadyRunning):
+        reason = "该告警已有分析在进行，本次没有重复执行。"
+        steps = ["等待进行中的分析回复结果，或在平台「分析历史」查看进度"]
+    elif not all(
+        cfg(key) for key in ("openai_base_url", "openai_model", "openai_api_key")
+    ):
+        reason = "AI 模型尚未配置，分析没有开始。"
+        steps = [
+            "在 系统配置 → AI 配置 填写模型 Base URL、部署名称与 API Key，"
+            "再点「验证模型连接」",
+            retry,
+        ]
+    else:
+        reason, steps = "分析失败，没有形成结论。", unfinished_steps("", retry)
+    return (
+        reason
+        + "\n\n**处理建议**\n"
+        + "\n".join(f"{n}. {step}" for n, step in enumerate(steps, 1))
+    )
 
 
 def action_items(value):
@@ -420,13 +643,14 @@ def action_items(value):
     return [item for item in items if item]
 
 
-def plain_answer_parts(text):
+def plain_answer_parts(text, retry=RETRY):
     """Conclusion and actions of an answer that is not JSON.
 
     The conclusion is its first line of text (a heading, bare section name or
     code fence would show as an empty conclusion); the actions are the list
     under a heading that names suggestions. An analysis that did not finish
-    gets the steps that address why, never a bare "check the report".
+    gets the steps that address why, never a bare "check the report"; `retry`
+    is how this channel runs it again.
     """
     text = str(text or "")
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -441,16 +665,17 @@ def plain_answer_parts(text):
             actions.append(LIST_MARK.sub("", line))
         elif listing and actions:
             break
-    if not actions and ("模型未完成最终诊断" in text or "未形成完整结论" in text):
-        actions = next(steps for marker, steps in UNFINISHED_STEPS if marker in text)
-    return (prose[0] if prose else ""), actions
+    conclusion = prose[0] if prose else ""
+    if any(marker in text for marker in UNFINISHED):
+        conclusion = REPORT_POINTER.sub("", conclusion).strip()
+        if not actions:
+            actions = unfinished_steps(text, retry)
+    return conclusion, actions
 
 
 def card_text(value):
-    """Model text for the card: one paragraph, no evidence ids, sizes in GiB."""
-    from .report_presentation import human_metrics
-
-    return human_metrics(without_evidence_ids(re.sub(r"\s*\n\s*", " ", str(value))))
+    """Model text for the card: one paragraph, shown as feishu_text() shows it."""
+    return feishu_text(re.sub(r"\s*\n\s*", " ", str(value)))
 
 
 def card_summary(info):
@@ -478,7 +703,11 @@ def card_summary(info):
     lines += ["**诊断结论**", shown + "（详见完整报告）" if shown != full else full]
     if lines[-1] == "":
         lines[-1] = "模型未给出结论。"
-    items = [clipped(card_text(item), ACTION_CHARS) for item in actions]
+    items = [
+        clipped(card_text(item), ACTION_CHARS)
+        for item in actions
+        if not SWAP_SETUP.search(str(item))
+    ]
     items = [item for item in items if item]
     if items:
         lines += ["", "**处理建议**"]
@@ -582,11 +811,11 @@ def make_card(event, info=None, *, analysis=False, mute_info=None):
     )
     event_name = valid_macro(event.get("event_name")) or "未知事件"
     lines = [
-        "**主机名称**  " + safe(event.get("host_name"), 80),
-        "**主机 IP**  " + safe(event.get("host_ip"), 50),
+        "**主机名称**  " + event_text(event.get("host_name"), 80),
+        "**主机 IP**  " + event_text(event.get("host_ip"), 50),
     ]
     if groups:
-        lines.append("**所属分组**  " + safe(groups, 180))
+        lines.append("**所属分组**  " + event_text(groups, 180))
     if recovery:
         started = valid_macro(event.get("event_date")) and valid_macro(
             event.get("event_time")
@@ -610,9 +839,9 @@ def make_card(event, info=None, *, analysis=False, mute_info=None):
     event_value_text = valid_macro(event.get("latest_value"))
     lines.extend(
         [
-            "**事件名称**  " + safe(event_name, 250),
-            "**事件数值**  " + safe(event_value_text, 300),
-            "**事件 ID**  " + safe(event.get("event_id"), 40),
+            "**事件名称**  " + event_text(event_name, 250),
+            "**事件数值**  " + event_text(event_value_text, 300),
+            "**事件 ID**  " + event_text(event.get("event_id"), 40),
         ]
     )
     elements = [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}}]
@@ -751,7 +980,12 @@ def make_card(event, info=None, *, analysis=False, mute_info=None):
 
 
 async def notify(card, event=None, *, analysis_info=None):
-    """Send alert cards solely through the configured Feishu enterprise app."""
+    """Send alert cards solely through the configured Feishu enterprise app.
+
+    Each group stands alone: one that fails (dissolved, bot removed) does not
+    fail the delivery for the groups that got the card, which keep their
+    analysis and recovery replies. Raises only when no group got it.
+    """
     if cfg("feishu_enabled").lower() != "true":
         log.warning("FEISHU_APP_ALERT_DISABLED")
         return
@@ -764,7 +998,7 @@ async def notify(card, event=None, *, analysis_info=None):
     chats = list(dict.fromkeys(x.strip() for x in ids.split(",") if x.strip()))
     if not chats:
         raise RuntimeError("未配置飞书企业应用告警群 Chat ID")
-    errors = []
+    delivered, errors = 0, []
     async with httpx.AsyncClient(timeout=30) as client:
         token = await get_token(client)
         for chat_id in chats:
@@ -839,6 +1073,7 @@ async def notify(card, event=None, *, analysis_info=None):
                     chat_id[:5],
                     bool(original_id),
                 )
+                delivered += 1
             except Exception as exc:
                 log.error(
                     "FEISHU_APP_ALERT_FAILED chat_id_prefix=%s error=%s",
@@ -846,8 +1081,12 @@ async def notify(card, event=None, *, analysis_info=None):
                     type(exc).__name__,
                 )
                 errors.append(chat_id[:5])
+    if errors and not delivered:
+        raise RuntimeError("企业应用告警全部群发送失败，数量：" + str(len(errors)))
     if errors:
-        raise RuntimeError("企业应用告警有群发送失败，数量：" + str(len(errors)))
+        log.warning(
+            "FEISHU_APP_ALERT_PARTIAL delivered=%s failed=%s", delivered, len(errors)
+        )
 
 
 def store_alert_usage(event, usage):
@@ -902,12 +1141,19 @@ async def handle_alert(event):
     if recovery:
         # A recovery is only useful in Feishu if its original problem was
         # actually delivered. Muted/failed/disabled/unknown problems are silent.
+        # notify() replies only in the groups holding the problem card, so a
+        # problem some groups got (earlier releases recorded it as "failed")
+        # pairs there.
         with connection() as db:
             previous = db.execute(
                 "SELECT notify_status FROM alert_events WHERE event_id=? AND event_value='1'",
                 (str(event.get("event_id", "")),),
             ).fetchone()
-        if not previous or previous[0] != "sent":
+            delivered = db.execute(
+                "SELECT 1 FROM alert_message_links WHERE event_id=? LIMIT 1",
+                (str(event.get("event_id", "")),),
+            ).fetchone()
+        if not delivered and (not previous or previous[0] != "sent"):
             update_event(
                 event, notify_status="suppressed_unpaired", ai_status="not_required"
             )
@@ -956,7 +1202,8 @@ async def handle_alert(event):
         elif budget and budget[0] >= budget[1]:
             plan = "budget"
             info["note"] = (
-                f"今日自动 AI 分析已用 {budget[0]:,} Token，达到每日上限 {budget[1]:,}，"
+                f"今日自动 AI 分析已用 {budget[0]:,} Token（含进行中分析的预算），"
+                f"达到每日上限 {budget[1]:,}，"
                 "本告警未自动分析；需要时可点击“AI分析”手动发起。"
             )
     try:
@@ -995,12 +1242,10 @@ async def handle_alert(event):
             event,
             profile_name=alert_profile(event),
         )
-    except Exception as exc:
+    except Exception:
         update_event(event, ai_status="failed")
-        log.warning(
-            "ALERT_ANALYSIS_ENQUEUE_FAILED event_id=%s error=%s",
-            event.get("event_id"),
-            type(exc).__name__,
+        log.exception(
+            "ALERT_ANALYSIS_ENQUEUE_FAILED event_id=%s", event.get("event_id")
         )
         return {
             "event_id": event["event_id"],
@@ -1023,6 +1268,26 @@ async def handle_alert(event):
     }
 
 
+def close_unstarted(task_id, exc):
+    """End a task its job failed before starting (no model configured): left
+    queued it would block the event's next analysis and hold daily budget."""
+    if not task_id:
+        return
+    from .orchestrator import tasks
+
+    try:
+        task = tasks.get(task_id)
+        if task and task["status"] == "queued":
+            tasks.finish(
+                task_id,
+                {"message": "AI 分析未完成，请核对模型与连接配置"},
+                status="failed",
+                error_type=type(exc).__name__,
+            )
+    except Exception:
+        log.exception("UNSTARTED_TASK_CLOSE_FAILED task_id=%s", task_id)
+
+
 async def handle_alert_analysis(event, task_id=None):
     update_event(event, ai_status="running")
     try:
@@ -1030,11 +1295,9 @@ async def handle_alert_analysis(event, task_id=None):
         store_alert_usage(event, analysis.get("_token_usage"))
     except Exception as exc:
         update_event(event, ai_status="failed")
-        log.warning(
-            "ALERT_ANALYZE_FAILED event_id=%s error=%s",
-            event.get("event_id"),
-            type(exc).__name__,
-        )
+        close_unstarted(task_id, exc)
+        # The job itself succeeds (no retry), so the traceback is only here.
+        log.exception("ALERT_ANALYZE_FAILED event_id=%s", event.get("event_id"))
         # Initial notification already arrived. Avoid flooding the same group
         # with another card when the model is unavailable.
         return {
@@ -1074,6 +1337,29 @@ def task_still_queued(task_id):
 def process_alert_analysis(event, task_id=None):
     if not task_still_queued(task_id):
         update_event(event, ai_status="cancelled")
+        return {"event_id": event.get("event_id"), "skipped": True}
+    # Rechecked as it starts: analyses that ended while this one waited may
+    # have used more than their budget, or the limit was lowered.
+    budget = daily_budget(task_id) if task_id else None
+    if budget and budget[0] >= budget[1]:
+        from .orchestrator import tasks
+
+        tasks.finish(
+            task_id,
+            {
+                "message": f"今日自动 AI 分析 Token 已达每日上限（{budget[0]:,} / "
+                f"{budget[1]:,}），本次排队的分析未执行；需要时在告警卡片上点"
+                "「🤖 AI分析」手动分析。"
+            },
+            status="cancelled",
+            error_type="DailyBudget",
+        )
+        update_event(event, ai_status="skipped_budget")
+        log.info(
+            "ALERT_ANALYSIS_SKIPPED_BUDGET event_id=%s task_id=%s",
+            event.get("event_id"),
+            task_id,
+        )
         return {"event_id": event.get("event_id"), "skipped": True}
     return asyncio.run(handle_alert_analysis(event, task_id))
 
@@ -1118,7 +1404,7 @@ async def analyze_on_demand(event, message_id, chat_id=None, task_id=None):
             message_id,
             "AI 分析中",
             "**分析对象**  "
-            + question[:240]
+            + lark_safe(question[:240])
             + "\n\n⏳ 正在查询后台MCP服务并进行分析……",
         )
         if chat_id:
@@ -1141,6 +1427,10 @@ async def analyze_on_demand(event, message_id, chat_id=None, task_id=None):
                 await update_card(progress_id, "AI 分析结果", card, link=link)
             except Exception:
                 log.exception("ALERT_AI_CARD_UPDATE_FAILED event_id=%s", event_id)
+                if chat_id:
+                    # The result goes out as a new reply; the stale progress
+                    # card is no longer the one being analysed.
+                    clear_pending(chat_id, progress_id)
                 progress_id = await reply_card(
                     message_id, "AI 分析结果", card, link=link
                 )
@@ -1199,16 +1489,15 @@ async def analyze_on_demand(event, message_id, chat_id=None, task_id=None):
             clear_pending(chat_id, progress_id)
         update_event(event, ai_status=ai_state(result))
         return {"diagnosed": True, "event_id": event_id, "reply_id": progress_id}
-    except Exception:
+    except Exception as exc:
         if chat_id:
             clear_pending(chat_id, progress_id)
         update_event(event, ai_status="failed")
+        close_unstarted(task_id, exc)
         log.exception("MANUAL_AI_ANALYSIS_FAILED event_id=%s", event_id)
         if progress_id:
             try:
-                await update_card(
-                    progress_id, "AI 分析失败", "分析失败，请稍后重试。", "red"
-                )
+                await update_card(progress_id, "AI 分析失败", failure_text(exc), "red")
             except Exception:
                 log.exception(
                     "ALERT_AI_FAILURE_CARD_UPDATE_FAILED event_id=%s", event_id
@@ -1222,6 +1511,102 @@ def process_manual_analysis(event, message_id, chat_id=None, task_id=None):
         return {"event_id": event.get("event_id"), "skipped": True}
     # Jobs queued before v0.9.9 carry no task_id; the runtime then creates one.
     return asyncio.run(analyze_on_demand(event, message_id, chat_id, task_id))
+
+
+def interrupted_text(retry, service):
+    """Body of a progress card whose worker was killed mid-analysis."""
+    return (
+        "分析进程意外中断（服务重启或资源不足），本次没有形成结论。\n\n**处理建议**\n"
+        f"1. {retry}\n"
+        f"2. 反复中断时，请管理员执行 docker compose logs {service} 查看中断原因"
+    )
+
+
+def sync_ai_states():
+    """Alert AI statuses and chat questions a killed worker left "running".
+
+    An alert takes the end state of its latest analysis task once that ended
+    over ten minutes ago (a live worker sets it as soon as its card is sent);
+    a question still running after the longest analysis budget lost its worker.
+    """
+    from .main import connection
+    from .orchestrator.tasks import stall_seconds
+
+    latest = (
+        " FROM diagnostic_tasks t WHERE t.event_id=alert_events.event_id "
+        "AND t.kind='analysis' ORDER BY t.created_at DESC,t.rowid DESC LIMIT 1)"
+    )
+    stalled = f"-{stall_seconds()} seconds"
+    with connection() as db:
+        db.execute(
+            "UPDATE alert_events SET ai_status=(SELECT CASE WHEN t.status IN "
+            "('success','partial','cancelled') THEN t.status ELSE 'failed' END"
+            + latest
+            + " WHERE ai_status='running' AND (SELECT t.status NOT IN "
+            "('queued','running') AND t.completed_at<datetime('now','-10 minutes')"
+            + latest
+        )
+        db.execute(
+            "UPDATE ai_questions SET status='failed',error_type='WorkerLost',"
+            "completed_at=CURRENT_TIMESTAMP WHERE status='running' "
+            "AND created_at<datetime('now',?)",
+            (stalled,),
+        )
+
+
+def close_abandoned_progress():
+    """A progress card whose worker was killed still reads "analysing": say the
+    analysis stopped and how to run it again."""
+    from .conversation_context import abandoned_progress, clear_pending
+    from .feishu_client import update_card
+    from .orchestrator.tasks import stall_seconds
+
+    for reply_id, record in abandoned_progress(stall_seconds()):
+        qa = record.get("kind") == "qa"
+        text = interrupted_text(
+            QA_RETRY if qa else RETRY, "qa-worker" if qa else "alert-analysis-worker"
+        )
+        clear_pending(record.get("chat_id"), reply_id)
+        try:
+            asyncio.run(update_card(reply_id, "AI 分析中断", text, "red"))
+        except Exception:
+            log.exception("PROGRESS_CARD_CLOSE_FAILED")
+
+
+def reconcile(redis=None):
+    """Close what a killed worker (deploy, OOM) left running: its task, the
+    alert's AI status, the chat question and the Feishu progress card.
+
+    It never queues or re-runs anything and never stops the worker. `redis` is
+    RQ's connection, which tells a queued task whose job is gone.
+    """
+    from .orchestrator import tasks
+
+    def job_state(job_id):
+        try:
+            status = Job.fetch(job_id, connection=redis).get_status()
+        except NoSuchJobError:
+            return None
+        return getattr(status, "value", status)
+
+    for step, args in (
+        (tasks.reconcile, (job_state if redis is not None else None,)),
+        (sync_ai_states, ()),
+        (close_abandoned_progress, ()),
+    ):
+        try:
+            step(*args)
+        except Exception:
+            log.exception("RECONCILE_FAILED step=%s", step.__name__)
+
+
+class MaintainedWorker(Worker):
+    """An RQ worker whose maintenance (at start, then every ten minutes) also
+    runs reconcile(), so nothing waits for someone to open a task."""
+
+    def run_maintenance_tasks(self):
+        super().run_maintenance_tasks()
+        reconcile(self.connection)
 
 
 if __name__ == "__main__":
@@ -1238,4 +1623,6 @@ if __name__ == "__main__":
         if sys.argv[1:] == ["analysis"]
         else [queues.ALERTS]
     )
-    Worker([Queue(name, connection=redis) for name in names], connection=redis).work()
+    MaintainedWorker(
+        [Queue(name, connection=redis) for name in names], connection=redis
+    ).work()
