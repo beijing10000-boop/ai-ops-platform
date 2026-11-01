@@ -448,3 +448,198 @@ def test_clicked_analysis_card_has_the_automatic_cards_body(monkeypatch):
         clicked["elements"][0]
         == worker.make_card(event, unfinished, analysis=True)["elements"][2]
     )
+
+
+# OPS-PIPE-13 / OPS-WEB-03: the schema is set up once per version, reads take
+# no write lock, and one connection authenticates a request.
+
+WRITES = ("BEGIN", "CREATE", "ALTER", "INSERT", "UPDATE", "DELETE", "DROP")
+
+
+def traced(monkeypatch, busy=None):
+    """The statements each new connection runs, one list per connection;
+    `busy` shortens the lock wait (20 s) so a wait fails fast."""
+    import sqlite3
+
+    real = sqlite3.connect
+    runs = []
+
+    def connect(*args, **kwargs):
+        db = real(*args, **({**kwargs, "timeout": busy} if busy else kwargs))
+        runs.append([])
+        db.set_trace_callback(runs[-1].append)
+        return db
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    return runs
+
+
+def test_reads_neither_set_the_schema_up_nor_take_the_write_lock(monkeypatch):
+    import sqlite3
+
+    real = sqlite3.connect
+    runs = traced(monkeypatch, busy=0.5)
+    assert main.read_setting("web_protocol") == "http"
+    [run] = runs
+    assert not [s for s in run if s.lstrip().upper().startswith(WRITES)], run
+    holder = real(main.DB, isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        # Readers no longer queue for a writer's lock (they did, up to 20 s) ...
+        assert main.read_setting("web_protocol") == "http"
+        with main.connection() as db:
+            assert db.execute("SELECT COUNT(*) FROM settings").fetchone()[0] >= 1
+        # ... writers still take it, one at a time, as before.
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            with main.connection() as db:
+                db.execute("INSERT INTO settings VALUES ('lock_probe','1',0)")
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    assert main.read_setting("lock_probe") == ""
+
+
+def test_the_schema_is_set_up_once_per_version_across_processes(monkeypatch, tmp_path):
+    import threading
+
+    from app import platform_db
+
+    def state():
+        with main.connection() as db:
+            return (
+                db.execute("PRAGMA user_version").fetchone()[0],
+                db.execute("SELECT MAX(version) FROM platform_migrations").fetchone()[
+                    0
+                ],
+            )
+
+    assert state() == (main.SCHEMA_VERSION, platform_db.LATEST)
+    # A database v1.5.0 set up (no schema version), here one migration short.
+    with main.connection() as db:
+        db.execute("PRAGMA user_version=0")
+        db.execute(
+            "DELETE FROM platform_migrations WHERE version=?", (platform_db.LATEST,)
+        )
+    setups = []
+    original = main.init_schema
+
+    def counting(db):
+        setups.append(threading.get_ident())
+        original(db)
+
+    monkeypatch.setattr(main, "init_schema", counting)
+    # Web, workers and the receiver start together: each its own connection.
+    barrier, errors = threading.Barrier(6), []
+
+    def start():
+        try:
+            barrier.wait()
+            with main.connection() as db:
+                db.execute("SELECT COUNT(*) FROM settings").fetchone()
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=start) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == [] and len(setups) == 1
+    assert state() == (main.SCHEMA_VERSION, platform_db.LATEST) and len(setups) == 1
+    # A new database is set up by its first connection.
+    monkeypatch.setattr(main, "DB", tmp_path / "fresh.sqlite3")
+    with main.connection() as db:
+        tables = {
+            row[0]
+            for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    assert {"settings", "alert_events", "diagnostic_tasks", "platform_skills"} <= tables
+    assert len(setups) == 2
+
+
+def test_schema_version_names_the_schema():
+    """Fails when init_schema() or platform_db.migrate() changes the tables:
+    bump main.SCHEMA_VERSION (only databases at another version are set up
+    again) and record the new shape here."""
+    import hashlib
+
+    with main.connection() as db:
+        tables = [
+            row[0]
+            for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name NOT LIKE 'sqlite%' ORDER BY name"
+            )
+        ]
+        shape = {
+            table: [
+                list(column[1:]) for column in db.execute(f"PRAGMA table_info({table})")
+            ]
+            for table in tables
+        }
+        shape["indexes"] = [
+            list(row)
+            for row in db.execute(
+                "SELECT name,tbl_name FROM sqlite_master WHERE type='index' "
+                "AND name NOT LIKE 'sqlite%' ORDER BY name"
+            )
+        ]
+    digest = hashlib.sha256(json.dumps(shape, sort_keys=True).encode()).hexdigest()
+    assert (main.SCHEMA_VERSION, digest[:16]) == (1, "591f9608ce793306")
+
+
+def test_an_authenticated_request_reads_the_database_once(monkeypatch):
+    import time
+
+    from fastapi import HTTPException
+    from fastapi.testclient import TestClient
+
+    from app import feishu_auth
+    from app.security import rbac
+
+    raw, csrf = "session-operator", "csrf-operator"
+    with main.connection() as db:
+        feishu_auth._tables(db)
+        db.execute("INSERT INTO members VALUES ('ou_operator','operator',1)")
+        db.execute(
+            "INSERT INTO admin_sessions VALUES (?,?,?,?,?)",
+            (feishu_auth._hash(raw), "ou_operator", "Op", csrf, int(time.time()) + 60),
+        )
+    client = TestClient(
+        main.app, headers={"x-csrf-token": csrf}, cookies={feishu_auth.COOKIE: raw}
+    )
+    runs = traced(monkeypatch)
+    me = client.get("/api/v1/auth/me").json()
+    assert (me["role"], len(runs)) == ("operator", 1)  # 5 before (7 with a check)
+    assert "reports.read" in me["permissions"] and "*" not in me["permissions"]
+    # Permission checks use the role read with the session.
+    request = SimpleNamespace(
+        cookies={feishu_auth.COOKIE: raw},
+        headers={},
+        method="GET",
+        url=SimpleNamespace(path="/api/v1/qa-events"),
+    )
+    runs.clear()
+    assert rbac.require("reports.read")(request)["open_id"] == "ou_operator"
+    assert main.require_admin(request)["role"] == "operator"
+    assert len(runs) == 2
+    with pytest.raises(HTTPException) as denied:
+        rbac.require("settings.manage")(request)
+    assert denied.value.status_code == 403
+    # Writes still need the CSRF token; a member disabled meanwhile is out.
+    with pytest.raises(HTTPException) as forged:
+        rbac.require("reports.read")(
+            SimpleNamespace(**{**vars(request), "method": "POST"})
+        )
+    assert forged.value.status_code == 403
+    with main.connection() as db:
+        db.execute("UPDATE members SET enabled=0 WHERE open_id='ou_operator'")
+    with pytest.raises(HTTPException) as gone:
+        rbac.require("reports.read")(request)
+    assert gone.value.status_code == 401
+    # The super admin and the opt-in legacy token carry their role too.
+    assert rbac.role_for("ou_super") == "super_admin"
+    legacy = SimpleNamespace(
+        cookies={}, headers={"authorization": "Bearer test-admin"}, method="GET"
+    )
+    assert feishu_auth.authenticate(legacy)["permissions"] == ["*"]

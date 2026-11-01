@@ -1,6 +1,6 @@
 # 双 MCP 架构
 
-AI Ops Platform 运行 Web、alert-worker、alert-analysis-worker、qa-worker、diagnostic-worker、Redis 与可选飞书接收器。alert-worker 只发送告警与恢复卡片，不等待模型；告警的 AI 分析由 alert-analysis-worker 执行（默认 2 个副本，手动“AI分析”优先于自动分析），diagnostic-worker 负责 Web 诊断。这些 Worker 只编排 AI 分析，都不是 SSH 执行器。告警分析在入队时就创建排队中的任务，同一事件排队或执行期间不会重复提交；同一主机、同一触发器的后续告警等待进行中的分析（复用其结果），排队的自动分析开始前核对告警是否已恢复、排队是否超过上限。问答逐个执行，需要等待时先回复“AI 排队中”。SQLite 保存加密业务配置、报告与证据；所有应用服务共享同一数据卷。
+AI Ops Platform 运行 Web、alert-worker、alert-analysis-worker、qa-worker、diagnostic-worker、Redis 与可选飞书接收器。alert-worker 只发送告警与恢复卡片，不等待模型；告警的 AI 分析由 alert-analysis-worker 执行（默认 2 个副本，手动“AI分析”优先于自动分析），diagnostic-worker 负责 Web 诊断。这些 Worker 只编排 AI 分析，都不是 SSH 执行器。告警分析在入队时就创建排队中的任务，同一事件排队或执行期间不会重复提交；同一主机、同一触发器的后续告警等待进行中的分析（复用其结果），排队的自动分析开始前核对告警是否已恢复、排队是否超过上限。问答逐个执行，需要等待时先回复“AI 排队中”。SQLite 保存加密业务配置、报告与证据；所有应用服务共享同一数据卷。表结构在升级后的第一次连接时建立或迁移一次（版本记在数据库文件头的 `user_version`，多进程同时启动时由写锁保证只执行一次）；只读连接不取写锁，写入在第一条写语句时取得写锁。
 
 ```mermaid
 flowchart TD

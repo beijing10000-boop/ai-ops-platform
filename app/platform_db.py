@@ -1,5 +1,9 @@
 """Current platform schema and one-time removal of the retired local SSH backend."""
 
+# The newest version migrate() applies. main.connection() sets a database up
+# again when its newest platform_migrations row is not this one.
+LATEST = 8
+
 
 def _migrate_v4(db):
     db.execute(
