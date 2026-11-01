@@ -187,29 +187,80 @@ def alert_profile(event):
     return default
 
 
+def reuse_hours():
+    """The reuse window (ai_alert_reuse_hours); 0 when reuse is off."""
+    try:
+        return max(int(cfg("ai_alert_reuse_hours") or "0"), 0)
+    except ValueError:
+        return 0
+
+
+def queue_limit_hours():
+    """How long an automatic analysis may wait in the queue and still run.
+
+    The reuse window: for that long one analysis stands for every alert of
+    its host and trigger, so one that could not even start within it would
+    describe an alert the platform no longer reuses analyses for. With reuse
+    off, the window's default (2 hours).
+    """
+    from .main import DEFAULTS
+
+    return reuse_hours() or int(DEFAULTS["ai_alert_reuse_hours"])
+
+
 def recent_analysis(event):
-    """A finished analysis of the same host and trigger within the reuse window."""
+    """An analysis of the same host and trigger this alert can stand on, or
+    None (also when reuse is off: ai_alert_reuse_hours 0).
+
+    One finished within the reuse window comes first; else one still queued
+    or running, which a flapping trigger's next alerts wait for instead of
+    each queueing their own (`in_progress`). A queued one counts while its
+    alert has not recovered (it will not run then: outdated()) and for the
+    queue limit, a running one while its worker can still be alive.
+    """
     from .main import beijing_time, connection
+    from .orchestrator.tasks import stall_seconds
 
     host = str(event.get("host_id") or "")
     trigger = str(event.get("trigger_id") or "")
-    try:
-        hours = int(cfg("ai_alert_reuse_hours") or "0")
-    except ValueError:
-        hours = 0
+    hours = reuse_hours()
     if hours <= 0 or not (host.isdigit() and trigger.isdigit()):
         return None
+    tasks_of = (
+        "FROM diagnostic_tasks t "
+        "JOIN alert_events a ON a.event_id=t.event_id AND a.event_value='1' "
+        "WHERE t.kind='analysis' AND t.event_id != ? AND "
+    )
+    same_pair = (
+        " AND json_extract(a.event_json,'$.host_id')=? "
+        "AND json_extract(a.event_json,'$.trigger_id')=? "
+    )
+    event_id = str(event.get("event_id"))
+    window = "-" + str(hours) + " hours"
+    lost = f"-{stall_seconds()} seconds"
     with connection() as db:
         row = db.execute(
-            "SELECT t.task_id,t.completed_at FROM diagnostic_tasks t "
-            "JOIN alert_events a ON a.event_id=t.event_id AND a.event_value='1' "
-            "WHERE t.kind='analysis' AND t.status IN ('success','partial') "
-            "AND t.completed_at >= datetime('now', ?) AND t.event_id != ? "
-            "AND json_extract(a.event_json,'$.host_id')=? "
-            "AND json_extract(a.event_json,'$.trigger_id')=? "
-            "ORDER BY t.completed_at DESC LIMIT 1",
-            ("-" + str(hours) + " hours", str(event.get("event_id")), host, trigger),
+            "SELECT t.task_id,t.status,t.completed_at "
+            + tasks_of
+            + "t.status IN ('success','partial') "
+            "AND t.completed_at >= datetime('now', ?)"
+            + same_pair
+            + "ORDER BY t.completed_at DESC LIMIT 1",
+            (event_id, window, host, trigger),
         ).fetchone()
+        if not row:
+            row = db.execute(
+                "SELECT t.task_id,t.status,COALESCE(t.started_at,t.created_at) "
+                + tasks_of
+                + "t.cancel_requested=0 AND ("
+                "(t.status='running' AND t.started_at >= datetime('now', ?)) "
+                "OR (t.status='queued' AND t.created_at >= datetime('now', ?) "
+                "AND NOT EXISTS (SELECT 1 FROM alert_events r "
+                "WHERE r.event_id=t.event_id AND r.event_value='0')))"
+                + same_pair
+                + "ORDER BY t.created_at DESC LIMIT 1",
+                (event_id, lost, window, host, trigger),
+            ).fetchone()
         if not row:
             return None
         occurrences = db.execute(
@@ -219,12 +270,40 @@ def recent_analysis(event):
             "AND json_extract(event_json,'$.trigger_id')=?",
             (host, trigger),
         ).fetchone()[0]
+    in_progress = row[1] in ("queued", "running")
     return {
         "task_id": row[0],
-        "completed": beijing_time(row[1]),
+        "status": row[1],
+        "in_progress": in_progress,
+        # Finished: when it completed; in progress: when it started or queued.
+        ("since" if in_progress else "completed"): beijing_time(row[2]),
         "hours": hours,
         "occurrences": occurrences,
     }
+
+
+def reuse_note(reused):
+    """Why the alert card announces no analysis of its own."""
+    url = report_url({"_task_id": reused["task_id"]})
+    if reused["in_progress"]:
+        state = (
+            f"已有 AI 分析在排队（{reused['since']} 提交）"
+            if reused["status"] == "queued"
+            else f"的 AI 分析正在进行（{reused['since']} 开始）"
+        )
+        return (
+            f"同一主机、同一触发器{state}，近 24 小时共 {reused['occurrences']} 次告警，"
+            "本次不重复分析，结果将回复在该次告警的卡片下。"
+            + (f"[查看该次分析]({url})。" if url else "")
+            + "需要单独分析本次告警可点击“AI分析”。"
+        )
+    return (
+        f"近 {reused['hours']} 小时内同一主机、同一触发器已完成 AI 分析"
+        f"（{reused['completed']}），近 24 小时共 {reused['occurrences']} 次告警，"
+        "本次不重复分析。"
+        + (f"[查看该次报告]({url})。" if url else "")
+        + "需要重新分析可点击“AI分析”。"
+    )
 
 
 def daily_budget(task_id=None):
@@ -787,6 +866,42 @@ def card_note(info):
     return " · ".join(part for part in (source_line(info), usage) if part)
 
 
+def analysis_body(info):
+    """The body of every "AI 分析结果" card, sent under the alert by the
+    automatic analysis (make_card) or as the reply to a click on
+    "🤖 AI分析" (analyze_on_demand): card_summary() (status when not clean,
+    the conclusion, up to four numbered actions), the report button and the
+    grey footer card_note(). The user's Feishu rules for the card live in
+    those two functions; this is the one place that lays the card out.
+
+    A CardBody: its text is the summary and footer, its elements the card.
+    """
+    from .feishu_cards import CardBody
+
+    summary, note = card_summary(info), card_note(info)
+    elements = [{"tag": "div", "text": {"tag": "lark_md", "content": summary}}]
+    url = report_url(info)
+    if url:
+        elements.append(
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "查看完整诊断报告"},
+                        "type": "default",
+                        "url": url,
+                    }
+                ],
+            }
+        )
+    elements += [
+        {"tag": "hr"},
+        {"tag": "note", "elements": [{"tag": "plain_text", "content": "◉ " + note}]},
+    ]
+    return CardBody(summary + "\n\n---\n" + note, elements)
+
+
 def clipped(text, limit):
     """Cut long text at the last sentence end within the limit, else with an ellipsis."""
     if len(text) <= limit:
@@ -996,48 +1111,26 @@ def make_card(event, info=None, *, analysis=False, mute_info=None):
                 },
             }
         elements.append(mute_section)
-    if analysis and not recovery:
-        elements.append({"tag": "hr"})
-        elements.append(
-            {
-                "tag": "div",
-                "text": {"tag": "lark_md", "content": card_summary(info)},
-            }
-        )
-        detail_url = report_url(info)
-        if detail_url:
-            elements.append(
-                {
-                    "tag": "action",
-                    "actions": [
-                        {
-                            "tag": "button",
-                            "text": {
-                                "tag": "plain_text",
-                                "content": "查看完整诊断报告",
-                            },
-                            "type": "default",
-                            "url": detail_url,
-                        }
-                    ],
-                }
-            )
     if analysis:
-        elements.append({"tag": "hr"})
-        elements.append(
-            {
-                "tag": "note",
-                "elements": [{"tag": "plain_text", "content": "◉ " + card_note(info)}],
-            }
-        )
+        body = analysis_body(info).elements
+        # Recoveries are not analysed automatically: such a card has only the footer.
+        elements += [{"tag": "hr"}, *(body if not recovery else body[-1:])]
     return {
         "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {
             "title": {"tag": "plain_text", "content": title},
-            "template": "green" if recovery else COLORS.get(sev, "grey"),
+            "template": card_color(event),
         },
         "elements": elements,
     }
+
+
+def card_color(event):
+    """Header colour of an alert's cards, analysis included: its severity,
+    green once recovered."""
+    if str(event.get("event_value", "1")) == "0":
+        return "green"
+    return COLORS.get(str(event.get("severity", "0")), "grey")
 
 
 async def notify(card, event=None, *, analysis_info=None):
@@ -1252,14 +1345,7 @@ async def handle_alert(event):
         budget = None if reused else daily_budget()
         if reused:
             plan = "reuse"
-            url = report_url({"_task_id": reused["task_id"]})
-            info["note"] = (
-                f"近 {reused['hours']} 小时内同一主机、同一触发器已完成 AI 分析"
-                f"（{reused['completed']}），近 24 小时共 {reused['occurrences']} 次告警，"
-                "本次不重复分析。"
-                + (f"[查看该次报告]({url})。" if url else "")
-                + "需要重新分析可点击“AI分析”。"
-            )
+            info["note"] = reuse_note(reused)
         elif budget and budget[0] >= budget[1]:
             plan = "budget"
             info["note"] = (
@@ -1292,6 +1378,9 @@ async def handle_alert(event):
             "diagnosed": False,
             "ai_skipped": True,
             **({"reused_task_id": reused["task_id"]} if reused else {}),
+            **(
+                {"reused_in_progress": True} if reused and reused["in_progress"] else {}
+            ),
             **({"budget_exhausted": True} if plan == "budget" else {}),
         }
     # Analysis runs on its own workers so the next alert's notification never
@@ -1395,10 +1484,87 @@ def task_still_queued(task_id):
     return bool(task) and task["status"] == "queued"
 
 
+def outdated(event, task_id):
+    """Why a queued automatic analysis is no longer worth running, as
+    (error_type, report message), or None.
+
+    AlertRecovered: its alert recovered while it waited, and so did every
+    later alert of the same host and trigger that took it as the analysis in
+    progress (recent_analysis). QueueExpired: it waited longer than
+    queue_limit_hours() (a backlog after an outage); the trigger's next alert
+    is analysed afresh. Either way the alert card stays as it is; a manual
+    "AI分析" still runs.
+    """
+    from .main import beijing_time, connection
+
+    event_id = str(event.get("event_id") or "")
+    host = str(event.get("host_id") or "")
+    trigger = str(event.get("trigger_id") or "")
+    limit = queue_limit_hours()
+    with connection() as db:
+        task = db.execute(
+            "SELECT created_at,(julianday('now')-julianday(created_at))*86400 "
+            "FROM diagnostic_tasks WHERE task_id=?",
+            (task_id,),
+        ).fetchone()
+        if not task:
+            return None
+        recovered = db.execute(
+            "SELECT received_at FROM alert_events WHERE event_id=? AND event_value='0'",
+            (event_id,),
+        ).fetchone()
+        waiting = (
+            recovered
+            and host.isdigit()
+            and trigger.isdigit()
+            and db.execute(
+                "SELECT 1 FROM alert_events p WHERE p.event_value='1' "
+                "AND p.ai_status='reused' AND p.received_at>=? AND p.event_id!=? "
+                "AND json_extract(p.event_json,'$.host_id')=? "
+                "AND json_extract(p.event_json,'$.trigger_id')=? "
+                "AND NOT EXISTS (SELECT 1 FROM alert_events r "
+                "WHERE r.event_id=p.event_id AND r.event_value='0') LIMIT 1",
+                (task[0], event_id, host, trigger),
+            ).fetchone()
+        )
+    manual = "需要时在告警卡片上点「🤖 AI分析」手动分析。"
+    if recovered and not waiting:
+        return (
+            "AlertRecovered",
+            f"告警已于 {beijing_time(recovered[0])} 恢复，排队中的自动分析未执行；"
+            + manual,
+        )
+    if task[1] is not None and task[1] > limit * 3600:
+        return (
+            "QueueExpired",
+            f"自动分析排队 {int(task[1] // 60)} 分钟仍未开始，已超过排队上限 {limit} 小时"
+            "（即“复用同一触发器近期分析”的时长，该项为 0 时按 2 小时），未执行；"
+            + manual,
+        )
+    return None
+
+
 def process_alert_analysis(event, task_id=None):
     if not task_still_queued(task_id):
         update_event(event, ai_status="cancelled")
         return {"event_id": event.get("event_id"), "skipped": True}
+    # Checked as it starts: a backlog (workers down, an alert storm) can hold
+    # an analysis until its alert has recovered or is hours old.
+    reason = outdated(event, task_id) if task_id else None
+    if reason:
+        from .orchestrator import tasks
+
+        tasks.finish(
+            task_id, {"message": reason[1]}, status="cancelled", error_type=reason[0]
+        )
+        update_event(event, ai_status="cancelled")
+        log.info(
+            "ALERT_ANALYSIS_SKIPPED event_id=%s task_id=%s reason=%s",
+            event.get("event_id"),
+            task_id,
+            reason[0],
+        )
+        return {"event_id": event.get("event_id"), "skipped": True, "reason": reason[0]}
     # Rechecked as it starts: analyses that ended while this one waited may
     # have used more than their budget, or the limit was lowered.
     budget = daily_budget(task_id) if task_id else None
@@ -1478,25 +1644,24 @@ async def analyze_on_demand(event, message_id, chat_id=None, task_id=None):
     try:
         result = await analyze(event, task_id)
         store_alert_usage(event, result.get("_token_usage"))
-        # The card shows the conclusion and actions; the full summary is kept
-        # as conversation context so follow-up questions see the analysis.
+        # The card is the automatic analysis card's body (analysis_body), in
+        # the alert's colour; the full summary is kept as conversation
+        # context so follow-up questions see the analysis.
         detail = analysis_summary(result)
-        card = card_summary(result) + "\n\n---\n" + card_note(result)
-        link = report_url(result) or None
+        card = analysis_body(result)
+        color = card_color(event)
         if progress_id:
             try:
-                await update_card(progress_id, "AI 分析结果", card, link=link)
+                await update_card(progress_id, "AI 分析结果", card, color)
             except Exception:
                 log.exception("ALERT_AI_CARD_UPDATE_FAILED event_id=%s", event_id)
                 if chat_id:
                     # The result goes out as a new reply; the stale progress
                     # card is no longer the one being analysed.
                     clear_pending(chat_id, progress_id)
-                progress_id = await reply_card(
-                    message_id, "AI 分析结果", card, link=link
-                )
+                progress_id = await reply_card(message_id, "AI 分析结果", card, color)
         else:
-            progress_id = await reply_card(message_id, "AI 分析结果", card, link=link)
+            progress_id = await reply_card(message_id, "AI 分析结果", card, color)
         try:
             # A Feishu GET /im/v1/messages/{id} may return 400 even when
             # reply and PATCH succeed. Use the verified delivery link instead.

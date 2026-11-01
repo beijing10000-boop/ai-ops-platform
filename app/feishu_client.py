@@ -3,14 +3,26 @@
 import json
 import httpx
 from .main import read_setting
-from .feishu_cards import MessageID, message_ids, split_card
+from .feishu_cards import CardBody, MessageID, message_ids, split_card
 
 ROOT = "https://open.feishu.cn/open-apis"
 
 
 def make_card(title, text, template="blue", link=None):
     """Render the line carrying token consumption as a separated muted footer,
-    not body copy; ``link`` adds a 查看完整诊断报告 button under the body."""
+    not body copy; ``link`` adds a 查看完整诊断报告 button under the body.
+
+    A CardBody (the "AI 分析结果" body, worker.analysis_body) brings its own
+    elements, button and footer included, and is sent as it is."""
+    if isinstance(text, CardBody):
+        return {
+            "config": {"wide_screen_mode": True, "update_multi": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": title},
+                "template": template,
+            },
+            "elements": list(text.elements),
+        }
     body = str(text)
     token_line = None
     separator = "\n\n---\n"
