@@ -60,6 +60,28 @@ jobs:
           path: |
             docs/UI-TEST-RESULTS.json
             docs/screenshots/
+  joint:
+    # The platform's own MCP clients against the real SSH MCP service from its
+    # repository (catalog, grants, target resolution, failure shapes). The log
+    # platform's repository is private: its CI runs the log half of tests/joint.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: beijing10000-boop/ssh-mcp-server
+          ref: main
+          path: providers/ssh-mcp-server
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m venv /tmp/ssh-mcp && /tmp/ssh-mcp/bin/pip install -r providers/ssh-mcp-server/requirements.txt
+      - run: python -m pytest -q -rs tests/joint
+        env:
+          AIOPS_JOINT_SSH_MCP_REPO: providers/ssh-mcp-server
+          AIOPS_JOINT_SSH_MCP_PYTHON: /tmp/ssh-mcp/bin/python
   container:
     runs-on: ubuntu-24.04
     steps:
