@@ -644,3 +644,30 @@ def test_an_authenticated_request_reads_the_database_once(monkeypatch):
         cookies={}, headers={"authorization": "Bearer test-admin"}, method="GET"
     )
     assert feishu_auth.authenticate(legacy)["permissions"] == ["*"]
+
+
+# OPS-WEB-06: builds resolve the same major; zoneinfo's data is declared.
+
+
+def test_dependencies_stay_within_one_major_and_declare_tzdata():
+    """An image build takes the newest version a range allows, so a range over
+    two majors (rq and openai allowed 1.x and 2.x) lets builds differ; the
+    v1.5.0 image resolved rq 2.12.0 and openai 2.54.0. zoneinfo needs tzdata
+    in the slim image, where it came only through rq -> croniter -> dateutil."""
+    from pathlib import Path
+
+    text = (Path(__file__).parent.parent / "requirements.txt").read_text("utf-8")
+    ranges = {}
+    for line in text.splitlines():
+        line = line.split("#")[0].strip()
+        if line:
+            name, low, high = re.fullmatch(
+                r"([A-Za-z0-9_.-]+)(?:\[[^\]]+\])?>=([\d.]+)(?:,<(\d+))?", line
+            ).groups()
+            ranges[name.lower()] = (int(low.split(".")[0]), high and int(high))
+    # Calendar-versioned time-zone data: a newer release only updates rules.
+    assert ranges.pop("tzdata") == (2024, None)
+    assert ranges["rq"] == ranges["openai"] == (2, 3)
+    assert {
+        name: (low, high) for name, (low, high) in ranges.items() if high != low + 1
+    } == {}
