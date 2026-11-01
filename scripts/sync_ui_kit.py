@@ -36,7 +36,9 @@ def manifest(source):
     match = re.search(r"ui-kit (\d+\.\d+\.\d+)", (source / FILES[0]).read_text("utf-8"))
     if not match:
         raise SystemExit("ui-kit.css 头部缺少版本号（ui-kit x.y.z）")
-    lines = [f"# ui-kit {match[1]} — identical in the three consoles; see scripts/sync_ui_kit.py"]
+    lines = [
+        f"# ui-kit {match[1]} — identical in the three consoles; see scripts/sync_ui_kit.py"
+    ]
     lines += [f"{digest(source / name)}  {name}" for name in FILES]
     return "\n".join(lines) + "\n"
 
