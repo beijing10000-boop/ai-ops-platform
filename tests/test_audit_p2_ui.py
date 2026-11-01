@@ -3,7 +3,8 @@
 OPS-FE-04 cancelling a task and lifting a mute ask first, OPS-FE-05 the log
 MCP in the diagnostic tools, OPS-FE-06 muting from an alert row, OPS-FE-25
 collapsible report blocks across the polling refresh, OPS-FE-13 error and
-success feedback. The console scripts run in node with a stub DOM.
+success feedback, OPS-FE-08 framing and content policy headers. The console
+scripts run in node with a stub DOM.
 """
 
 import json
@@ -13,11 +14,13 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 from app import main
 from test_platform import client_for
 
-ASSETS = Path(__file__).resolve().parents[1] / "web" / "assets"
+WEB = Path(__file__).resolve().parents[1] / "web"
+ASSETS = WEB / "assets"
 NODE = shutil.which("node")
 
 
@@ -456,3 +459,65 @@ def test_every_failure_toast_is_an_error():
         calls = re.findall(r"toast\(([^;]*?\.message[^;]*)\);", source)
         assert calls, name
         assert all(call.endswith('"error"') for call in calls), (name, calls)
+
+
+# --- OPS-FE-08: nothing frames the console; its pages get a strict policy ------------
+
+STRICT = (
+    "default-src 'self'; base-uri 'none'; form-action 'self'; "
+    "frame-ancestors 'none'; object-src 'none'"
+)
+
+
+def test_every_response_refuses_framing_and_console_pages_are_strict():
+    client = TestClient(main.app)
+    for path, status in (
+        ("/", 200),
+        ("/setup", 200),
+        ("/assets/app.js", 200),
+        ("/assets/favicon.svg", 200),
+        ("/healthz", 200),
+        ("/api/v1/setup/status", 200),
+        ("/api/v1/platform/tasks", 401),
+        ("/no-such-page", 404),
+    ):
+        response = client.get(path)
+        assert response.status_code == status, path
+        assert response.headers["x-frame-options"] == "DENY", path
+        assert response.headers["content-security-policy"] == STRICT, path
+    # FastAPI's API docs keep their inline scripts and CDN assets: framing only.
+    for path in ("/docs", "/redoc"):
+        response = client.get(path)
+        assert response.status_code == 200, path
+        assert response.headers["x-frame-options"] == "DENY", path
+        assert response.headers["content-security-policy"] == (
+            "frame-ancestors 'none'"
+        ), path
+
+
+def test_the_console_needs_nothing_the_strict_policy_blocks():
+    """default-src 'self' refuses inline scripts, event handler attributes,
+    inline styles, eval and other origins: the pages and scripts use none."""
+    pages, scripts = sorted(WEB.glob("*.html")), sorted(ASSETS.glob("*.js"))
+    styles = sorted(ASSETS.glob("*.css"))
+    assert [page.name for page in pages] == ["index.html", "setup.html"]
+    assert scripts and styles
+    for page in pages:
+        html = page.read_text(encoding="utf-8")
+        assert not re.search(r"<script(?![^>]*\ssrc=)[^>]*>", html), page.name
+        assert not re.search(r"<style|\sstyle=|\son[a-z]+=|javascript:", html, re.I)
+        for url in re.findall(r'\s(?:src|href)="([^"]*)"', html):
+            assert url.startswith(("/", "#")) and not url.startswith("//"), url
+    for script in scripts:
+        source = script.read_text(encoding="utf-8")
+        # Markup built by the scripts carries no handler or style attribute.
+        assert not re.search(r"""\son[a-z]+=["'\\$]|\sstyle=["'\\$]""", source), (
+            script.name
+        )
+        assert not re.search(
+            r"""\beval\(|new Function\(|set(?:Timeout|Interval)\(\s*["'`]|javascript:""",
+            source,
+        ), script.name
+    for style in styles:
+        css = style.read_text(encoding="utf-8")
+        assert "@import" not in css and "url(" not in css, style.name
