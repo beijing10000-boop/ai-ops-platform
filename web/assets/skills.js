@@ -131,7 +131,7 @@ document.addEventListener("click", async event => {
       const [row, list] = await Promise.all([api(P + "/skills/" + id), api(P + "/skills")]);
       const warnings = skillChangeWarnings(row, {enabled: !row.enabled, scopes: row.scopes}, list.items);
       if (!await confirmedSkillSave(row.name, warnings, extra => api(P + "/skills/" + id, "PUT", {enabled: !row.enabled, ...extra}))) return;
-      await navigate(); toast(row.enabled ? "Skill 已停用，新任务将使用当前配置" : "Skill 已启用，新任务将按查询指引执行");
+      await navigate(); toast(row.enabled ? "Skill 已停用，新任务将使用当前配置" : "Skill 已启用，新任务将按查询指引执行", "success");
     } else if (action === "skill-delete") {
       const [row, list] = await Promise.all([api(P + "/skills/" + id), api(P + "/skills")]);
       if (!await confirmedSkillDelete(row, list.items, extra => api(P + "/skills/" + id + (extra.confirm ? "?confirm=true" : ""), "DELETE"))) return;
@@ -140,7 +140,7 @@ document.addEventListener("click", async event => {
     if (feedback) feedback.hidden = false;
   } catch (error) {
     if (feedback) { feedback.hidden = false; feedback.textContent = error.message; feedback.dataset.result = "error"; }
-    else toast(error.message);
+    else toast(error.message, "error");
   } finally { button.disabled = false; }
 });
 
@@ -162,7 +162,7 @@ document.addEventListener("submit", async event => {
       saved = await confirmedSkillSave(row.name, skillChangeWarnings(row, values, list.items), extra => api(P + "/skills/" + form.dataset.id, "PUT", {...values, ...extra}));
     }
     if (!saved) return;
-    OpsUI.saved(form); await navigate(); toast("Skill 已保存，后续新任务使用当前启用配置");
+    OpsUI.saved(form); await navigate(); toast("Skill 已保存，后续新任务使用当前启用配置", "success");
   } catch (error) { feedback.textContent = error.message; feedback.dataset.result = "error"; }
   finally { button.disabled = false; }
 });
