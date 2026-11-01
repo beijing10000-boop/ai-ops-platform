@@ -26,12 +26,12 @@ function skillChangeWarnings(row, values, items) {
 // it is confirmed, which also catches a list changed by someone else meanwhile.
 // Returns false when the admin cancels.
 async function confirmedSkillSave(name, warnings, send) {
-  if (warnings.length && !window.confirm(`保存对 ${name} 的修改？\n${warnings.map(text => "· " + text).join("\n")}`)) return false;
+  if (warnings.length && !(await UIKit.confirm({title: `保存对 ${name} 的修改？`, message: warnings.map(text => "· " + text).join("\n"), confirmText: "仍要保存", danger: true}))) return false;
   try {
     await send(warnings.length ? {confirm: true} : {});
   } catch (error) {
     if (error.status !== 409 || error.detail?.code !== "skill_scopes_uncovered") throw error;
-    if (!window.confirm(error.message + "。仍要保存？")) return false;
+    if (!(await UIKit.confirm({title: `保存对 ${name} 的修改？`, message: error.message + "。", confirmText: "仍要保存", danger: true}))) return false;
     await send({confirm: true});
   }
   return true;
@@ -117,7 +117,7 @@ document.addEventListener("click", async event => {
       if (!await confirmedSkillSave(row.name, warnings, extra => api(P + "/skills/" + id, "PUT", {enabled: !row.enabled, ...extra}))) return;
       await navigate(); toast(row.enabled ? "Skill 已停用，新任务将使用当前配置" : "Skill 已启用，新任务将按查询指引执行");
     } else if (action === "skill-delete") {
-      if (!window.confirm("删除此 Skill？历史任务保留已加载的版本。")) return;
+      if (!(await UIKit.confirm({title: "删除此 Skill？", message: "历史任务保留已加载的版本。", confirmText: "删除", danger: true}))) return;
       await api(P + "/skills/" + id, "DELETE"); OpsUI.saved(form); go("skills");
     }
     if (feedback) feedback.hidden = false;
