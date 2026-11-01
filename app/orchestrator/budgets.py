@@ -8,7 +8,9 @@ from fastapi import HTTPException
 PROFILES = {
     "quick": {
         "rounds": 3,
-        "calls": 8,
+        # An alert's stage A/B take 4–5 calls before any history or SSH; with
+        # 8 (3 kept for the model) the alert window was never prefetched.
+        "calls": 10,
         "per_round": 4,
         "result_chars": 2500,
         "seconds": 90,

@@ -815,7 +815,10 @@ def test_malformed_skill_call_is_reported_and_remaining_calls_continue(rig):
         )
     )
     task = tasks.get(usage["task_id"])
-    assert task["status"] == "partial" and task["tools"] == 1
+    # The model's own malformed call goes back to it as an error; it is not
+    # evidence the task failed to collect, so the task is not partial.
+    assert task["status"] == "success" and task["tools"] == 1
+    assert not task["report"]["limitations"]
     outputs = [
         part
         for part in create.call_args.kwargs["input"]

@@ -856,19 +856,45 @@ def test_java_restart_alert_inspects_jvm_parameters_and_the_units_history(
             "ssh_diagnose_java": {
                 "status": "success",
                 "summary": {
+                    # SSH MCP v0.8.0 rows: main is one string, heap holds the
+                    # start options only; MiB figures are in the findings.
                     "processes": [
                         {
                             "pid": 5150,
                             "application": "billing-api",
                             "elapsed_seconds": 120,
-                            "heap": {"xmx": "8g", "xmx_MiB": 8192},
+                            "main": "billing-api.jar",
+                            "jar_path": "/opt/billing-api/billing-api.jar",
+                            "heap": {
+                                "xms": None,
+                                "xmx": "8g",
+                                "xss": None,
+                                "max_ram_percentage": None,
+                                "max_metaspace": None,
+                                "max_direct": None,
+                            },
                             "cgroup_memory_limit_bytes": 6442450944,
                         }
                     ]
                 },
                 "findings": [
-                    finding("heap_exceeds_cgroup", "8192 MiB > 6144 MiB"),
-                    finding("recent_start", 120),
+                    finding(
+                        "heap_exceeds_cgroup",
+                        {
+                            "pid": 5150,
+                            "application": "billing-api",
+                            "xmx_MiB": 8192.0,
+                            "cgroup_limit_MiB": 6144.0,
+                        },
+                    ),
+                    finding(
+                        "recent_start",
+                        {
+                            "pid": 5150,
+                            "application": "billing-api",
+                            "elapsed_seconds": 120,
+                        },
+                    ),
                 ],
             },
             "ssh_diagnose_service_detail": {

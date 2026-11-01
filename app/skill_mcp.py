@@ -63,6 +63,9 @@ COLLECTABLE = frozenset(
         "kernel",
         "log_errors",
         "oom",
+        # Bundled only with the unit name (SERVICE_STEPS in skill_runtime).
+        "service",
+        "logs",
     }
 )
 # Tool lists and the token's authorized catalog per MCP configuration, shared
@@ -106,6 +109,12 @@ def _cache_key(provider, configuration):
     return hashlib.sha256(material.encode()).hexdigest()
 
 
+class RequestRejected(ValueError):
+    """The call itself was invalid (unknown tool, arguments outside the
+    schema, a target not resolved first): the model can correct it, and it
+    is not evidence the task failed to collect."""
+
+
 def root_cause(exc):
     """The single exception an anyio task group wrapped, for a readable reason."""
     while isinstance(exc, BaseExceptionGroup) and len(exc.exceptions) == 1:
@@ -135,6 +144,23 @@ def payload(response, source="SSH MCP"):
     if not isinstance(data, (dict, list)) or len(json.dumps(data)) > 1_000_000:
         raise ValueError(source + " 返回格式或长度无效")
     return data
+
+
+def bounds(spec):
+    """(minimum, maximum) of a schema property; an optional integer keeps them
+    inside its anyOf branch."""
+    for part in (spec, *(spec.get("anyOf") or [])):
+        if isinstance(part, dict) and ("minimum" in part or "maximum" in part):
+            return part.get("minimum"), part.get("maximum")
+    return None, None
+
+
+def validated(name, args, schema):
+    """The remote schema's verdict on the model's arguments."""
+    try:
+        zabbix.validate_remote_schema(name, args, schema)
+    except ValueError as exc:
+        raise RequestRejected(str(exc)) from None
 
 
 def reply(data, source):
@@ -182,7 +208,7 @@ class SkillMCP:
 
     def check(self, provider):
         if provider not in self.providers:
-            raise ValueError("该 Skill 未获准使用此 MCP 服务")
+            raise RequestRejected("该 Skill 未获准使用此 MCP 服务")
         if self.config(provider) != self.configuration[provider]:
             raise ValueError("MCP 配置已变更，请创建新任务")
         if time.monotonic() >= self.deadline:
@@ -519,9 +545,11 @@ class SkillMCP:
             or provider == "zabbix_mcp"
             and name not in zabbix.enabled_names(self.read_setting)
         ):
-            raise ValueError("工具不在当前授权的只读目录中；请检查服务版本与工具授权")
+            raise RequestRejected(
+                "工具不在当前授权的只读目录中；请检查服务版本与工具授权"
+            )
         if not isinstance(arguments, dict) or len(json.dumps(arguments)) > 12000:
-            raise ValueError("工具参数无效")
+            raise RequestRejected("工具参数无效")
         args = dict(arguments)
         session, tool = self.sessions[provider], tools[name]
         async with asyncio.timeout(max(0.1, self.deadline - time.monotonic())):
@@ -530,7 +558,7 @@ class SkillMCP:
                     not args.get("itemids")
                     or any(str(x) not in self.item_scope for x in args["itemids"])
                 ):
-                    raise ValueError("历史查询须先通过 item_get 核验监控项 ID")
+                    raise RequestRejected("历史查询须先通过 item_get 核验监控项 ID")
                 response = await zabbix.call(
                     session,
                     name,
@@ -555,8 +583,8 @@ class SkillMCP:
                 # Any in-scope source may be read (an Nginx upstream on another
                 # host); the log platform applies the token's tools and groups.
                 if set(args) - set(tool.inputSchema.get("properties", {})):
-                    raise ValueError("日志工具参数不在实际 Schema 中")
-                zabbix.validate_remote_schema(name, args, tool.inputSchema)
+                    raise RequestRejected("日志工具参数不在实际 Schema 中")
+                validated(name, args, tool.inputSchema)
                 response = await asyncio.wait_for(
                     session.call_tool(name, args), timeout=log_mcp.TIMEOUT
                 )
@@ -573,14 +601,14 @@ class SkillMCP:
                 ident = args.get("host_id")
                 binding = self.bindings.get(ident) if type(ident) is int else None
                 if not binding:
-                    raise ValueError(
+                    raise RequestRejected(
                         "先从 SSH MCP 精确解析授权资产及 revision；当前目标未核验（旧版 SSH 服务请升级）"
                     )
                 if (
                     args.get("expected_revision", binding["revision"])
                     != binding["revision"]
                 ):
-                    raise ValueError("SSH 资产 revision 不匹配")
+                    raise RequestRejected("SSH 资产 revision 不匹配")
                 args["expected_revision"] = binding["revision"]
                 self.target_metadata = {
                     "ssh_host_id": ident,
@@ -589,14 +617,23 @@ class SkillMCP:
                     "host_id": binding.get("zabbix_hostid"),
                     "device_type": "linux",
                 }
-            if set(args) - set(tool.inputSchema.get("properties", {})):
-                raise ValueError("SSH 工具参数不在实际 Schema 中")
-            zabbix.validate_remote_schema(name, args, tool.inputSchema)
+            properties = tool.inputSchema.get("properties", {})
+            if set(args) - set(properties):
+                raise RequestRejected("SSH 工具参数不在实际 Schema 中")
+            timeout = min(120, int(self.read_setting("ssh_mcp_timeout_seconds") or 90))
+            budget = properties.get("timeout_seconds")
+            if isinstance(budget, dict) and "timeout_seconds" not in args:
+                # A service that takes a time budget answers with what it
+                # finished inside it, before this call's own timeout ends,
+                # instead of losing the slow host's partial evidence.
+                seconds = min(timeout, self.deadline - time.monotonic()) - 10
+                low, high = bounds(budget)
+                low = 1 if low is None else low
+                high = seconds if high is None else high
+                args["timeout_seconds"] = int(max(low, min(high, seconds)))
+            validated(name, args, tool.inputSchema)
             response = await asyncio.wait_for(
-                session.call_tool(name, args),
-                timeout=min(
-                    120, int(self.read_setting("ssh_mcp_timeout_seconds") or 90)
-                ),
+                session.call_tool(name, args), timeout=timeout
             )
             if response.isError:
                 return {

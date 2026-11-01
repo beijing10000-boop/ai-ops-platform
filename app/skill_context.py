@@ -14,6 +14,21 @@ from zoneinfo import ZoneInfo
 
 BEIJING = ZoneInfo("Asia/Shanghai")
 FRESH_SECONDS = 600
+# Alert types for which "are the host's items still being collected" separates
+# a dead host from a stopped agent; a CPU or disk alert is not about the agent.
+AVAILABILITY_TYPES = {"unreachable"}
+# Items that hold a state, not a level: 0/1 (icmpping, agent.ping, port and
+# service checks) or a status code (zabbix[host,agent,available] 0/1/2,
+# net.if.status 1 up / 2 down, Windows service.info 0 running / 6 stopped).
+# When the state changed says what an average or a ratio cannot.
+STATE_KEYS = re.compile(
+    r"^(icmpping|agent\.ping|net\.tcp\.service|net\.tcp\.port|net\.udp\.service"
+    r"|net\.if\.status|ifOperStatus|service\.info)(\[|$)"
+    r"|^zabbix\[host,[a-z]+,available\]"
+)
+# Counters that only grow until a restart: neither a ratio to the baseline nor
+# "the same level before and after the alert" says anything about them.
+MONOTONIC_KEYS = re.compile(r"^system\.(hw\.|net\.)?uptime|^system\.boottime")
 
 # A schema cut mid-JSON cannot be called correctly; discovery gets its own budget
 # and drops whole tools instead (four Zabbix schemas are roughly 14k characters).
@@ -46,6 +61,7 @@ SSH_LIST_KEYS = (
     "top_clients",
     "top_upstreams",
     "xx_flags",
+    "findings",
 )
 # Inventories of objects (processes, units, sockets) whose rows may lose their
 # bulkiest fields before any row is dropped. Log and sample lists are not
@@ -53,7 +69,8 @@ SSH_LIST_KEYS = (
 WIDE_ROW_LISTS = ("processes", "top_processes", "units", "listening", "listeners")
 # Never dropped from such rows: what identifies the object and, for a JVM,
 # what it runs, its heap limits and its resident memory (a memory alert is
-# answered by RSS against -Xmx; ps fields are otherwise the first to go).
+# answered by RSS against -Xmx; ps fields are otherwise the first to go), and
+# an Nginx process's role (master or worker).
 ROW_KEPT = {
     "pid",
     "name",
@@ -64,7 +81,19 @@ ROW_KEPT = {
     "main",
     "heap",
     "rss_KiB",
+    "role",
 }
+# Row fields that show a process holds CPU or memory: ps rows carry
+# cpu_percent and memory_percent, Java rows mem_percent, inventories rss_KiB
+# (kernel threads hold none). SSH MCP reports the last second's CPU in the
+# summary's own `cpu_interval` list, matched by pid; a row carrying one counts.
+BUSY_FIELDS = (
+    "cpu_percent",
+    "cpu_interval",
+    "memory_percent",
+    "mem_percent",
+    "rss_KiB",
+)
 # Rows at or below this average size are lean; past it rows are cut instead.
 ROW_CHARS = 160
 # Log tool replies are ranked lists (error templates, routes, exceptions) and
@@ -84,33 +113,48 @@ def _positive(value):
 def trimmed_processes(outcome):
     """Keep the first busy process rows; idle kernel threads at 0 % are noise.
 
-    The SSH service already orders rows by the metric in question, and the
-    full list stays in the stored evidence.
+    A row is busy when it uses CPU (over its lifetime or, per the summary's
+    `cpu_interval`, the last second) or memory; an Nginx master is kept
+    whatever it uses. The SSH service already orders rows by the metric in
+    question, and the full list stays in the stored evidence.
     """
     data = outcome.get("data") if isinstance(outcome, dict) else None
     summary = data.get("summary") if isinstance(data, dict) else None
     rows = summary.get("processes") if isinstance(summary, dict) else None
     if not isinstance(rows, list) or len(rows) <= PROCESS_ROWS:
         return outcome
+    sampled = {
+        sample["pid"]
+        for sample in summary.get("cpu_interval") or []
+        if isinstance(sample, dict)
+        and sample.get("pid") is not None
+        and _positive(sample.get("cpu_percent_1s"))
+    }
     busy = [
-        row
-        for row in rows
+        index
+        for index, row in enumerate(rows)
         if not isinstance(row, dict)
-        or any(
-            _positive(row.get(key))
-            for key in ("cpu_interval", "cpu_percent", "memory_percent")
-        )
+        or row.get("pid") in sampled
+        or any(_positive(row.get(key)) for key in BUSY_FIELDS)
     ][:PROCESS_ROWS]
+    masters = {
+        index
+        for index, row in enumerate(rows)
+        if isinstance(row, dict) and row.get("role") == "master"
+    }
+    shown = [rows[index] for index in sorted(set(busy) | masters)]
     return {
         **outcome,
         "data": {
             **data,
             "summary": {
                 **summary,
-                "processes": busy,
-                "processes_shown": len(busy),
+                "processes": shown,
+                "processes_shown": len(shown),
                 "processes_total": len(rows),
-                "processes_note": f"仅展示前 {len(busy)} 个有占用的进程（共 {len(rows)} 个）；完整列表在任务证据中",
+                "processes_note": f"仅展示前 {len(busy)} 个有占用的进程"
+                + ("及 master 进程" if len(shown) > len(busy) else "")
+                + f"（共 {len(rows)} 个）；完整列表在任务证据中",
             },
         },
     }
@@ -230,8 +274,61 @@ def _slim_rows(view, max_chars):
     return _noted(view, emptied, dropped)
 
 
+def _merged(findings):
+    """Findings that differ only in their value become one entry with a
+    `count` and every `values` item; the shared hint and threshold stay once."""
+    groups, order = {}, []
+    for finding in findings:
+        if not isinstance(finding, dict) or "value" not in finding:
+            order.append([finding])
+            continue
+        shared = json.dumps(
+            {k: v for k, v in finding.items() if k != "value"},
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        if shared not in groups:
+            groups[shared] = []
+            order.append(groups[shared])
+        groups[shared].append(finding)
+    result = []
+    for group in order:
+        if len(group) == 1:
+            result.append(group[0])
+            continue
+        entry = {}
+        for key, item in group[0].items():
+            if key == "value":
+                entry["count"] = len(group)
+                entry["values"] = [finding["value"] for finding in group]
+            else:
+                entry[key] = item
+        result.append(entry)
+    return result
+
+
+def _merge_findings(value):
+    """Copy of ``value`` whose findings lists carry each repeated finding once.
+
+    SSH MCP writes a finding per process (heap_max_unset for every JVM started
+    without -Xmx), each with the same long hint: thirteen of them left room
+    for one process row in a 4000-character view.
+    """
+    if isinstance(value, dict):
+        return {
+            key: _merged(item)
+            if key == "findings" and isinstance(item, list)
+            else _merge_findings(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_merge_findings(x) for x in value]
+    return value
+
+
 def ssh_view(outcome, max_chars):
-    """SSH results keep their structure: drop raw text, then shorten lists.
+    """SSH results keep their structure: drop raw text, merge repeated
+    findings, slim wide rows, then shorten lists.
 
     A JSON document cut in the middle cannot be cited; the model gets whole
     findings/summary objects with shortened lists and an ``_omitted`` count.
@@ -248,6 +345,9 @@ def ssh_view(outcome, max_chars):
         view["data"]["output_note"] = "原文已省略，完整内容在任务证据中"
         if _fits(view, max_chars):
             return view
+    view = _merge_findings(view)
+    if _fits(view, max_chars):
+        return view
     view = _slim_rows(view, max_chars)
     if _fits(view, max_chars):
         return view
@@ -500,8 +600,75 @@ def _zabbix_signal(evidence_id, metric, value, hint, level="warning"):
     }
 
 
-def _history_signals(collected, event_clock):
-    """Alert window versus 7-day baseline and before/after the alert moment."""
+def _state(raw):
+    """A state item's value as a number (1, 0, 2), or None."""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not isfinite(value):
+        return None
+    return int(value) if value.is_integer() else value
+
+
+def _state_signal(evidence_id, ident, key, rows, event_clock):
+    """When an availability or status item changed state in the window."""
+    points = sorted(
+        (clock, value)
+        for clock, value in ((_clock(row), _state(row.get("value"))) for row in rows)
+        if clock is not None and value is not None
+    )
+    if len(points) < 2:
+        return None
+    changes = [
+        (clock, old, new)
+        for (_, old), (clock, new) in zip(points, points[1:])
+        if new != old
+    ]
+    last_clock, last = points[-1]
+    value = {
+        "itemid": ident,
+        "key": key,
+        "changes": len(changes),
+        "latest": last,
+        "latest_at": _local(last_clock),
+    }
+    # agent.ping reports 1 or nothing: no value after the alert is the outage.
+    silent = (
+        "；告警时刻之后没有新数据（只在可用时上报的监控项如 agent.ping，断数即不可用）"
+        if event_clock and last_clock < event_clock
+        else ""
+    )
+    if not changes:
+        hint = f"监控项 {key}（{ident}）在查询窗口内的值一直为 {last}" + (
+            silent or "，状态没有变化"
+        )
+    else:
+        clock, old, new = changes[-1]
+        value["last_change"] = {"from": old, "to": new, "local_time": _local(clock)}
+        hint = (
+            f"监控项 {key}（{ident}）窗口内状态变化 {len(changes)} 次，最近一次在 "
+            f"{_local(clock)} 由 {old} 变为 {new}"
+            + (f"（告警时刻 {_local(event_clock)}）" if event_clock else "")
+            + "：以状态变化的时刻判断故障开始与恢复，不按均值或倍数解读"
+            + silent
+        )
+    return _zabbix_signal(evidence_id, "state_change", value, hint, level="info")
+
+
+# Added to a fall's hint: for these items a fall is the anomaly.
+LOWER_IS_WORSE = "；对空闲率、可用内存、剩余空间、可用性这类越低越差的指标意味着恶化"
+
+
+def _history_signals(collected, event_clock, keys=None):
+    """Alert window versus 7-day baseline and before/after the alert moment.
+
+    Both directions count: a fall in idle CPU, available memory or free space
+    is the anomaly, not a sign that all is normal. State items (`keys` maps
+    item ids to keys) report when their state changed; counters that only
+    grow (uptime) are left out.
+    """
+    keys = keys or {}
     signals = []
     history = {}
     trend = {}
@@ -518,6 +685,15 @@ def _history_signals(collected, event_clock):
                 series[ident]["rows"].append(row)
     for ident, item in history.items():
         rows = item["rows"]
+        key = keys.get(ident, "")
+        if MONOTONIC_KEYS.match(key):
+            continue
+        if STATE_KEYS.match(key):
+            signal = _state_signal(item["evidence_id"], ident, key, rows, event_clock)
+            if signal:
+                signals.append(signal)
+            continue
+        label = f"{key}（{ident}）" if key else ident
         window = _numbers(rows, ("value",)).get("value")
         if not window or window["numeric_count"] < 3:
             continue
@@ -538,17 +714,27 @@ def _history_signals(collected, event_clock):
                         item["evidence_id"],
                         "alert_vs_baseline",
                         value,
-                        f"监控项 {ident} 告警窗口均值是近 7 天小时均值的 {ratio:.1f} 倍：属于突发升高而非常态",
+                        f"监控项 {label} 告警窗口均值是近 7 天小时均值的 {ratio:.1f} 倍：属于突发升高而非常态",
                     )
                 )
-            elif ratio <= 1.1:
+            elif 0.9 <= ratio <= 1.1:
                 signals.append(
                     _zabbix_signal(
                         item["evidence_id"],
                         "alert_vs_baseline",
                         value,
-                        f"监控项 {ident} 告警窗口均值与近 7 天基线接近（{ratio:.2f} 倍）：长期处于该水平，更可能是容量或阈值问题",
+                        f"监控项 {label} 告警窗口均值与近 7 天基线接近（{ratio:.2f} 倍）：长期处于该水平，更可能是容量或阈值问题",
                         level="info",
+                    )
+                )
+            elif 0 <= ratio <= 0.67:
+                signals.append(
+                    _zabbix_signal(
+                        item["evidence_id"],
+                        "drop_vs_baseline",
+                        value,
+                        f"监控项 {label} 告警窗口均值只有近 7 天小时均值的 {ratio:.2f} 倍：明显低于常态"
+                        + LOWER_IS_WORSE,
                     )
                 )
         if event_clock:
@@ -559,28 +745,51 @@ def _history_signals(collected, event_clock):
                 [r for r in rows if (_clock(r) or 0) >= event_clock], "value"
             )
             if before and after and before["count"] >= 2 and after["count"] >= 2:
+                low, high = before["avg"], after["avg"]
                 value = {
                     "itemid": ident,
-                    "before_avg": round(before["avg"], 4),
-                    "after_avg": round(after["avg"], 4),
+                    "before_avg": round(low, 4),
+                    "after_avg": round(high, 4),
                 }
-                if before["avg"] > 0 and after["avg"] / before["avg"] >= 1.5:
+                # The multiple the hint states, so a quote of it can be checked.
+                ratio = {"ratio": round(high / low, 2)} if low > 0 else {}
+                if (low > 0 and high / low >= 1.5) or low == 0 < high:
                     signals.append(
                         _zabbix_signal(
                             item["evidence_id"],
                             "rise_at_alert",
-                            value,
-                            f"监控项 {ident} 告警后均值是告警前的 {after['avg'] / before['avg']:.1f} 倍：异常在告警时刻附近开始",
+                            {**value, **ratio},
+                            f"监控项 {label} "
+                            + (
+                                f"告警后均值是告警前的 {high / low:.1f} 倍"
+                                if low
+                                else f"告警前均值为 0，告警后升至 {value['after_avg']}"
+                            )
+                            + "：异常在告警时刻附近开始",
                             level="info",
                         )
                     )
-                elif before["max"] > 0 and before["avg"] >= 0.9 * after["avg"]:
+                elif low > 0 and 0 <= high / low <= 0.67:
+                    signals.append(
+                        _zabbix_signal(
+                            item["evidence_id"],
+                            "drop_at_alert",
+                            {**value, **ratio},
+                            f"监控项 {label} 告警后均值降为告警前的 {high / low:.2f} 倍：变化在告警时刻附近开始"
+                            + LOWER_IS_WORSE,
+                            level="info",
+                        )
+                    )
+                elif 0 < max(abs(low), abs(high)) and abs(high - low) <= 0.1 * max(
+                    abs(low), abs(high)
+                ):
                     signals.append(
                         _zabbix_signal(
                             item["evidence_id"],
                             "elevated_before_alert",
                             value,
-                            f"监控项 {ident} 告警前 30 分钟已处于相近水平：问题早于告警时刻出现，触发只是跨过阈值",
+                            f"监控项 {label} 告警前后 30 分钟均值相近：该指标在告警前已处于同一水平；"
+                            "若它是告警指标，说明问题早于告警时刻出现，触发只是跨过阈值",
                             level="info",
                         )
                     )
@@ -665,23 +874,33 @@ def _log_signals(collected):
     return signals
 
 
-def derive_signals(collected, event_clock=None):
+def derive_signals(collected, event_clock=None, diagnostic_type=None):
     """Deterministic cross-checks over prefetched evidence for the model.
 
     `collected` holds (provider, tool, raw outcome, evidence id). Uses the raw
     outcome, not the size-limited view, so trimmed rows still count.
+    `diagnostic_type` limits the collection-freshness check to availability
+    alerts; without it (None) every task gets it.
     """
-    signals, latest = [], {}
-    clocks, clock_evidence = [], None
+    signals, latest, keys = [], {}, {}
+    clocks, clock_evidence = {}, None
     for provider, tool, outcome, evidence_id in collected:
         if not isinstance(outcome, dict):
             continue
         if tool == "item_get":
             for row in outcome.get("records") or []:
-                if isinstance(row, dict) and row.get("key_"):
+                if not isinstance(row, dict):
+                    continue
+                if row.get("key_"):
                     latest[row["key_"]] = (row.get("lastvalue"), evidence_id)
-                if isinstance(row, dict) and str(row.get("lastclock", "")).isdigit():
-                    clocks.append(int(row["lastclock"]))
+                    if row.get("itemid") is not None:
+                        keys[str(row["itemid"])] = str(row["key_"])
+                stamp = str(row.get("lastclock", ""))
+                # lastclock 0: never collected (not supported, or just created).
+                if stamp.isdigit() and int(stamp) > 0:
+                    # An item that several item_get calls returned counts once.
+                    item = row.get("itemid") or row.get("key_") or f"#{len(clocks)}"
+                    clocks[str(item)] = int(stamp)
                     clock_evidence = clock_evidence or evidence_id
         elif provider == "ssh_mcp" and isinstance(outcome.get("data"), dict):
             for finding in outcome["data"].get("findings") or []:
@@ -714,24 +933,40 @@ def derive_signals(collected, event_clock=None):
     # Whether the host's items are still being collected: for "agent not
     # available" alerts this separates a dead host from a stopped agent, and
     # SSH is not an option on Windows or network devices.
-    if len(clocks) >= 3:
+    if len(clocks) >= 3 and (
+        diagnostic_type is None or diagnostic_type in AVAILABILITY_TYPES
+    ):
         now = int(time.time())
-        fresh = sum(1 for clock in clocks if now - clock <= FRESH_SECONDS)
-        newest = datetime.fromtimestamp(max(clocks), BEIJING)
+        total = len(clocks)
+        fresh = sum(1 for clock in clocks.values() if now - clock <= FRESH_SECONDS)
+        newest = datetime.fromtimestamp(max(clocks.values()), BEIJING)
+        if fresh == 0:
+            hint = (
+                f"该主机 {total} 个监控项全部停止更新，最后一次采集在 "
+                f"{newest.strftime('%H:%M:%S')}"
+                "：整机不可达或 Zabbix 到该主机的采集链路中断，而不只是单个监控项"
+            )
+        elif fresh == total:
+            hint = (
+                f"该主机 {total} 个监控项在最近 10 分钟内全部仍有新数据：主机与 Zabbix "
+                "采集链路目前正常，告警时段是否中断以可用性监控项的历史为准"
+            )
+        else:
+            hint = (
+                f"该主机 {fresh}/{total} 个监控项在最近 10 分钟内仍有新数据：主机或采集链路"
+                "至少部分可用；其余监控项停止更新，可能是 agent 服务本身的问题，"
+                "也可能只是更新间隔较长或丢弃了未变化的值"
+            )
         signals.append(
             _zabbix_signal(
                 clock_evidence,
                 "collection_freshness",
                 {
-                    "items": len(clocks),
+                    "items": total,
                     "updated_within_10m": fresh,
                     "newest_lastclock_local": newest.isoformat(),
                 },
-                f"该主机 {len(clocks)} 个监控项全部停止更新，最后一次采集在 "
-                f"{newest.strftime('%H:%M:%S')}"
-                "：整机不可达或 Zabbix 到该主机的采集链路中断，而不只是单个监控项"
-                if fresh == 0
-                else f"该主机 {fresh}/{len(clocks)} 个监控项在最近 10 分钟内仍有新数据：主机或采集链路至少部分可用，问题更可能在未更新的那部分（如 agent 服务本身）",
+                hint,
                 level="warning" if fresh == 0 else "info",
             )
         )
@@ -788,7 +1023,7 @@ def derive_signals(collected, event_clock=None):
                     "文件系统使用率超过 90%：核对增长来源与目录占用",
                 )
             )
-    signals.extend(_history_signals(collected, event_clock))
+    signals.extend(_history_signals(collected, event_clock, keys))
     signals.extend(_event_signals(collected))
     signals.extend(_log_signals(collected))
     return signals[:14]

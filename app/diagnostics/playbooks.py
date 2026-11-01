@@ -123,12 +123,14 @@ KEY_RULES = (
         r"^(icmpping|agent\.ping|zabbix\[host,agent,available\]|net\.tcp\.service\[ssh)",
     ),
     ("logs", r"^logr?t?\[|^log\.count\[|^logrt\.count\["),
+    # Port and service checks before the net.tcp.* network keys (the HTTP and
+    # SSH checks are matched above).
+    ("service", r"^proc\.num\[|^systemd\.unit|^net\.tcp\.service\[|^net\.tcp\.port\["),
     ("network", r"^net\.if\.|^net\.tcp\.|^net\.udp\.|^ifInErrors|^ifOutErrors|^ifHC"),
     ("disk", r"^vfs\.fs\."),
     ("io", r"^vfs\.dev\."),
     ("memory", r"^vm\.memory\.|^system\.swap\."),
     ("cpu", r"^system\.cpu\.|^system\.load"),
-    ("service", r"^proc\.num\[|^systemd\.unit|^net\.tcp\.service\[|^net\.tcp\.port\["),
     ("system", r"^system\.uptime|^system\.boottime|^kernel\."),
 )
 
