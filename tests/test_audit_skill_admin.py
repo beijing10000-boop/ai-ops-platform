@@ -174,7 +174,8 @@ const vm = require("vm"), fs = require("fs");
 const answers = [];
 const context = {
   document: {addEventListener() {}},
-  window: {confirm(text) { context.asked.push(text); return answers.shift(); }},
+  window: {},
+  UIKit: {confirm: async ({title, message, confirmText}) => { context.asked.push([title, message, confirmText].join("\n")); return answers.shift(); }},
   asked: [],
 };
 vm.createContext(context);

@@ -525,7 +525,8 @@ const vm = require("vm"), fs = require("fs");
 const answers = [];
 const context = {
   document: {addEventListener() {}},
-  window: {confirm(text) { context.asked.push(text); return answers.shift(); }},
+  window: {},
+  UIKit: {confirm: async ({title, message, confirmText}) => { context.asked.push(title + message + "|" + confirmText); return answers.shift(); }},
   asked: [],
 };
 vm.createContext(context);
@@ -581,8 +582,8 @@ context.custom = custom;
     )
     # The list changed meanwhile: the server's 409 is confirmed and retried.
     assert out["retried"] is True and out["retrySent"] == [{}, {"confirm": True}]
-    assert out["asked"][0] == "删除 only-custom？历史任务保留已加载的版本。"
-    assert out["asked"][1].endswith("仍要删除？")
+    assert out["asked"][0] == "删除 only-custom？历史任务保留已加载的版本。|删除"
+    assert out["asked"][1].endswith("|仍要删除")
 
 
 # --- 7. Card fields under other names -------------------------------------------------

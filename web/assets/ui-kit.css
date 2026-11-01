@@ -1,7 +1,9 @@
 /*
- * Shared design system for AI Ops Platform and SSH MCP Server.
- * Keep this file byte-identical in both repositories: tokens, shell layout and
- * components live here; each console keeps only its page-specific styles.
+ * ui-kit 2.0.0 — shared design system of AI Ops Platform, SSH MCP Server and
+ * Log Analysis Platform. Keep this file byte-identical in the three
+ * repositories (edit one, run scripts/sync_ui_kit.py; tests/test_ui_kit.py
+ * checks it): tokens, shell layout and components live here, each console
+ * keeps only its page-specific styles. Rules: docs/UI-GUIDELINES.md.
  */
 
 /* ---------- Tokens ---------- */
@@ -19,11 +21,16 @@
   --line-strong: #00000024;
   --text: #1d1d1f;
   --text-2: #6e6e73;
-  --text-3: #8e8e93;
+  /* ≥ 4.5:1 on --surface: hints, timestamps and table second lines. */
+  --text-3: #737378;
   --accent: #0071e3;
   --accent-hover: #0077ed;
   --accent-soft: #0071e317;
+  /* Filled controls (primary buttons, the active nav item): ≥ 4.5:1 with --on-accent. */
+  --accent-fill: #0071e3;
   --on-accent: #fff;
+  /* Keyboard focus: a solid outline that no component shadow can hide. */
+  --focus: #0071e3;
   --green: #1d8139;
   --green-soft: #34c75921;
   --orange: #b25000;
@@ -70,10 +77,13 @@
   --line-strong: #ffffff26;
   --text: #f5f5f7;
   --text-2: #a1a1a6;
-  --text-3: #7c7c81;
+  --text-3: #8e8e93;
   --accent: #0a84ff;
   --accent-hover: #409cff;
   --accent-soft: #0a84ff29;
+  --accent-fill: #0a6ad6;
+  --on-accent: #fff;
+  --focus: #409cff;
   --green: #30d158;
   --green-soft: #30d15829;
   --orange: #ff9f0a;
@@ -215,10 +225,11 @@ hr,
   background: transparent;
 }
 
-/* Focus: a soft accent ring, never a hard outline. */
+/* Focus: an outline, so component shadows (primary buttons, the active nav
+   item, checkboxes) cannot cover it; the ring stays for text fields. */
 :where(button, a, input, select, textarea, summary, [tabindex]):focus-visible {
-  outline: none;
-  box-shadow: var(--ring);
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 
 /* ---------- Icons ---------- */
@@ -328,7 +339,7 @@ hr,
   background: var(--fill-2);
 }
 .nav-link.active {
-  background: var(--accent);
+  background: var(--accent-fill);
   color: var(--on-accent);
   box-shadow: var(--glow);
 }
@@ -483,7 +494,7 @@ hr,
   transform: scale(0.97);
 }
 .btn.primary {
-  background: var(--accent);
+  background: var(--accent-fill);
   color: var(--on-accent);
   box-shadow: var(--glow);
 }
@@ -1026,6 +1037,9 @@ legend {
 .toast.error {
   color: var(--red);
 }
+.toast.success {
+  color: var(--green);
+}
 @keyframes toast-in {
   from {
     opacity: 0;
@@ -1145,6 +1159,22 @@ dialog::backdrop {
 }
 dialog form {
   margin: 0;
+}
+/* UIKit.confirm: one question, its consequence, two buttons. */
+dialog.ui-confirm {
+  width: min(460px, calc(100vw - 32px));
+}
+.ui-confirm h2 {
+  margin: 0 0 10px;
+  font-size: 18px;
+}
+.ui-confirm p {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .modal-title {
   display: flex;
