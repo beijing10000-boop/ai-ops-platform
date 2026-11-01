@@ -26,12 +26,12 @@ function skillChangeWarnings(row, values, items) {
 // it is confirmed, which also catches a list changed by someone else meanwhile.
 // Returns false when the admin cancels.
 async function confirmedSkillSave(name, warnings, send) {
-  if (warnings.length && !window.confirm(`保存对 ${name} 的修改？\n${warnings.map(text => "· " + text).join("\n")}`)) return false;
+  if (warnings.length && !(await UIKit.confirm({title: `保存对 ${name} 的修改？`, message: warnings.map(text => "· " + text).join("\n"), confirmText: "仍要保存", danger: true}))) return false;
   try {
     await send(warnings.length ? {confirm: true} : {});
   } catch (error) {
     if (error.status !== 409 || error.detail?.code !== "skill_scopes_uncovered") throw error;
-    if (!window.confirm(error.message + "。仍要保存？")) return false;
+    if (!(await UIKit.confirm({title: `保存对 ${name} 的修改？`, message: error.message + "。", confirmText: "仍要保存", danger: true}))) return false;
     await send({confirm: true});
   }
   return true;
@@ -42,12 +42,12 @@ async function confirmedSkillSave(name, warnings, send) {
 // changed meanwhile) is confirmed the same way. Returns false when cancelled.
 async function confirmedSkillDelete(row, items, send) {
   const warnings = skillChangeWarnings(row, {enabled: false, scopes: row.scopes}, items);
-  if (!window.confirm(`删除 ${row.name}？历史任务保留已加载的版本。${warnings.map(text => "\n· " + text).join("")}`)) return false;
+  if (!(await UIKit.confirm({title: `删除 ${row.name}？`, message: ["历史任务保留已加载的版本。", ...warnings.map(text => "· " + text)].join("\n"), confirmText: "删除", danger: true}))) return false;
   try {
     await send(warnings.length ? {confirm: true} : {});
   } catch (error) {
     if (error.status !== 409 || error.detail?.code !== "skill_scopes_uncovered") throw error;
-    if (!window.confirm(error.message + "。仍要删除？")) return false;
+    if (!(await UIKit.confirm({title: `删除 ${row.name}？`, message: error.message + "。", confirmText: "仍要删除", danger: true}))) return false;
     await send({confirm: true});
   }
   return true;

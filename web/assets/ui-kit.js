@@ -1,9 +1,13 @@
 "use strict";
-// Shared by AI Ops Platform and SSH MCP Server; keep byte-identical in both
-// repositories. Loaded synchronously in <head> so the theme applies before the
-// first paint. Provides the theme switch, the SVG icon set and the narrow-screen
-// navigation drawer.
+// ui-kit 2.0.0 — shared by AI Ops Platform, SSH MCP Server and Log Analysis
+// Platform; keep byte-identical in the three repositories (edit one, run
+// scripts/sync_ui_kit.py). Loaded synchronously in <head> so the theme applies
+// before the first paint. Provides the theme switch, the SVG icon set, the
+// narrow-screen navigation drawer, and the interaction primitives every console
+// uses the same way: escape, notify, confirm and the unsaved-changes guard
+// (docs/UI-GUIDELINES.md).
 const UIKit = (() => {
+  const VERSION = "2.0.0";
   const THEME_KEY = "ui-theme";
   const system = window.matchMedia("(prefers-color-scheme: dark)");
   const paths = {
@@ -95,6 +99,88 @@ const UIKit = (() => {
       ?.setAttribute("aria-expanded", String(open));
   }
 
+  const ESCAPES = {
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  };
+
+  // Text for innerHTML and attribute values; every interpolated value goes
+  // through it unless it is markup the console built itself.
+  function escape(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (c) => ESCAPES[c]);
+  }
+
+  // One toast at a time. Errors stay twice as long and are announced at once;
+  // inside an open modal dialog the toast joins it, or it would sit behind.
+  let toastTimer = 0;
+  function notify(message, { type = "info", timeout } = {}) {
+    let box = document.getElementById("ui-toast");
+    if (!box) {
+      box = document.createElement("div");
+      box.id = "ui-toast";
+      box.addEventListener("click", () => (box.hidden = true));
+    }
+    const host = document.querySelector("dialog:modal") || document.body;
+    if (box.parentElement !== host) host.append(box);
+    const error = type === "error";
+    box.className = "toast" + (error || type === "success" ? " " + type : "");
+    box.setAttribute("role", error ? "alert" : "status");
+    box.textContent = String(message ?? "");
+    box.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(
+      () => (box.hidden = true),
+      timeout ?? (error ? 12000 : 6000),
+    );
+  }
+
+  // A modal question that names its consequence. Resolves true only on the
+  // confirm button; Esc and the cancel button resolve false. A destructive
+  // question starts on cancel, so a stray Enter cannot confirm it.
+  let confirms = 0;
+  function confirm({
+    title,
+    message = "",
+    confirmText = "确认",
+    cancelText = "取消",
+    danger = false,
+  } = {}) {
+    return new Promise((resolve) => {
+      const id = "ui-confirm-" + ++confirms;
+      const dialog = document.createElement("dialog");
+      dialog.className = "ui-confirm";
+      dialog.setAttribute("aria-labelledby", id);
+      dialog.innerHTML =
+        `<form method="dialog"><h2 id="${id}">${escape(title)}</h2>` +
+        (message ? `<p>${escape(message)}</p>` : "") +
+        `<div class="modal-actions"><button class="btn" value="cancel">${escape(cancelText)}</button>` +
+        `<button class="btn ${danger ? "danger" : "primary"}" value="confirm">${escape(confirmText)}</button></div></form>`;
+      dialog.addEventListener("close", () => {
+        dialog.remove();
+        resolve(dialog.returnValue === "confirm");
+      });
+      document.body.append(dialog);
+      dialog.showModal();
+      dialog
+        .querySelector(`button[value="${danger ? "cancel" : "confirm"}"]`)
+        .focus();
+    });
+  }
+
+  // Asks before the page is left while isDirty() holds; returns the remover.
+  function guardUnsaved(isDirty) {
+    const handler = (event) => {
+      if (!isDirty()) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }
+
   applyTheme();
   system.addEventListener("change", applyTheme);
   document.addEventListener("DOMContentLoaded", () => {
@@ -111,5 +197,13 @@ const UIKit = (() => {
   });
   window.addEventListener("hashchange", () => setNav(false));
 
-  return { icon, hydrate };
+  return {
+    version: VERSION,
+    icon,
+    hydrate,
+    escape,
+    notify,
+    confirm,
+    guardUnsaved,
+  };
 })();
