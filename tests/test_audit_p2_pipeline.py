@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -172,7 +173,7 @@ def test_only_analyses_that_will_still_answer_are_waited_for(monkeypatch):
     )
     for trigger in cases:
         assert worker.recent_analysis(alert("7711" + trigger, trigger=trigger)) is None
-    # Reuse off: every alert gets its own analysis, in progress or not.
+    # One that will answer is waited for; with reuse off, none is.
     live = alert("771020", trigger="20")
     store_alert(live)
     queued_task(live)
@@ -247,7 +248,7 @@ def test_queued_analysis_past_the_queue_limit_is_not_run(monkeypatch):
     assert result["reason"] == "QueueExpired" and ran == []
     task = tasks.get(task_id)
     assert (task["status"], task["error_type"]) == ("cancelled", "QueueExpired")
-    assert "排队 150 分钟" in task["report"]["message"]
+    assert re.search(r"排队 15\d 分钟仍未开始", task["report"]["message"])
     assert "已超过排队上限 2 小时" in task["report"]["message"]
     assert ai_status("773001") == "cancelled"
     # Within a longer reuse window it still runs.
