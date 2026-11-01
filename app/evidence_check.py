@@ -3,10 +3,11 @@
 Every MCP result the model sees carries an evidence id (E1, E2, ...). The final
 answer cites ids with a short quote; a citation counts only when the id exists,
 the evidence was collected successfully, and every number in the quote appears
-in that evidence (at the quote's own precision), so a value cannot be attributed
-to evidence that does not contain it. Identifier fields (item ids, clocks, pids)
-never ground a quote. Confidence is derived from the valid citations, never
-from the model; structured facts without a valid citation are demoted.
+in that evidence (at the quote's own precision) or in a platform signal derived
+from it, so a value cannot be attributed to evidence that does not contain it.
+Identifier fields (item ids, clocks, pids) never ground a quote. Confidence is
+derived from the valid citations, never from the model; structured facts
+without a valid citation are demoted.
 """
 
 from datetime import datetime
@@ -92,13 +93,47 @@ def evidence_numbers(evidence_text):
     return _measurements(document)
 
 
-def _grounded(quote, evidence_text):
-    """All numbers of the quote occur in the evidence; otherwise text containment."""
+def _derived(value):
+    """Numbers of attached signal values, identifier fields skipped. Their
+    strings (keys, times, log templates) repeat the evidence and are left out."""
+    if isinstance(value, dict):
+        return [
+            number
+            for name, item in value.items()
+            if str(name) not in IDENTIFIER_KEYS
+            for number in _derived(item)
+        ]
+    if isinstance(value, list):
+        return [number for item in value for number in _derived(item)]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return []
+    return [float(value)]
+
+
+def attach_signals(index, signals):
+    """Make the platform's derived signals citable under their evidence ids.
+
+    A signal's numbers (a ratio to the 7-day baseline, load per core, item
+    counts) are computed from the evidence it names and occur in no tool
+    result; each signal's `value` joins that evidence's comparable numbers as
+    `signals`, so quoting them under the signal's evidence id checks out.
+    """
+    for signal in signals or []:
+        if not isinstance(signal, dict):
+            continue
+        source = index.get(str(signal.get("evidence_id") or ""))
+        if isinstance(source, dict) and "value" in signal:
+            source.setdefault("signals", []).append(signal["value"])
+
+
+def _grounded(quote, evidence_text, derived=()):
+    """All numbers of the quote occur in the evidence (or in the signals
+    derived from it); otherwise text containment."""
     wanted = _numbers(quote)
     if not wanted:
         squeeze = lambda value: re.sub(r"[\s\"'{}\[\]:,，：]", "", str(value))  # noqa: E731
         return len(squeeze(quote)) >= 4 and squeeze(quote) in squeeze(evidence_text)
-    available = evidence_numbers(evidence_text)
+    available = evidence_numbers(evidence_text) + _derived(list(derived))
     for raw in wanted:
         value = float(raw)
         decimals = len(raw.split(".")[1]) if "." in raw else 0
@@ -180,13 +215,14 @@ def _salvaged(text):
     return found if any(key in found for key in ANSWER_FIELDS) else None
 
 
-def answer_object(answer):
+def answer_object(answer, fields=ANSWER_FIELDS):
     """The model's structured answer as a dict, or None for a plain-text one.
 
     The prompts ask for bare JSON. Models sometimes wrap it in a code fence or
     put a heading before it ("## 诊断结果" + a fenced block); the object is then
     taken from the fence, or from the first "{" to the last "}", and only when
-    it carries one of the answer fields, so prose quoting JSON stays prose.
+    it carries one of `fields` (the answer fields; the alert card also takes
+    the names models use instead), so prose quoting JSON stays prose.
     Raw line breaks inside strings are accepted (``strict=False``): models
     write a multi-line "cause" that way, and strict JSON rejects it. A bracket
     the model lost or an output cut short is closed; failing that, each answer
@@ -211,7 +247,7 @@ def answer_object(answer):
             parsed = json.loads(candidate, strict=False)
         except ValueError:
             continue
-        if isinstance(parsed, dict) and any(key in parsed for key in ANSWER_FIELDS):
+        if isinstance(parsed, dict) and any(key in parsed for key in fields):
             return parsed
     if start < 0:
         return None
@@ -223,7 +259,7 @@ def answer_object(answer):
             continue
         if isinstance(parsed, dict):
             parsed = _hoisted(parsed)
-            if any(key in parsed for key in ANSWER_FIELDS):
+            if any(key in parsed for key in fields):
                 return parsed
     return _salvaged(text[start:])
 
@@ -281,7 +317,7 @@ def check(answer, index):
     """Return {valid, invalid, confidence, method, facts} or None when nothing is cited.
 
     `index` maps evidence ids to {"provider", "tool", "text", "status", "failed"}
-    as the model saw them.
+    as the model saw them, plus "signals" from attach_signals().
     """
     parsed = answer_object(answer)
     if parsed is not None and isinstance(parsed.get("evidence"), list):
@@ -296,7 +332,7 @@ def check(answer, index):
                 reason = "证据编号不存在"
             elif _failed(source):
                 reason = "引用的是失败或未完成的采集结果"
-            elif not _grounded(quote, source["text"]):
+            elif not _grounded(quote, source["text"], source.get("signals") or ()):
                 reason = "证据中找不到引用的数值或原文"
             else:
                 valid.append(

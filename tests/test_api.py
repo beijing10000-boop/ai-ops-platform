@@ -64,7 +64,7 @@ def test_ask_validation():
 def test_web_ask_calls_read_only_agent(monkeypatch):
     from app import ai_agent
 
-    async def fake_ask(question, return_usage=False):
+    async def fake_ask(question, return_usage=False, actor="system"):
         assert question == "查询严重告警"
         return (
             ("已从 MCP 查询", {"available": True, "input": 8, "output": 2, "total": 10})

@@ -45,6 +45,9 @@ MANAGED_PROVIDERS = {"platform-logs": ["logs"]}
 DEFAULT_PROVIDERS = ["ssh_mcp", "zabbix_mcp"]
 DEVICES = {"linux", "windows", "network", "vmware", "other", "unknown"}
 TEMPLATES = Path(__file__).parent / "skill_templates"
+# YAML metadata between "---" lines, then the Markdown body.
+FRONT_MATTER = re.compile(r"\A\ufeff?---\r?\n(.*?)\r?\n---(?:\r?\n|$)(.*)\Z", re.S)
+SCOPE_LABELS = {"qa": "飞书问答", "web": "Web 诊断", "alert": "告警分析"}
 
 
 class SkillLoader(yaml.SafeLoader):
@@ -70,7 +73,7 @@ def parse_document(text):
         or "\x00" in text
     ):
         raise ValueError("SKILL.md 须为不超过 64 KB 的 UTF-8 文本")
-    match = re.match(r"\A\ufeff?---\r?\n(.*?)\r?\n---(?:\r?\n|$)(.*)\Z", text, re.S)
+    match = FRONT_MATTER.match(text)
     if not match:
         raise ValueError("SKILL.md 须以 YAML name、description 元数据开头")
     try:
@@ -242,10 +245,11 @@ def validate_prefetch(rules):
     return result
 
 
-def document(name, description, instructions, prefetch=None):
+def document(name, description, instructions, prefetch=None, types=None, devices=None):
     meta = {"name": name, "description": description}
-    if prefetch:
-        meta["prefetch"] = prefetch
+    for key, value in (("types", types), ("devices", devices), ("prefetch", prefetch)):
+        if value:
+            meta[key] = value
     return (
         "---\n"
         + yaml.safe_dump(meta, allow_unicode=True, sort_keys=False).strip()
@@ -253,6 +257,21 @@ def document(name, description, instructions, prefetch=None):
         + instructions.strip()
         + "\n"
     )
+
+
+def skill_body(row):
+    """The part of a Skill the model reads: SKILL.md without its front matter.
+
+    Name, description, prefetch, types and devices are for the platform (which
+    Skills apply, what to collect first). Snapshot rows carry the body as
+    `instructions`; a row without it has its file's front matter cut here.
+    """
+    text = row.get("instructions")
+    if not isinstance(text, str) or not text.strip():
+        text = str((row.get("files") or {}).get("SKILL.md") or "")
+        match = FRONT_MATTER.match(text)
+        text = match[2] if match else text
+    return text.strip()
 
 
 def scope_of(request, source):
@@ -490,6 +509,56 @@ def validate_choices(scopes, providers):
         raise ValueError("请选择有效的适用场景与 MCP 服务")
 
 
+def uncovered(skills):
+    """Scopes in which snapshot() would load no Skill: no enabled custom Skill
+    and no enabled platform-base (the other platform Skills extend the base
+    and are not loaded without it)."""
+    return [
+        scope
+        for scope in SCOPE_LABELS
+        if not any(
+            row["enabled"]
+            and scope in row["scopes"]
+            and (not row["managed"] or row["name"] == BASE_NAME)
+            for row in skills
+        )
+    ]
+
+
+def check_coverage(db, ident, *, enabled, scopes, confirm):
+    """Refuse a change that leaves a scope without any Skill unless the caller
+    confirms it: new tasks there would fail at once. The 409 names the scopes."""
+    current = [
+        {
+            "id": row[0],
+            "name": row[1],
+            "enabled": bool(row[2]),
+            "scopes": json.loads(row[3]),
+            "managed": bool(row[4]),
+        }
+        for row in db.execute(
+            "SELECT id,name,enabled,scopes,managed FROM platform_skills"
+        )
+    ]
+    changed = [
+        {**row, "enabled": bool(enabled), "scopes": list(scopes)}
+        if row["id"] == ident
+        else row
+        for row in current
+    ]
+    lost = [scope for scope in uncovered(changed) if scope not in uncovered(current)]
+    if lost and not confirm:
+        raise HTTPException(
+            409,
+            {
+                "code": "skill_scopes_uncovered",
+                "scopes": lost,
+                "message": "保存后以下场景将没有任何可用的 Skill，新的诊断任务会直接失败："
+                + "、".join(SCOPE_LABELS[scope] for scope in lost),
+            },
+        )
+
+
 def save(
     package,
     *,
@@ -500,7 +569,10 @@ def save(
     actor,
     replace=False,
     mode="standalone",
+    confirm=False,
 ):
+    """Import a custom Skill, or replace one; `confirm` accepts a change that
+    leaves a scope without any Skill (check_coverage)."""
     from .main import connection
 
     validate_choices(scopes, providers)
@@ -520,6 +592,7 @@ def save(
             raise HTTPException(409, "同名 Skill 已存在，请明确选择更新")
         if old:
             ident = old[0]
+            check_coverage(db, ident, enabled=enabled, scopes=scopes, confirm=confirm)
             db.execute(
                 "UPDATE platform_skills SET description=?,enabled=?,priority=?,scopes=?,providers=?,mode=?,revision=revision+1,digest=?,bundle=?,updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                 (
@@ -555,12 +628,17 @@ def save(
     return get(ident)
 
 
-def configure_base(ident, *, scopes, providers, enabled, priority, actor):
-    """The base Skill's text is platform-owned; admins choose only where it runs."""
+def configure_base(
+    ident, *, scopes, providers, enabled, priority, actor, confirm=False
+):
+    """The base Skill's text is platform-owned; admins choose only where it runs.
+    A change that leaves a scope without any Skill (platform-base switched off
+    where no custom Skill serves) needs `confirm` (check_coverage)."""
     from .main import connection
 
     validate_choices(scopes, providers)
     with connection() as db:
+        check_coverage(db, ident, enabled=enabled, scopes=scopes, confirm=confirm)
         db.execute(
             "UPDATE platform_skills SET enabled=?,priority=?,scopes=?,providers=?,revision=revision+1,updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND managed=1",
             (

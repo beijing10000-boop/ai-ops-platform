@@ -1,6 +1,57 @@
 "use strict";
 
 const SKILL_MODES = [["supplement", "补充：与平台基础 Skill 一起加载（推荐）"], ["standalone", "替代：本场景不再加载平台基础 Skill"]];
+const SKILL_SCOPES = [["qa", "飞书问答"], ["web", "Web 诊断"], ["alert", "告警分析"]];
+
+// Scenarios in which a new task would load no Skill, as the server selects
+// them: no enabled custom Skill and platform-base off there (the other
+// platform Skills extend the base and are not loaded without it).
+function uncoveredScopes(items) {
+  return SKILL_SCOPES.filter(([scope]) => !items.some(row => row.enabled && row.scopes.includes(scope) && (!row.managed || row.name === "platform-base"))).map(([, label]) => label);
+}
+
+// What saving `values` (enabled, scopes) for `row` would cost, shown before
+// it is sent: platform-base switched off, or scenarios left without a Skill.
+function skillChangeWarnings(row, values, items) {
+  const after = items.map(item => item.id === row.id ? {...item, enabled: values.enabled, scopes: values.scopes} : item);
+  const before = uncoveredScopes(items), lost = uncoveredScopes(after).filter(label => !before.includes(label));
+  const warnings = [];
+  if (row.managed && row.name === "platform-base" && row.enabled && !values.enabled) warnings.push("平台基础规则不再加载，依附于它的设备类与告警类平台 Skill（platform-linux、platform-java 等）也不再加载");
+  if (lost.length) warnings.push("以下场景将没有任何可用的 Skill，新的诊断任务会直接失败：" + lost.join("、"));
+  return warnings;
+}
+
+// Sends a Skill change once the admin accepted its cost. The server refuses a
+// change that leaves a scenario without any Skill (HTTP 409 naming them) until
+// it is confirmed, which also catches a list changed by someone else meanwhile.
+// Returns false when the admin cancels.
+async function confirmedSkillSave(name, warnings, send) {
+  if (warnings.length && !window.confirm(`保存对 ${name} 的修改？\n${warnings.map(text => "· " + text).join("\n")}`)) return false;
+  try {
+    await send(warnings.length ? {confirm: true} : {});
+  } catch (error) {
+    if (error.status !== 409 || error.detail?.code !== "skill_scopes_uncovered") throw error;
+    if (!window.confirm(error.message + "。仍要保存？")) return false;
+    await send({confirm: true});
+  }
+  return true;
+}
+
+// Deletes a Skill as confirmedSkillSave saves a change: the question names
+// the scenarios it leaves without any Skill, and the server's 409 (the list
+// changed meanwhile) is confirmed the same way. Returns false when cancelled.
+async function confirmedSkillDelete(row, items, send) {
+  const warnings = skillChangeWarnings(row, {enabled: false, scopes: row.scopes}, items);
+  if (!window.confirm(`删除 ${row.name}？历史任务保留已加载的版本。${warnings.map(text => "\n· " + text).join("")}`)) return false;
+  try {
+    await send(warnings.length ? {confirm: true} : {});
+  } catch (error) {
+    if (error.status !== 409 || error.detail?.code !== "skill_scopes_uncovered") throw error;
+    if (!window.confirm(error.message + "。仍要删除？")) return false;
+    await send({confirm: true});
+  }
+  return true;
+}
 
 function skillChoices(values = {}) {
   const scopes = values.scopes || ["qa", "web", "alert"], providers = values.providers || ["ssh_mcp", "zabbix_mcp"];
@@ -17,9 +68,9 @@ function skillKind(row) {
 
 async function skillsPage(id) {
   const data = await api(P + "/skills"), manage = can("settings.manage");
-  const uncovered = [["qa", "飞书问答"], ["web", "Web 诊断"], ["alert", "告警分析"]].filter(([scope]) => !data.items.some(row => row.enabled && row.scopes.includes(scope))).map(([, label]) => label);
+  const uncovered = uncoveredScopes(data.items);
   let html = intro("Skill 是诊断规则的唯一来源，决定数据源、工具、查询顺序与报告要求；各任务保存所用 Skill 版本。平台基础 Skill（platform-base）随版本自动更新，本环境的规则写在“补充”模式的 Skill 中。", `<a class="btn" href="${P}/skills/template">下载补充 Skill 示例</a>`);
-  if (uncovered.length) html += `<div class="notice error" role="status">以下场景没有已启用的诊断 Skill：${E(uncovered.join("、"))}。这些场景的诊断任务会直接失败，请启用平台基础 Skill 或导入并启用 Skill。</div>`;
+  if (uncovered.length) html += `<div class="notice error" role="status">以下场景没有可用的诊断 Skill：${E(uncovered.join("、"))}。这些场景的诊断任务会直接失败，请启用平台基础 Skill 或导入并启用 Skill。</div>`;
   html += panel("已加载的 Skill", table(["名称与说明", "状态 / 版本", "适用场景", "操作"], data.items.map(row => `<tr><td><strong>${E(row.name)}</strong> ${skillKind(row)}<p class="muted small">${E(row.description)}</p><span class="muted small">优先级 ${row.priority} · ${row.providers.map(E).join(" / ")}</span></td><td>${row.enabled ? chip("已启用", "success") : chip("已停用")}<small>v${row.revision}</small></td><td>${row.scopes.map(scope => ({qa: "飞书问答", web: "Web 诊断", alert: "告警分析"})[scope]).join(" / ")}</td><td><div class="actions">${btn("skill-open", manage ? "查看 / 编辑" : "查看", row.id, "small")}<a class="btn small" href="${P}/skills/${row.id}/export">导出</a>${manage ? btn("skill-verify", "验证工具", row.id, "small") + btn("skill-toggle", row.enabled ? "停用" : "启用", row.id, "small") : ""}</div></td></tr>`).join("")), "同一场景可启用多个 Skill，按优先级从高到低加载。启用了“替代”模式的 Skill 时，该场景不再加载平台基础 Skill。工具权限仍由后台服务与平台校验。") + '<p id="skill-status" role="status" class="notice" hidden></p>';
   if (id) {
     const row = await api(P + "/skills/" + encodeURIComponent(id));
@@ -77,12 +128,14 @@ document.addEventListener("click", async event => {
       const result = await api(P + "/skills/" + id + "/verify", "POST", {});
       feedback.textContent = (result.ok ? "工具验证通过。" : "工具验证未通过。") + result.results.map(row => `${row.provider}：${row.error || (row.missing.length ? "缺少或未授权 " + row.missing.join("、") : row.tools + " 个只读工具可用")}`).join("；");
     } else if (action === "skill-toggle") {
-      const row = await api(P + "/skills/" + id);
-      await api(P + "/skills/" + id, "PUT", {enabled: !row.enabled});
+      const [row, list] = await Promise.all([api(P + "/skills/" + id), api(P + "/skills")]);
+      const warnings = skillChangeWarnings(row, {enabled: !row.enabled, scopes: row.scopes}, list.items);
+      if (!await confirmedSkillSave(row.name, warnings, extra => api(P + "/skills/" + id, "PUT", {enabled: !row.enabled, ...extra}))) return;
       await navigate(); toast(row.enabled ? "Skill 已停用，新任务将使用当前配置" : "Skill 已启用，新任务将按查询指引执行");
     } else if (action === "skill-delete") {
-      if (!window.confirm("删除此 Skill？历史任务保留已加载的版本。")) return;
-      await api(P + "/skills/" + id, "DELETE"); OpsUI.saved(form); go("skills");
+      const [row, list] = await Promise.all([api(P + "/skills/" + id), api(P + "/skills")]);
+      if (!await confirmedSkillDelete(row, list.items, extra => api(P + "/skills/" + id + (extra.confirm ? "?confirm=true" : ""), "DELETE"))) return;
+      OpsUI.saved(form); go("skills");
     }
     if (feedback) feedback.hidden = false;
   } catch (error) {
@@ -99,8 +152,16 @@ document.addEventListener("submit", async event => {
   button.disabled = true;
   try {
     if (!form.reportValidity()) return;
-    if (form.id === "skill-import") await api(P + "/skills", "POST", await skillPackage(form));
-    else await api(P + "/skills/" + form.dataset.id, "PUT", skillEditValues(form));
+    let saved;
+    if (form.id === "skill-import") {
+      const body = await skillPackage(form);
+      saved = await confirmedSkillSave(body.filename, [], extra => api(P + "/skills", "POST", {...body, ...extra}));
+    } else {
+      const values = skillEditValues(form);
+      const [row, list] = await Promise.all([api(P + "/skills/" + form.dataset.id), api(P + "/skills")]);
+      saved = await confirmedSkillSave(row.name, skillChangeWarnings(row, values, list.items), extra => api(P + "/skills/" + form.dataset.id, "PUT", {...values, ...extra}));
+    }
+    if (!saved) return;
     OpsUI.saved(form); await navigate(); toast("Skill 已保存，后续新任务使用当前启用配置");
   } catch (error) { feedback.textContent = error.message; feedback.dataset.result = "error"; }
   finally { button.disabled = false; }

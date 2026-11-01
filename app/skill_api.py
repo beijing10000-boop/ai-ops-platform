@@ -28,6 +28,8 @@ class ImportSkill(BaseModel):
     )
     priority: int = Field(default=100, ge=0, le=2147483647)
     mode: Literal["standalone", "supplement"] = "standalone"
+    # Accepts replacing a Skill so that a scope is left without any (409 otherwise).
+    confirm: StrictBool = False
 
 
 class UpdateSkill(BaseModel):
@@ -39,6 +41,8 @@ class UpdateSkill(BaseModel):
     providers: list[str] | None = Field(default=None, max_length=3)
     priority: int | None = Field(default=None, ge=0, le=2147483647)
     mode: Literal["standalone", "supplement"] | None = None
+    # Accepts a change that leaves a scope without any Skill (409 otherwise).
+    confirm: StrictBool = False
 
 
 def checked(call):
@@ -98,6 +102,7 @@ def import_skill(body: ImportSkill, who=Depends(require("settings.manage"))):
             actor=who["open_id"],
             replace=body.replace_existing,
             mode=body.mode,
+            confirm=body.confirm,
         )
     )
     audit(who["open_id"], "skill_imported", row["name"])
@@ -137,15 +142,33 @@ def update(ident: str, body: UpdateSkill, who=Depends(require("settings.manage")
                 enabled=values["enabled"],
                 priority=values["priority"],
                 actor=who["open_id"],
+                confirm=body.confirm,
             )
         )
         audit(who["open_id"], "skill_updated", row["name"])
         return public(saved)
     files = dict(row["files"])
-    # Keep declared prefetch rules; the Web editor only changes text fields.
-    files["SKILL.md"] = skills.document(
-        row["name"], values["description"], values["instructions"], row["prefetch"]
-    )
+
+    def text(source):
+        # A browser's textarea sends LF: a CRLF Skill whose line breaks are
+        # all that differs is unchanged.
+        return tuple(
+            source[key].replace("\r\n", "\n").strip()
+            for key in ("description", "instructions")
+        )
+
+    if text(values) != text(row):
+        # The Web editor changes only these text fields: declared prefetch
+        # rules, types and devices are kept. Other edits (enabled, scopes,
+        # priority, mode) leave SKILL.md exactly as imported.
+        files["SKILL.md"] = skills.document(
+            row["name"],
+            values["description"],
+            values["instructions"],
+            row["prefetch"],
+            types=row.get("types"),
+            devices=row.get("devices"),
+        )
     package = {
         **checked(lambda: skills.parse_document(files["SKILL.md"])),
         "files": files,
@@ -160,6 +183,7 @@ def update(ident: str, body: UpdateSkill, who=Depends(require("settings.manage")
             actor=who["open_id"],
             replace=True,
             mode=values["mode"],
+            confirm=body.confirm,
         )
     )
     audit(who["open_id"], "skill_updated", row["name"])
@@ -167,11 +191,16 @@ def update(ident: str, body: UpdateSkill, who=Depends(require("settings.manage")
 
 
 @router.delete("/{ident}")
-def delete(ident: str, who=Depends(require("settings.manage"))):
+def delete(ident: str, confirm: bool = False, who=Depends(require("settings.manage"))):
     row = skills.get(ident)
     if row["managed"]:
         raise HTTPException(409, "platform-base 由平台维护，不能删除；不需要时可以停用")
     with connection() as db:
+        # Deleting costs what switching it off does: a scope left without any
+        # Skill needs ?confirm=true (409 otherwise), as PUT needs `confirm`.
+        skills.check_coverage(
+            db, ident, enabled=False, scopes=row["scopes"], confirm=confirm
+        )
         db.execute("DELETE FROM platform_skills WHERE id=?", (ident,))
     audit(who["open_id"], "skill_deleted", row["name"])
     return {"ok": True}

@@ -1,7 +1,8 @@
 ---
 name: platform-java
-description: Java / JVM 告警诊断（Java 进程 CPU 或内存异常、频繁 GC、OOM、服务异常重启、启动参数不合理）：识别应用、启动命令与 JVM 参数，结合进程、cgroup 限制、GC 与日志交叉验证。告警类型为 java 或内存类告警时加载。
+description: Java / JVM 告警诊断（Java 进程 CPU 或内存异常、频繁 GC、OOM、服务异常重启、启动参数不合理）：识别应用、启动命令与 JVM 参数，结合进程、cgroup 限制、GC 与日志交叉验证。告警类型为 java 或内存类告警、设备为 Linux 或尚未识别时加载。
 types: [java, memory]
+devices: [linux, unknown]
 prefetch:
 - scopes: [alert, web, qa]
   types: [java]

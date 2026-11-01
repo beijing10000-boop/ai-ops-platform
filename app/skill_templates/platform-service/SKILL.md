@@ -1,7 +1,8 @@
 ---
 name: platform-service
-description: 通用服务诊断（systemd 服务停止、启动失败、反复重启、端口不监听、进程数异常）：服务发现、状态与退出原因、启动命令、进程与端口映射、单元配置、相关日志与重启记录。告警类型为 service、logs 或 system 时加载。
+description: 通用服务诊断（systemd 服务停止、启动失败、反复重启、端口不监听、进程数异常）：服务发现、状态与退出原因、启动命令、进程与端口映射、单元配置、相关日志与重启记录。告警类型为 service、logs 或 system、设备为 Linux 或尚未识别时加载。
 types: [service, logs, system]
+devices: [linux, unknown]
 prefetch:
 - scopes: [alert, web, qa]
   types: [service]

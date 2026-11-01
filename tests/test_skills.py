@@ -815,7 +815,10 @@ def test_malformed_skill_call_is_reported_and_remaining_calls_continue(rig):
         )
     )
     task = tasks.get(usage["task_id"])
-    assert task["status"] == "partial" and task["tools"] == 1
+    # The model's own malformed call goes back to it as an error; it is not
+    # evidence the task failed to collect, so the task is not partial.
+    assert task["status"] == "success" and task["tools"] == 1
+    assert not task["report"]["limitations"]
     outputs = [
         part
         for part in create.call_args.kwargs["input"]
@@ -1178,7 +1181,10 @@ def test_base_skill_is_installed_and_refreshed_but_keeps_admin_choices(monkeypat
     assert base["scopes"] == ["alert", "qa", "web"] and base["mode"] == "base"
     assert (
         client_for()
-        .put(P + "/" + base["id"], json={"enabled": False, "priority": 7})
+        .put(
+            P + "/" + base["id"],
+            json={"enabled": False, "priority": 7, "confirm": True},
+        )
         .status_code
         == 200
     )
@@ -1244,7 +1250,9 @@ def test_standalone_skill_replaces_base_and_supplement_loads_with_it():
 
 
 def test_scope_without_any_enabled_skill_fails_explicitly(rig):
-    client_for().put(P + "/" + base_row()["id"], json={"enabled": False})
+    client_for().put(
+        P + "/" + base_row()["id"], json={"enabled": False, "confirm": True}
+    )
     # Device and alert-type Skills extend the base Skill: not loaded without it.
     assert skills.snapshot({}, "web") == []
     create = AsyncMock()

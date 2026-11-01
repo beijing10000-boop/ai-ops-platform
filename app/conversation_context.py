@@ -1,6 +1,7 @@
 """Per-replied-message Feishu AI context. Chat-scoped and bounded to four AI answers."""
 
 import json
+import time
 from redis import Redis
 from .main import REDIS_URL
 
@@ -9,15 +10,27 @@ MAX_DEPTH = 4
 PREFIX = "feishu-ai:context:"
 THREAD_PREFIX = "feishu-ai:thread:"
 PENDING_PREFIX = "feishu-ai:pending:"
+# Progress cards on record until their analysis ends (worker.reconcile).
+PROGRESS_PREFIX = "feishu-ai:progress:"
+PROGRESS_TTL = 86400
 
 
 def _client():
     return Redis.from_url(REDIS_URL, decode_responses=True)
 
 
-def mark_pending(chat_id, reply_id):
+def mark_pending(chat_id, reply_id, kind="alert"):
+    """`reply_id` is a progress card: replies to it wait for the analysis, and
+    it stays on record so a card a killed worker left can be closed. `kind`:
+    "alert" (manual alert analysis) or "qa" (chat question)."""
     if chat_id and reply_id:
-        _client().set(PENDING_PREFIX + chat_id + ":" + reply_id, "1", ex=TTL)
+        client = _client()
+        client.set(PENDING_PREFIX + chat_id + ":" + reply_id, "1", ex=TTL)
+        client.set(
+            PROGRESS_PREFIX + reply_id,
+            json.dumps({"chat_id": chat_id, "kind": kind, "at": int(time.time())}),
+            ex=PROGRESS_TTL,
+        )
 
 
 def is_pending(chat_id, reply_id):
@@ -30,7 +43,28 @@ def is_pending(chat_id, reply_id):
 
 def clear_pending(chat_id, reply_id):
     if chat_id and reply_id:
-        _client().delete(PENDING_PREFIX + chat_id + ":" + reply_id)
+        client = _client()
+        client.delete(PENDING_PREFIX + chat_id + ":" + reply_id)
+        client.delete(PROGRESS_PREFIX + reply_id)
+
+
+def abandoned_progress(older_than):
+    """Claim the progress cards on record for over `older_than` seconds, whose
+    analysis can no longer be running: (reply_id, record) pairs, each claimed
+    by one caller only."""
+    client = _client()
+    cutoff = time.time() - older_than
+    for key in list(client.scan_iter(PROGRESS_PREFIX + "*")):
+        try:
+            record = json.loads(client.get(key) or "")
+        except (ValueError, TypeError):
+            continue
+        if (
+            isinstance(record, dict)
+            and record.get("at", 0) <= cutoff
+            and client.delete(key)
+        ):
+            yield key[len(PROGRESS_PREFIX) :], record
 
 
 def remember(
