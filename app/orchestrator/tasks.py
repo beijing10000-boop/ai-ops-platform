@@ -6,7 +6,11 @@ import logging
 import re
 import sqlite3
 import uuid
-from rq.exceptions import StopRequested
+
+try:
+    from rq.exceptions import StopRequested
+except ImportError:  # RQ 1.x (requirements allow >=1.16) keeps it in rq.worker
+    from rq.worker import StopRequested
 from ..platform_db import row_dict
 from . import queues
 

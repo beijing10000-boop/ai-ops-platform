@@ -10,7 +10,8 @@ from urllib.parse import urlencode, urlsplit
 import httpx
 from redis import Redis
 from rq import Worker, Queue
-from rq.exceptions import NoSuchJobError, StopRequested
+from rq.exceptions import NoSuchJobError
+from .orchestrator.tasks import StopRequested
 from rq.job import Job
 from .alert_mute import action_signature
 from .evidence_check import answer_object
