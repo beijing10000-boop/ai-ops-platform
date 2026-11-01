@@ -162,15 +162,17 @@ def test_saving_a_new_address_with_the_masked_secret_still_works(saved_endpoints
 def test_web_question_is_audited_and_owned_by_the_asker(monkeypatch):
     from app import ai_agent
 
-    task, _ = tasks.create({"question": "CPU"}, source="qa")
+    created = []
 
-    async def ask(question, return_usage=False):
+    async def ask(question, return_usage=False, actor="system"):
+        task, _ = tasks.create({"question": question}, source="qa", actor=actor)
+        created.append(task["task_id"])
         return "CPU 正常", {"available": False, "task_id": task["task_id"]}
 
     monkeypatch.setattr(ai_agent, "ask", ask)
     response = client_for("operator").post("/api/v1/ask", json={"question": "CPU"})
     assert response.json() == {"ok": True, "answer": "CPU 正常"}
-    assert tasks.get(task["task_id"])["actor"] == "ou_operator"
+    assert tasks.get(created[0])["actor"] == "ou_operator"
     with main.connection() as db:
         rows = db.execute(
             "SELECT actor FROM audit WHERE action='web_question'"

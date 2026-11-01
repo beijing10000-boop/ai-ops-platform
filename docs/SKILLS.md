@@ -22,7 +22,7 @@ Skill 是**唯一的 AI 诊断策略来源**：数据源选择、工具顺序、
 - **自定义 Skill** 导入时选择与基础 Skill 的关系：
   - **补充**（推荐）：与基础 Skill 一起加载，只写本环境特有的规则；平台升级时基础规则自动更新，不再需要手工合并模板。
   - **替代**：该场景不再加载基础 Skill，自定义 Skill 需自行维护全部规则。v1.0 之前导入的 Skill 升级后默认为“替代”，行为与升级前完全一致。
-- 设备类与告警类平台 Skill 是基础 Skill 的延伸：停用 platform-base（或它不服务某个场景）时，其余平台 Skill 在该场景也不加载。某个场景没有任何已启用的 Skill（例如停用了基础 Skill 且没有自定义 Skill）时，该场景的诊断任务会直接失败并提示启用。因此在“Skill 管理”中停用 platform-base，或做出会让某个场景没有可用 Skill 的修改（停用、取消适用场景）时，页面会先写明后果并要求确认；直接调用 API 时须带 `"confirm": true`，否则返回 409，`detail.scopes` 列出受影响的场景（`qa` / `web` / `alert`）。
+- 设备类与告警类平台 Skill 是基础 Skill 的延伸：停用 platform-base（或它不服务某个场景）时，其余平台 Skill 在该场景也不加载。某个场景没有任何已启用的 Skill（例如停用了基础 Skill 且没有自定义 Skill）时，该场景的诊断任务会直接失败并提示启用。因此在“Skill 管理”中停用 platform-base，或做出会让某个场景没有可用 Skill 的修改（停用、取消适用场景）时，页面会先写明后果并要求确认；直接调用 API 时须带 `"confirm": true`（删除 Skill 时在地址后加 `?confirm=true`），否则返回 409，`detail.scopes` 列出受影响的场景（`qa` / `web` / `alert`）。
 - 日志 MCP 只由 platform-logs 开放（安装时它的后台服务只勾选 `logs`，其余平台 Skill 不含 `logs`）：停用 platform-logs 即关闭日志证据。“替代”模式的自定义 Skill 需要日志证据时，自行勾选 `logs` 并写明用法。
 
 ## 使用步骤
@@ -80,7 +80,7 @@ prefetch:
 
 1. **阶段 A（Zabbix）**：有 Host ID 时并行执行 `host_get`（判定设备类型）、按告警触发器 ID 的 `item_get` 与近 24 小时 `event_get`。触发器监控项 key 会校正告警类型（例如文本像 CPU、key 是 `nginx.*`），也会推导 systemd 服务名（`systemd.unit.info["xxx.service",...]`）。
 2. **阶段 B**：按设备类型与校正后的类型合并适用 Skill 的规则；并行执行 zabbix_items 的 `item_get`、同一对象的相关监控项（触发器 key 里的网口索引、文件系统、磁盘名）、SSH 资产解析（只对 Linux 或未识别设备；Windows / 网络设备不连接 SSH），以及有 logs 规则时的日志来源定位：用任务的 IP、告警的 `{HOST.IP}` 或 Zabbix 主机主接口 IP 调 `log_resolve_target`（任何设备类型都做）。
-3. **阶段 C**：SSH 诊断、历史与日志工具并行。日志工具的 `target` 取定位到的来源，时间取告警时刻前后 30 分钟（`around` + `minutes`；Web 诊断没有告警时间时取诊断窗口到现在）；来源近 7 天没有对应类型日志的专题工具（如没有 Nginx 访问日志时的 `log_nginx_summary`）跳过并写入 `coverage.skipped`。可以组合的固定诊断用 `ssh_collect` 在同一 SSH 会话执行；带时间窗口的日志类工具自动使用告警前后 15 分钟（since / until）；需要服务名的工具在推导不出服务名时跳过并写入 `coverage.skipped`；`busy` / `timeout` 自动重试一次。history 依次取触发器监控项、同一对象的相关监控项、再按声明顺序匹配（`*` 为通配，`[`、`,` 按原文匹配），最多 8 项：history_get 取告警时间前后各 30 分钟（超过 1000 行自动翻页），trend_get 取近 7 天小时趋势（跳过 `system.cpu.num` 等常量项）。发给模型的是统计值、告警前后分段（alert_split）与样本。
+3. **阶段 C**：SSH 诊断、历史与日志工具并行。日志工具的 `target` 取定位到的来源，时间取告警时刻前后 30 分钟（`around` + `minutes`；Web 诊断没有告警时间时取诊断窗口到现在）；来源近 7 天没有对应类型日志的专题工具（如没有 Nginx 访问日志时的 `log_nginx_summary`）跳过并写入 `coverage.skipped`。可以组合的固定诊断用 `ssh_collect` 在同一 SSH 会话执行；带时间窗口的日志类工具自动使用告警前后 15 分钟（since / until）；需要服务名的工具在推导不出服务名时跳过并写入 `coverage.skipped`；`busy` / `timeout` 自动重试一次。history 依次取触发器监控项、同一对象的相关监控项、再按声明顺序匹配（`*` 为通配，`[`、`,` 按原文匹配），最多 8 项：history_get 取告警时间前后各 30 分钟（超过 1000 行自动翻页），trend_get 取近 7 天小时趋势，最多 5 个监控项（一页 1000 行放得下的数量），跳过 `system.cpu.num`、`system.uptime`、`system.boottime` 等常量项与只增不减的计数。发给模型的是统计值、告警前后分段（alert_split）与样本。
 
 - zabbix_items 只在任务有 Zabbix Host ID 时执行；写 `"*"` 表示不按 key 过滤、取该主机的监控项（最多 60 个，含最近采集时间），不可达类告警据此在 signals 里得到 `collection_freshness`（同一监控项只计一次，从未采集到数据的监控项不计）。
 - 预采集计入采集次数，但模型始终保留 `follow_up_calls` 次补查（AI 配置 → 分析预算；保底次数不超过配置的采集次数）。预采集已解析的 SSH 目标、已取得的证据被模型再次请求时直接复用，不再调用。
