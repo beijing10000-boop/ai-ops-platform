@@ -448,6 +448,9 @@ def test_skill_timeout_retains_successful_mcp_evidence(rig):
             ),
             APITimeoutError(request=request),
             APITimeoutError(request=request),
+            # The summary round over the evidence collected times out as well.
+            APITimeoutError(request=request),
+            APITimeoutError(request=request),
         ]
     )
     answer, usage = asyncio.run(
@@ -1188,11 +1191,16 @@ def test_base_skill_is_installed_and_refreshed_but_keeps_admin_choices(monkeypat
         .status_code
         == 200
     )
+    # A changed template carries a higher template version.
+    newer = skills.TEMPLATE_VERSION.sub(
+        lambda m: f"<!-- platform-template-version: {int(m[1]) + 1} -->",
+        skills.base_package()["files"]["SKILL.md"],
+    )
     changed = {
         **skills.base_package(),
         "files": {
             **skills.base_package()["files"],
-            "SKILL.md": skills.base_package()["files"]["SKILL.md"] + "\n新版规则。\n",
+            "SKILL.md": newer + "\n新版规则。\n",
         },
     }
     bundled = skills.managed_package
@@ -2050,6 +2058,9 @@ def test_errors_wrapped_by_anyio_while_ssh_is_connected_still_give_partial_repor
                     },
                 )
             ),
+            APITimeoutError(request=request),
+            APITimeoutError(request=request),
+            # The summary round over the evidence collected times out as well.
             APITimeoutError(request=request),
             APITimeoutError(request=request),
         ]

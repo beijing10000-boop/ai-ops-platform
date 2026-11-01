@@ -2,11 +2,16 @@
 
 Every MCP result the model sees carries an evidence id (E1, E2, ...). The final
 answer cites ids with a short quote; a citation counts only when the id exists,
-the evidence was collected successfully, and every number in the quote appears
-in that evidence (at the quote's own precision) or in a platform signal derived
-from it, so a value cannot be attributed to evidence that does not contain it.
-Identifier fields (item ids, clocks, pids) never ground a quote. Confidence is
-derived from the valid citations, never from the model; structured facts
+the evidence was collected successfully, and every significant number in the
+quote appears in that evidence (at the quote's own precision) or in a platform
+signal derived from it, so a value cannot be attributed to evidence that does
+not contain it. Digits of dates and clock times, and integers below 10, are not
+significant: almost any evidence holds them (timestamps, small counts), so a
+quote resting on them alone must appear in the evidence as text. Identifier
+fields (item ids, clocks, pids) never ground a quote. Confidence is derived
+from the citations whose quotes were checked, never from the model: an answer
+with no quotes to check (no evidence array, or a broken JSON answer of which
+only some fields could be recovered) reaches 中 at most. Structured facts
 without a valid citation are demoted.
 """
 
@@ -17,6 +22,16 @@ from zoneinfo import ZoneInfo
 
 BEIJING = ZoneInfo("Asia/Shanghai")
 NUMBER = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?")
+# Dates and clock times inside text ("2026-10-29 19:55:21", "10:21:40.120",
+# "2026年10月29日"): their digits are positions in time, not measurements.
+DATETIME = re.compile(
+    r"(?<![\d.])(?:\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}日?"
+    r"|\d{1,2}月\d{1,2}日"
+    r"|\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)(?!\d)"
+)
+# Integers below this occur in almost any evidence (counts, states, flags):
+# on their own they cannot tie a quote to the evidence it names.
+SMALL_INTEGER = 10
 CITED_ID = re.compile(r"\bE(\d{1,3})\b")
 PROVIDER_LABELS = {"ssh_mcp": "SSH MCP", "zabbix_mcp": "Zabbix MCP", "logs": "日志 MCP"}
 # JSON keys whose numbers are identifiers or bookkeeping, not measurements.
@@ -57,7 +72,18 @@ IDENTIFIER_KEYS = {
 
 
 def _numbers(text):
-    return [match.group(0) for match in NUMBER.finditer(str(text))]
+    """The numbers of a text; the digits of its dates and times are left out."""
+    return [match.group(0) for match in NUMBER.finditer(DATETIME.sub(" ", str(text)))]
+
+
+def _significant(raw):
+    """A quoted number that can tie a quote to its evidence: not a small integer."""
+    value = float(raw)
+    return not (value.is_integer() and abs(value) < SMALL_INTEGER)
+
+
+def _squeezed(value):
+    return re.sub(r"[\s\"'{}\[\]:,，：]", "", str(value))
 
 
 def _measurements(value):
@@ -116,7 +142,9 @@ def attach_signals(index, signals):
     A signal's numbers (a ratio to the 7-day baseline, load per core, item
     counts) are computed from the evidence it names and occur in no tool
     result; each signal's `value` joins that evidence's comparable numbers as
-    `signals`, so quoting them under the signal's evidence id checks out.
+    `signals`, so quoting them under the signal's evidence id checks out
+    (under the same rule as tool numbers: a count below 10 alone grounds
+    nothing).
     """
     for signal in signals or []:
         if not isinstance(signal, dict):
@@ -127,12 +155,13 @@ def attach_signals(index, signals):
 
 
 def _grounded(quote, evidence_text, derived=()):
-    """All numbers of the quote occur in the evidence (or in the signals
-    derived from it); otherwise text containment."""
-    wanted = _numbers(quote)
+    """Every significant number of the quote occurs in the evidence (or in the
+    signals derived from it). A quote without one (only times, dates or small
+    integers, or no number at all) must occur in the evidence as text."""
+    wanted = [raw for raw in _numbers(quote) if _significant(raw)]
     if not wanted:
-        squeeze = lambda value: re.sub(r"[\s\"'{}\[\]:,，：]", "", str(value))  # noqa: E731
-        return len(squeeze(quote)) >= 4 and squeeze(quote) in squeeze(evidence_text)
+        text = _squeezed(quote)
+        return len(text) >= 4 and text in _squeezed(evidence_text)
     available = evidence_numbers(evidence_text) + _derived(list(derived))
     for raw in wanted:
         value = float(raw)
@@ -228,6 +257,15 @@ def answer_object(answer, fields=ANSWER_FIELDS):
     the model lost or an output cut short is closed; failing that, each answer
     field whose own value is whole is taken on its own.
     """
+    return parse_answer(answer, fields)[0]
+
+
+def parse_answer(answer, fields=ANSWER_FIELDS):
+    """answer_object() and how the object was read: "json" (the whole answer),
+    "embedded" (a fenced block or the outermost braces), "repaired" (unclosed
+    brackets closed) or "salvaged" (answer fields taken one by one from a
+    broken object, the evidence array among the parts lost); (None, None) for
+    a plain-text answer."""
     text = str(answer or "").strip()
     try:
         parsed = json.loads(
@@ -237,7 +275,7 @@ def answer_object(answer, fields=ANSWER_FIELDS):
     except ValueError:
         parsed = None
     if isinstance(parsed, dict):
-        return parsed
+        return parsed, "json"
     candidates = [match.group(1) for match in FENCED.finditer(text)]
     start, end = text.find("{"), text.rfind("}")
     if 0 <= start < end:
@@ -248,9 +286,9 @@ def answer_object(answer, fields=ANSWER_FIELDS):
         except ValueError:
             continue
         if isinstance(parsed, dict) and any(key in parsed for key in fields):
-            return parsed
+            return parsed, "embedded"
     if start < 0:
-        return None
+        return None, None
     for candidate in (*candidates, text[start:]):
         repaired = _closed(candidate)
         try:
@@ -260,8 +298,9 @@ def answer_object(answer, fields=ANSWER_FIELDS):
         if isinstance(parsed, dict):
             parsed = _hoisted(parsed)
             if any(key in parsed for key in fields):
-                return parsed
-    return _salvaged(text[start:])
+                return parsed, "repaired"
+    salvaged = _salvaged(text[start:])
+    return (salvaged, "salvaged") if salvaged is not None else (None, None)
 
 
 def _check_facts(parsed, valid_ids):
@@ -313,13 +352,24 @@ def _check_facts(parsed, valid_ids):
     }
 
 
+UNCHECKED = {
+    "salvaged": "回答的 JSON 不完整，只恢复出部分字段，没有可核对的原文摘录",
+    "structured": "回答没有 evidence 原文摘录",
+    "text": "回答没有附原文摘录",
+}
+
+
 def check(answer, index):
     """Return {valid, invalid, confidence, method, facts} or None when nothing is cited.
 
     `index` maps evidence ids to {"provider", "tool", "text", "status", "failed"}
     as the model saw them, plus "signals" from attach_signals().
+    Without an evidence array whose quotes can be checked (plain text, JSON
+    without one, a broken answer read field by field) only the cited ids are
+    checked; their existence alone never makes the confidence 高, and
+    `confidence_note` says why it is capped.
     """
-    parsed = answer_object(answer)
+    parsed, how = parse_answer(answer)
     if parsed is not None and isinstance(parsed.get("evidence"), list):
         valid, invalid = [], []
         for item in parsed["evidence"][:20]:
@@ -355,12 +405,19 @@ def check(answer, index):
         if facts:
             result["facts"] = facts
         return result
-    # Plain-text answers: check that cited ids exist (no quotes to verify).
+    # No quotes to verify: check that the cited ids exist and succeeded.
     cited = list(
         dict.fromkeys("E" + m.group(1) for m in CITED_ID.finditer(str(answer)))
     )
     if not cited:
         return None
+    kind = (
+        "salvaged"
+        if how == "salvaged"
+        else "structured"
+        if parsed is not None
+        else "text"
+    )
     valid = [
         {
             "id": ident,
@@ -386,7 +443,10 @@ def check(answer, index):
         "method": "reference",
         "valid": valid,
         "invalid": invalid,
-        "confidence": confidence(valid, invalid),
+        # An id that exists proves no value: 中 at most without checked quotes.
+        "confidence": "中" if valid else "低",
+        "confidence_note": UNCHECKED[kind]
+        + "；平台只核对了证据编号存在且采集成功，可信度最高评为中",
     }
 
 
@@ -514,6 +574,24 @@ def scope(index, target, capabilities=None, id_range=True):
         if state.get("reason"):
             text += "：" + str(state["reason"])
         notes.append(text)
+    logs = capabilities.get("logs")
+    if (
+        isinstance(logs, dict)
+        and logs.get("target")
+        and (logs.get("tried") or logs.get("identity") == "hostname")
+    ):
+        # Found by another identity than the first IP: say which one.
+        tried = [str(item) for item in logs.get("tried") or []]
+        notes.append(
+            (
+                "日志来源按主机名 "
+                if logs.get("identity") == "hostname"
+                else "日志来源按 IP "
+            )
+            + str(logs["target"])
+            + " 定位"
+            + ("（" + "、".join(tried) + " 最近 7 天没有日志）" if tried else "")
+        )
     for key, label in (
         ("unauthorized_tools", " SSH "),
         ("unauthorized_log_tools", "日志"),
@@ -554,8 +632,13 @@ def render(result):
         return ""
     lines = [
         "证据核对",
-        f"依据可信度：{result['confidence']}（平台核对引用后评定："
-        "多条有效引用且覆盖不同数据源或查询为高，有有效引用为中，没有为低）",
+        f"依据可信度：{result['confidence']}（"
+        + (
+            result.get("confidence_note")
+            or "平台核对引用后评定："
+            "多条有效引用且覆盖不同数据源或查询为高，有有效引用为中，没有为低"
+        )
+        + "）",
     ]
     for item in result["valid"]:
         source = PROVIDER_LABELS.get(item["provider"], item["provider"])

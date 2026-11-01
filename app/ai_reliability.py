@@ -28,6 +28,21 @@ def thinking_params(read_setting):
     return dict(THINKING.get(read_setting("ai_thinking") or "", {}))
 
 
+# Least time worth starting another model request with: the retry below, or a
+# summary round after an analysis round failed.
+SUMMARY_SECONDS = 25
+
+
+def recoverable(exc):
+    """A failed model request another request may well get through: a
+    timeout, a lost connection, rate limiting or a server error. A request
+    the service rejected (other 4xx) would fail the same way again."""
+    return isinstance(exc, APIConnectionError) or (
+        isinstance(exc, APIStatusError)
+        and (exc.status_code == 429 or exc.status_code >= 500)
+    )
+
+
 def model_failure_code(exc):
     if isinstance(exc, APITimeoutError):
         return "ModelTimeout"
@@ -63,15 +78,11 @@ async def request_response(
             return await client.responses.create(timeout=timeout, **kwargs)
         except (APITimeoutError, APIConnectionError, APIStatusError) as exc:
             # Timeouts are connection errors; 4xx other than 429 are not transient.
-            transient = isinstance(exc, APIConnectionError) or (
-                isinstance(exc, APIStatusError)
-                and (exc.status_code == 429 or exc.status_code >= 500)
-            )
             # Never a second retry, nor one without time left for it.
             if (
-                not transient
+                not recoverable(exc)
                 or attempt
-                or deadline - time.monotonic() - reserve_seconds < 25
+                or deadline - time.monotonic() - reserve_seconds < SUMMARY_SECONDS
             ):
                 raise
             await asyncio.sleep(1)

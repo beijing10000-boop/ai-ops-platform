@@ -47,6 +47,13 @@ DEVICES = {"linux", "windows", "network", "vmware", "other", "unknown"}
 TEMPLATES = Path(__file__).parent / "skill_templates"
 # YAML metadata between "---" lines, then the Markdown body.
 FRONT_MATTER = re.compile(r"\A\ufeff?---\r?\n(.*?)\r?\n---(?:\r?\n|$)(.*)\Z", re.S)
+# The version of a platform template, a Markdown comment at the end of its
+# SKILL.md; raise it with every change to the template's files. A stored copy
+# is replaced only by a higher version, so containers of different releases
+# (or one patched in place) never take turns overwriting each other. A comment,
+# not front matter: earlier releases reject unknown metadata keys, and they
+# read the copies newer containers store.
+TEMPLATE_VERSION = re.compile(r"<!--\s*platform-template-version:\s*(\d{1,9})\s*-->")
 SCOPE_LABELS = {"qa": "飞书问答", "web": "Web 诊断", "alert": "告警分析"}
 
 
@@ -97,12 +104,13 @@ def parse_document(text):
         raise ValueError("Skill 名称须为 1–64 位小写字母、数字或连字符")
     if not isinstance(description, str) or not 1 <= len(description.strip()) <= 1024:
         raise ValueError("Skill 描述须为 1–1024 字")
-    if not match[2].strip():
+    body = TEMPLATE_VERSION.sub("", match[2]).strip()
+    if not body:
         raise ValueError("Skill 指引正文不能为空")
     return {
         "name": name,
         "description": description.strip(),
-        "instructions": match[2].strip(),
+        "instructions": body,
         "prefetch": validate_prefetch(meta.get("prefetch", [])),
         **applicability(meta),
     }
@@ -271,7 +279,7 @@ def skill_body(row):
         text = str((row.get("files") or {}).get("SKILL.md") or "")
         match = FRONT_MATTER.match(text)
         text = match[2] if match else text
-    return text.strip()
+    return TEMPLATE_VERSION.sub("", text).strip()
 
 
 def scope_of(request, source):
@@ -393,16 +401,38 @@ def base_package():
     return managed_package(BASE_NAME)
 
 
+def template_version(files):
+    """The template version a platform Skill's files carry; 0 for a copy saved
+    before templates had versions (v1.5.0 and earlier)."""
+    match = TEMPLATE_VERSION.search(str((files or {}).get("SKILL.md") or ""))
+    return int(match[1]) if match else 0
+
+
+def stored_version(bundle):
+    """template_version() of a stored platform Skill; -1 when the copy cannot
+    be read or no longer validates, so the bundled one repairs it."""
+    try:
+        files = decode(bundle)
+        parse_document(files["SKILL.md"])
+    except Exception:
+        return -1
+    return template_version(files)
+
+
 def ensure_base(db):
-    """Install the platform-maintained Skills, or refresh those whose bundled
-    copy changed. Admin choices (enabled, scopes, providers, priority) survive
-    refreshes; a Skill the admin disabled stays disabled.
+    """Install the platform-maintained Skills, or refresh those whose stored
+    copy is older than the bundled one. Admin choices (enabled, scopes,
+    providers, priority) survive refreshes; a Skill the admin disabled stays
+    disabled. A copy at the same or a higher template version (written by a
+    newer release, or a container patched in place) is kept: containers that
+    bundle different templates do not take turns overwriting each other.
     """
     for name, priority in MANAGED.items():
         package = managed_package(name)
         wanted = digest(package["files"])
         row = db.execute(
-            "SELECT id,digest,managed FROM platform_skills WHERE name=?", (name,)
+            "SELECT id,digest,managed,bundle FROM platform_skills WHERE name=?",
+            (name,),
         ).fetchone()
         if row and not row[2]:
             # A custom Skill already uses the name; never overwrite it.
@@ -411,15 +441,28 @@ def ensure_base(db):
         if row and row[1] == wanted:
             continue
         if row:
+            bundled, stored = template_version(package["files"]), stored_version(row[3])
+            if stored >= bundled:
+                if stored == bundled:
+                    # Same version, other text: a template changed without
+                    # raising its version. Neither copy replaces the other.
+                    log.warning(
+                        "PLATFORM_SKILL_VERSION_UNCHANGED name=%s version=%s",
+                        name,
+                        bundled,
+                    )
+                continue
+            # Only the copy judged older is replaced: another container may
+            # have refreshed the row since it was read.
             db.execute(
                 "UPDATE platform_skills SET description=?,digest=?,bundle=?,revision=revision+1,"
-                "updated_by='platform',updated_at=CURRENT_TIMESTAMP WHERE id=? AND digest!=?",
+                "updated_by='platform',updated_at=CURRENT_TIMESTAMP WHERE id=? AND digest=?",
                 (
                     package["description"],
                     wanted,
                     encode(package["files"]),
                     row[0],
-                    wanted,
+                    row[1],
                 ),
             )
             continue
@@ -456,7 +499,17 @@ def decode(raw):
     return json.loads(cipher().decrypt(raw.encode()))
 
 
+UNREADABLE = "Skill 内容无法读取（加密密钥已更换或数据损坏），请重新导入或删除"
+
+
 def rows(include_content=False):
+    """Every stored Skill, the platform ones refreshed first.
+
+    A stored Skill this version cannot read or no longer accepts (an upgrade
+    tightened validation) carries `invalid`, the reason, instead of failing
+    the list, every task snapshot and Skill 管理 for everyone; snapshot()
+    leaves it out, and an administrator can see, export or delete it.
+    """
     from .main import connection
 
     with connection() as db:
@@ -473,23 +526,41 @@ def rows(include_content=False):
             json.loads(row["scopes"]),
             json.loads(row["providers"]),
         )
-        files = decode(row.pop("bundle"))
+        try:
+            files = decode(row.pop("bundle"))
+            text = files["SKILL.md"]
+        except Exception:
+            files, text, reason = {}, None, UNREADABLE
         row["resources"] = sorted(path for path in files if path != "SKILL.md")
+        if text is not None and include_content:
+            try:
+                row.update(parse_document(text))
+                reason = None
+            except ValueError as exc:
+                reason = str(exc)
+        elif text is not None:
+            applicability, reason = _checked(text)
+            row.update(applicability)
+        if reason:
+            row["invalid"] = reason
         if include_content:
-            row.update(parse_document(files["SKILL.md"]))
+            if reason:
+                # What an administrator needs to judge it; never loaded.
+                row.setdefault("instructions", skill_body({"files": files}))
+                row.setdefault("prefetch", [])
             row["files"] = files
-        else:
-            row.update(_applicability_of(files["SKILL.md"]))
     return values
 
 
 @cache
-def _applicability_of(text):
+def _checked(text):
+    """(types / devices, None) of a stored SKILL.md this version accepts, or
+    ({}, why it does not)."""
     try:
         parsed = parse_document(text)
-    except ValueError:
-        return {}
-    return {key: parsed[key] for key in ("types", "devices") if key in parsed}
+    except ValueError as exc:
+        return {}, str(exc)
+    return {key: parsed[key] for key in ("types", "devices") if key in parsed}, None
 
 
 def get(ident):
@@ -655,7 +726,20 @@ def configure_base(
 
 def snapshot(request, source):
     scope = scope_of(request, source)
-    selected = [row for row in rows(True) if row["enabled"] and scope in row["scopes"]]
+    selected = []
+    for row in rows(True):
+        if not row["enabled"] or scope not in row["scopes"]:
+            continue
+        if row.get("invalid"):
+            # One broken Skill must not stop every task: left out, said so.
+            log.warning(
+                "SKILL_SKIPPED_INVALID name=%s scope=%s reason=%s",
+                row["name"],
+                scope,
+                row["invalid"],
+            )
+            continue
+        selected.append(row)
     # A custom Skill in "standalone" mode replaces the base Skill for this scope;
     # "supplement" Skills load alongside it (higher priority first).
     if any(not row["managed"] and row["mode"] == "standalone" for row in selected):

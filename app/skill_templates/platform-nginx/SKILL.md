@@ -31,3 +31,5 @@ prefetch:
 - 给出窗口内总请求数、5xx / 4xx / 499 的数量与占比、主要错误码、受影响最多的 URI 与客户端，以及上游错误分类计数（引用证据编号）。
 - 访问日志只读取文件尾部有限字节、窗口被轮转切断时（window_not_covered）要写明统计覆盖范围；不能把样本当全量。
 - 不建议直接重启 Nginx：先给出上游修复方向；需要调整 proxy_*_timeout、worker_connections、keepalive 时说明依据与风险。
+
+<!-- platform-template-version: 1 -->

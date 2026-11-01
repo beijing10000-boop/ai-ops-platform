@@ -421,6 +421,7 @@ def test_alert_prefetch_finds_the_log_source_then_reads_the_alert_window(logs):
     assert evidence["log_target"] == {
         "evidence_id": "E1",
         "target": "198.51.100.40",
+        "identity": "ip",
         "source_types": ["nginx_access", "os"],
     }
     prefetched = {p["tool"]: p["result"] for p in evidence["prefetched"]}
@@ -440,6 +441,7 @@ def test_alert_prefetch_finds_the_log_source_then_reads_the_alert_window(logs):
     assert report["capabilities"]["logs"] == {
         "status": "used",
         "target": "198.51.100.40",
+        "identity": "ip",
     }
     assert report["capabilities"]["diagnostic_path"] == "logs-only"
     assert set(report["coverage"]["collected"]) == set(prefetched)

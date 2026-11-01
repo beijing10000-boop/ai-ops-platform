@@ -15,6 +15,8 @@ import time
 
 from openai import AsyncOpenAI, APIConnectionError, APIStatusError
 from .ai_reliability import (
+    SUMMARY_SECONDS,
+    recoverable,
     evidence_fallback,
     model_failure_code,
     model_failure_message,
@@ -87,6 +89,10 @@ ALERT_WINDOW, BASELINE_DAYS, HISTORY_ROWS, HISTORY_PAGES = 1800, 7, 1000, 3
 TREND_ITEMS = HISTORY_ROWS // (BASELINE_DAYS * 24)
 # Why a prefetch job did not run: the prefetch share of `calls` ran out.
 PREFETCH_SHORT = "预采集次数不足，未执行（AI 配置 → 分析预算：采集次数 − 保留补查次数）"
+# Prefetch may use this share of the task's seconds, so a slow MCP service
+# cannot leave the model no time; what has not answered by then is skipped.
+PREFETCH_SHARE = 0.5
+PREFETCH_LATE = "预采集超过时间上限（任务总时间的一半），未等到结果"
 # Log-style SSH tools get the alert moment ±15 min as their window.
 LOG_WINDOW = 900
 TRANSIENT_CODES = {"busy", "timeout"}
@@ -112,6 +118,10 @@ SSH_CLOSED = {"unavailable", "not_ready", "not_applicable", "disabled"}
 LOGS_CLOSED = {"disabled", "unreachable", "unavailable", "not_onboarded"}
 # Prefetched log tools read the alert moment ±30 minutes.
 LOG_MINUTES = 30
+# The target's log source is looked up by up to this many of its IPs, then by
+# its Zabbix host name (technical names: letters, digits, space, . _ -).
+LOG_IPS = 3
+HOST_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,127}")
 # Topic tools and the log type each reads; skipped for a source without it.
 LOG_TOPICS = {
     "log_network_events": ("network", "网络设备"),
@@ -284,26 +294,35 @@ def fill_arguments(schema, base, *, clock, now, service=None, entry=None):
     return None if required - set(args) else args
 
 
-def log_address(target, event, hosts):
-    """The IP that names the target's log source: the task's own IP, else the
-    alert's {HOST.IP}, else the verified Zabbix host's main interface."""
+def log_identities(target, event, hosts):
+    """[("ip" | "hostname", value)] that may name the target's log source, in
+    the order they are tried: the task's own IP, the alert's {HOST.IP}, the
+    verified Zabbix host's interfaces (main first), then that host's name.
+    log_resolve_target matches each exactly; none is guessed."""
     candidates = [target[1] if target and target[0] == "ip" else None]
     candidates.append(event.get("host_ip"))
+    names = []
     for row in hosts:
-        interfaces = row.get("interfaces") if isinstance(row, dict) else None
-        rows = [item for item in interfaces or [] if isinstance(item, dict)]
+        if not isinstance(row, dict):
+            continue
+        rows = [item for item in row.get("interfaces") or [] if isinstance(item, dict)]
         candidates.extend(
             item.get("ip")
             for item in sorted(rows, key=lambda i: str(i.get("main")) != "1")
         )
+        names.append(str(row.get("host") or "").strip())
+    addresses = []
     for value in candidates:
         try:
             address = ipaddress.ip_address(str(value or "").strip())
         except ValueError:
             continue  # empty, an unexpanded {HOST.IP} macro or a DNS name
         if not (address.is_loopback or address.is_unspecified):
-            return str(address)
-    return None
+            if str(address) not in addresses:
+                addresses.append(str(address))
+    identities = [("ip", address) for address in addresses[:LOG_IPS]]
+    name = next((name for name in names if HOST_NAME.fullmatch(name)), None)
+    return identities + ([("hostname", name)] if name else [])
 
 
 def log_arguments(schema, target, *, clock, now, minutes):
@@ -621,6 +640,9 @@ async def run(
     # could not cover. Resolving the target's SSH asset or log source is
     # identity, not evidence: counted in `calls`, not charged here.
     taken, dropped = 0, []
+    # Prefetch ends by this moment (PREFETCH_SHARE of the task's seconds,
+    # set when it starts); its calls still waiting then are listed as skipped.
+    prefetch_deadline, pending = deadline, {}
     gaps, reasons, notes = [], [], []
     # Budget limits that shaped the run; reported, but not diagnostic gaps.
     limits_hit = []
@@ -832,7 +854,10 @@ async def run(
     async def call_bridge(provider, native, arguments, rows=None):
         try:
             tasks.stage(task_id, "skill_" + str(provider))
-            return await bridge.call(provider, native, arguments, rows=rows)
+            # A service with a time budget answers within prefetch's time cap.
+            return await bridge.call(
+                provider, native, arguments, rows=rows, answer_by=prefetch_deadline
+            )
         except (tasks.Cancelled, asyncio.CancelledError):
             raise
         except Exception as exc:
@@ -844,21 +869,25 @@ async def run(
 
         A busy or timed-out SSH call is retried once; the platform fans out
         several diagnostics of one host at a time and the service queues them.
+        A call prefetch's time cap stops stays in `pending` (listed as skipped).
         """
         nonlocal calls
         calls += 1
         started = time.monotonic()
+        key = object()
+        pending[key] = str(native)
         kind = "prefetch"
         outcome = clean(await call_bridge(provider, native, arguments, rows))
         if (
             provider == "ssh_mcp"
             and transient(outcome)
-            and time.monotonic() < deadline - 20
+            and time.monotonic() < min(deadline, prefetch_deadline) - 20
         ):
             await asyncio.sleep(1.5)
             retry = clean(await call_bridge(provider, native, arguments, rows))
             if not failed(retry) or not transient(retry):
                 outcome, kind = retry, "retry"
+        del pending[key]
         return outcome, record(provider, native, outcome, started, arguments, kind)
 
     async def catalog(provider):
@@ -912,11 +941,29 @@ async def run(
         A job is (provider, tool, arguments) with an optional row cap; a
         result that fills its cap is marked before the model sees it.
         `charged`: the caller already took these jobs from the budget.
+        When prefetch's time cap stops the jobs still waiting, the ones that
+        answered are kept all the same.
         """
         jobs = jobs if charged else take(jobs, room, keep)
-        results = await asyncio.gather(*(execute(*job) for job in jobs))
+        done = {}
+
+        async def run(position, job):
+            done[position] = await execute(*job)
+
+        try:
+            await asyncio.gather(*(run(n, job) for n, job in enumerate(jobs)))
+        except BaseException:
+            settle(jobs, done)
+            raise
+        return settle(jobs, done)
+
+    def settle(jobs, done):
+        """Record the answered jobs, in job order, for the opening message."""
         stage = []
-        for (provider, native, arguments, *cap), (outcome, ident) in zip(jobs, results):
+        for position, (provider, native, arguments, *cap) in enumerate(jobs):
+            if position not in done:
+                continue
+            outcome, ident = done[position]
             records = outcome.get("records")
             if cap and isinstance(records, list) and len(records) >= cap[0]:
                 outcome["limit_reached"] = True
@@ -986,6 +1033,9 @@ async def run(
                 page += 1
 
     prefetched, collected = [], []
+    # What prefetch() found for the opening message, and the tool schemas its
+    # plan preloads: kept as far as it got when its time cap stops it.
+    found, schemas = {}, []
 
     async def prefetch():
         """Collect the evidence the loaded Skills declare for this scope and type.
@@ -996,10 +1046,10 @@ async def run(
         item-key search while the SSH asset is resolved (Linux or unknown hosts
         only); stage C runs the SSH diagnostics (one ssh_collect session when
         the service offers it) in parallel with the alert-window history and
-        the 7-day baseline.
+        the 7-day baseline. Results go to `found` as they come, so what was
+        collected stays when the time cap stops it (finish_prefetch()).
         """
         nonlocal diagnostic_type, service
-        found = {}
         room = limits["calls"] - limits["follow_up_calls"]
         trigger = str(event.get("trigger_id") or "")
         fields = [
@@ -1105,6 +1155,7 @@ async def run(
         plan = prefetch_plan(
             skills, scope, diagnostic_type, capabilities["device_type"]
         )
+        schemas[:] = plan["schemas"]
 
         # The SSH session opens here, in this task, not inside the gathered
         # resolve below: an MCP session entered in a child task cannot be
@@ -1118,9 +1169,9 @@ async def run(
         # The log MCP session opens here for the same reason; the target's log
         # source is resolved alongside the SSH asset, its log tools run in
         # stage C. Logs serve every device type, network devices included.
-        log_ip = log_address(target, event, hosts)
+        log_ids = log_identities(target, event, hosts)
         logs_wanted = bool(
-            log_ip
+            log_ids
             and plan["logs"]
             and (capabilities.get("logs") or {}).get("status") == "available"
         )
@@ -1128,7 +1179,12 @@ async def run(
 
         async def resolve_log():
             """The target's log source as log_resolve_target confirms it, or
-            None with the reason in capabilities (a note, never a gap)."""
+            None with the reason in capabilities (a note, never a gap).
+
+            Its identities are tried in turn (log_identities()): an IP the log
+            platform has no logs from moves on to the next IP, then to the
+            host name. An identity several hosts answer to (NAT, a relay) is
+            ambiguous: that source is not read rather than read mixed."""
             if not logs_wanted or logs_closed():
                 # Not planned, or the session failed (catalog() noted why).
                 return None
@@ -1138,57 +1194,93 @@ async def run(
                     "reason": "日志 MCP 未提供 log_resolve_target，请升级日志分析平台",
                 }
             else:
-                arguments = {"ip": log_ip}
-                outcome, ident = await execute("logs", "log_resolve_target", arguments)
-                data = (
-                    outcome.get("data") if isinstance(outcome.get("data"), dict) else {}
-                )
-                if not failed(outcome):
+                state, tried = None, []
+                hint = "最近 7 天没有来自该目标的日志"
+                # Only the identities the service's tool takes (a log platform
+                # without `hostname` is asked by IP alone).
+                schema = getattr(log_catalog["log_resolve_target"], "inputSchema", None)
+                offered = set((schema or {}).get("properties") or {}) or {"ip"}
+                asked = [item for item in log_ids if item[0] in offered]
+                if not asked:
+                    state = {
+                        "status": "unavailable",
+                        "reason": "该目标没有可用的 IP，日志 MCP 不支持按主机名定位来源，"
+                        "请升级日志分析平台",
+                    }
+                for kind, value in asked:
+                    arguments = {kind: value}
+                    outcome, ident = await execute(
+                        "logs", "log_resolve_target", arguments
+                    )
+                    data = (
+                        outcome.get("data")
+                        if isinstance(outcome.get("data"), dict)
+                        else {}
+                    )
+                    label = value if kind == "ip" else "主机名 " + value
+                    if failed(outcome):
+                        state = {
+                            "status": "unavailable",
+                            "reason": "日志来源定位失败："
+                            + str(outcome.get("error") or "日志 MCP 返回失败")[:180],
+                            **(
+                                {"error_code": str(data["error_code"])[:40]}
+                                if data.get("error_code")
+                                else {}
+                            ),
+                        }
+                        break
                     # The model asking for the same lookup gets this evidence.
                     signature = signature_of("logs", "log_resolve_target", arguments)
                     cache[signature], cited_ids[signature] = outcome, ident
-                if (
-                    not failed(outcome)
-                    and data.get("found") is True
-                    and data.get("target") == log_ip
-                ):
+                    if data.get("found") is not True or data.get("target") != value:
+                        tried.append(label)
+                        hint = str(data.get("hint") or hint)
+                        continue
+                    matches = [
+                        m for m in data.get("matches") or [] if isinstance(m, dict)
+                    ]
+                    sources = {}
+                    for match in matches:
+                        host = str(match.get("host") or "").strip()
+                        sources.setdefault(host.casefold(), host or "（未命名）")
+                    if len(sources) > 1:
+                        names = list(sources.values())
+                        state = {
+                            "status": "unavailable",
+                            "error_code": "ambiguous",
+                            "reason": f"{label} 对应多个日志来源（"
+                            + "、".join(names[:5])
+                            + ("等" if len(names) > 5 else "")
+                            + "），无法确定哪个是目标主机，未合并读取",
+                        }
+                        break
                     types = sorted(
                         {
-                            str(kind)
-                            for match in data.get("matches") or []
-                            if isinstance(match, dict)
-                            for kind in match.get("types") or []
+                            str(log_type)
+                            for match in matches
+                            for log_type in match.get("types") or []
                         }
                     )
+                    # The identity that found it, and those that found nothing.
+                    located = {
+                        "target": value,
+                        "identity": kind,
+                        **({"tried": tried} if tried else {}),
+                    }
                     capabilities["logs"] = {
                         "status": "available",
-                        "target": log_ip,
+                        **located,
                         "source_types": types,
                     }
                     found["log_target"] = shown(
-                        ident, {"target": log_ip, "source_types": types}
+                        ident, {**located, "source_types": types}
                     )
-                    return {"target": log_ip, "types": set(types)}
-                if failed(outcome):
-                    state = {
-                        "status": "unavailable",
-                        "reason": "日志来源定位失败："
-                        + str(outcome.get("error") or "日志 MCP 返回失败")[:180],
-                        **(
-                            {"error_code": str(data["error_code"])[:40]}
-                            if data.get("error_code")
-                            else {}
-                        ),
-                    }
-                else:
-                    state = {
-                        "status": "not_onboarded",
-                        "reason": log_ip
-                        + " "
-                        + str(data.get("hint") or "最近 7 天没有来自该目标的日志")[
-                            :180
-                        ],
-                    }
+                    return {"target": value, "types": set(types)}
+                state = state or {
+                    "status": "not_onboarded",
+                    "reason": "、".join(tried) + " " + hint[:180],
+                }
             capabilities["logs"] = state
             notes.append("日志证据未采集：" + state["reason"])
             return None
@@ -1327,6 +1419,7 @@ async def run(
         plan = prefetch_plan(
             skills, scope, diagnostic_type, capabilities["device_type"]
         )
+        schemas[:] = plan["schemas"]
         ssh_jobs = ssh_prefetch_jobs(plan["ssh"], ssh_tools, binding) if binding else []
         log_jobs = (
             log_prefetch_jobs(plan["logs"], log_catalog, log_source)
@@ -1381,6 +1474,29 @@ async def run(
             paged_history(covered(history), room, charged=True),
             collect(covered(log_jobs), room, charged=True),
         )
+
+    def prefetch_stopped(cap):
+        """Prefetch's time cap ran out: what had not answered is skipped, and
+        the model gets the rest of the task's time."""
+        late = list(pending.values())
+        pending.clear()
+        for tool in late:
+            coverage["skipped"].append({"tool": tool, "reason": PREFETCH_LATE})
+        limits_hit.append(
+            f"预采集超过时间上限（{cap:.0f} 秒，任务总时间的一半）"
+            + (
+                f"：{len(late)} 项未等到结果（" + "、".join(dict.fromkeys(late)) + "）"
+                if late
+                else ""
+            )
+            + "，其余时间留给模型分析与补查"
+        )
+
+    async def finish_prefetch(stopped=False):
+        """The opening message's prefetch parts, from what was collected:
+        results, derived signals, preloaded schemas, the tools the tokens may
+        not run. `stopped`: the time cap ended prefetch, and no MCP session it
+        had not opened yet is opened for a schema."""
         if dropped:
             limits_hit.append(
                 f"预采集次数不足：{len(dropped)} 项未执行（"
@@ -1396,7 +1512,7 @@ async def run(
             # from the evidence it points at.
             attach_signals(evidence_index, signals)
         definitions = []
-        for name in plan["schemas"]:
+        for name in schemas:
             provider = (
                 "ssh_mcp"
                 if name.startswith("ssh_")
@@ -1405,6 +1521,8 @@ async def run(
                 else "zabbix_mcp"
             )
             if provider == "logs" and logs_closed():
+                continue
+            if stopped and provider not in bridge.sessions:
                 continue
             if provider in providers and name in await catalog(provider):
                 definitions.extend(
@@ -1425,7 +1543,6 @@ async def run(
             capabilities["unauthorized_log_tools"] = bridge.unauthorized_log_tools()
         if service:
             found["service"] = service
-        return found
 
     def log_prefetch_jobs(planned, log_tools, source):
         """Log tools on the resolved source around the alert; a topic tool for
@@ -1610,8 +1727,13 @@ async def run(
             if used[provider]:
                 capabilities[provider] = {
                     "status": "used",
-                    # The log source the evidence came from.
-                    **({"target": state["target"]} if state.get("target") else {}),
+                    # The log source the evidence came from, the identity that
+                    # found it and those that found nothing before it.
+                    **{
+                        key: state[key]
+                        for key in ("target", "identity", "tried")
+                        if state.get(key)
+                    },
                 }
             elif state.get("status") == "available":
                 state["status"] = "unused"
@@ -1991,7 +2113,19 @@ async def run(
             async with asyncio.timeout(max(0.1, deadline - time.monotonic())):
                 tasks.stage(task_id, "skill_prefetch")
                 prefetch_started = time.monotonic()
-                found = await prefetch()
+                # Its own share of the task's time: a slow MCP service cannot
+                # use it all before the model runs.
+                cap = PREFETCH_SHARE * limits["seconds"]
+                prefetch_deadline = prefetch_started + cap
+                capped = asyncio.timeout(max(0.1, prefetch_deadline - time.monotonic()))
+                try:
+                    async with capped:
+                        await prefetch()
+                except TimeoutError:
+                    if not capped.expired():
+                        raise
+                    prefetch_stopped(cap)
+                await finish_prefetch(stopped=capped.expired())
                 timing["prefetch_ms"] = int(
                     (time.monotonic() - prefetch_started) * 1000
                 )
@@ -2158,7 +2292,28 @@ async def run(
                         # "none"; each "tool does not exist" reply re-sends the
                         # whole context and the attempts leak into the answer.
                         conversation.append({"role": "user", "content": SUMMARY_TURN})
-                    response = await model_round(final)
+                    try:
+                        response = await model_round(final)
+                    except (APIConnectionError, APIStatusError) as exc:
+                        # An analysis round the model did not answer (timeout,
+                        # lost connection, 429/5xx after its retry): one summary
+                        # round over the evidence already collected, when time
+                        # allows, instead of a report with no conclusion.
+                        if (
+                            final
+                            or not recoverable(exc)
+                            or deadline - time.monotonic()
+                            < max(SUMMARY_SECONDS, longest_model)
+                        ):
+                            raise
+                        missed = model_failure_message(exc)
+                        final = True
+                        conversation.append({"role": "user", "content": SUMMARY_TURN})
+                        response = await model_round(True)
+                        gaps.append(
+                            f"{missed}（第 {number + 1} 轮），平台改为总结轮，"
+                            "依据已取得的证据给出结论，原计划的补查没有执行"
+                        )
                     number += 1
                     check()
                     output = list(response.output or [])

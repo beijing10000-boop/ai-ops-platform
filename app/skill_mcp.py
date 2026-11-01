@@ -537,7 +537,10 @@ class SkillMCP:
             else device_type,
         }
 
-    async def call(self, provider, name, arguments, *, rows=None):
+    async def call(self, provider, name, arguments, *, rows=None, answer_by=None):
+        """One validated tool call. `answer_by`: an earlier moment than the
+        task deadline by which the caller needs the answer (prefetch's time
+        cap); a service that takes a time budget is asked to answer before it."""
         self.check(provider)
         tools = await self.catalog(provider)
         if (
@@ -630,7 +633,12 @@ class SkillMCP:
                 # finished inside it, before this call's own timeout ends,
                 # instead of losing the slow host's partial evidence. A
                 # budget the model gives gets the same cap.
-                seconds = min(timeout, self.deadline - time.monotonic()) - 10
+                limit = (
+                    self.deadline
+                    if answer_by is None
+                    else min(self.deadline, answer_by)
+                )
+                seconds = min(timeout, limit - time.monotonic()) - 10
                 if asked is not None:
                     seconds = min(asked, seconds)
                 low, high = bounds(budget)
