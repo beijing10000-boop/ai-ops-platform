@@ -14,6 +14,8 @@ from zoneinfo import ZoneInfo
 
 BEIJING = ZoneInfo("Asia/Shanghai")
 FRESH_SECONDS = 600
+# Derived signals the model gets at most (derive_signals).
+MAX_SIGNALS = 14
 # Alert types for which "are the host's items still being collected" separates
 # a dead host from a stopped agent; a CPU or disk alert is not about the agent.
 AVAILABILITY_TYPES = {"unreachable"}
@@ -882,7 +884,7 @@ def derive_signals(collected, event_clock=None, diagnostic_type=None):
     `diagnostic_type` limits the collection-freshness check to availability
     alerts; without it (None) every task gets it.
     """
-    signals, latest, keys = [], {}, {}
+    signals, ssh, latest, keys = [], [], {}, {}
     clocks, clock_evidence = {}, None
     for provider, tool, outcome, evidence_id in collected:
         if not isinstance(outcome, dict):
@@ -908,7 +910,7 @@ def derive_signals(collected, event_clock=None, diagnostic_type=None):
                     "warning",
                     "critical",
                 }:
-                    signals.append(
+                    ssh.append(
                         {
                             "source": "ssh_mcp",
                             "evidence_id": evidence_id,
@@ -1026,7 +1028,12 @@ def derive_signals(collected, event_clock=None, diagnostic_type=None):
     signals.extend(_history_signals(collected, event_clock, keys))
     signals.extend(_event_signals(collected))
     signals.extend(_log_signals(collected))
-    return signals[:14]
+    # SSH MCP writes a finding per process (heap_max_unset for each JVM without
+    # -Xmx): repeated ones become one signal with a count, and SSH takes at most
+    # half of the cap while Zabbix or logs have signals too.
+    ssh = _merged(ssh)
+    keep = max(MAX_SIGNALS // 2, MAX_SIGNALS - len(signals))
+    return (ssh[:keep] + signals)[:MAX_SIGNALS]
 
 
 def model_alert(event):

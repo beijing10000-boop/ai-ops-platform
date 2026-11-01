@@ -1,5 +1,105 @@
 # 升级说明
 
+## v1.4.5 → 未发布（预计 v1.5.0）
+
+尚未发布，以下按发布后的 main 分支编写。没有数据库迁移，没有新增或改名的配置项；`docker-compose.yml` 有改动（三个分析 Worker 的停止宽限期），快速档的默认采集次数由 8 改为 10。平台维护的 Skill platform-base、platform-java、platform-service 正文有更新，升级后第一次创建诊断任务或打开“Skill 管理”时自动刷新（版本号加 1；管理员停用的仍保持停用）。变化明细见 CHANGELOG 的“未发布”一节。
+
+### 1. 升级顺序
+
+先升级 SSH MCP 与日志分析平台各自的下一版（同样未发布），再升级本平台。本平台对 SSH MCP v0.8.0、日志分析平台 v0.1.8 仍然兼容，暂不升级它们也能运行：平台按工具的参数结构判断能力，只有 SSH MCP 工具的参数结构里有 `timeout_seconds`（下一版的 `ssh_collect`）时才传入该参数，让慢主机先返回已完成的步骤，旧版本照旧调用；旧版 `ssh_collect` 某个步骤失败时仍整体返回成功，平台按步骤判断，把失败的步骤记为诊断不足。
+
+### 2. 备份
+
+本次没有表结构变化，回滚不需要恢复备份，但升级前照常备份：数据卷 `appdata`（数据库与主密钥）和 `redisdata`（Redis：排队中的任务、飞书追问上下文）。
+
+先在“分析历史”确认没有“等待执行”或“执行中”的任务：这次被替换的旧容器还没有停止宽限期，停止时正在进行的分析会被中断（新版本会把它收尾为 WorkerLost，不会重新执行）。然后在平台部署目录执行：
+
+```bash
+cd /data/ai-ops-platform
+B=backup-$(date +%Y%m%d-%H%M)
+mkdir -p "$B"
+git rev-parse HEAD > "$B/source-revision.txt"
+docker compose --profile feishu stop
+docker compose run --rm --no-deps -v "$PWD/$B:/backup" --user 0 web sh -c 'mkdir -p /backup/appdata && cp -a /app/data/. /backup/appdata/'
+docker compose run --rm --no-deps -v "$PWD/$B:/backup" redis sh -c 'mkdir -p /backup/redis && cp -a /data/. /backup/redis/'
+```
+
+备份目录含加密数据库与主密钥，限制访问权限并移到受控的备份位置，不要提交到 Git（`.gitignore` 已忽略 `backup-*/`）；以前使用 `.env` 中 `APP_ENCRYPTION_KEY` 的部署同时保留 `.env`。
+
+### 3. 升级平台
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://服务器IP:8088/healthz
+```
+
+未启用飞书接收器时去掉 `--profile feishu`；不要执行 `down -v`。部署目录里改过 `docker-compose.yml` 的，`git pull` 会因本次改动提示冲突，先把本地修改移到 `docker-compose.override.yml` 再拉取。healthz 应返回 `"ok": true`，version 为发布时的版本号（预计 1.5.0）。主页静态资源地址改为 `?v=1.5.0`，刷新页面即可。
+
+### 4. 数据库与配置
+
+- **数据库**：没有迁移，不建表、不加列、不改索引，也没有新增或改名的配置项。新版本只在已有字段中写入数据，任务、告警与问答的状态取值都与 v1.4.5 相同；错误类型新增 `DailyBudget`（排队的自动分析开始前发现超出每日额度，任务记为“已取消”），报告的证据覆盖可能多出一项 `limited`（日志窗口未覆盖告警时刻）。
+- **启动时的收尾**：新的告警分析与问答 Worker（alert-analysis-worker、qa-worker，alert-worker 不做这项检查）启动后立即检查一次被中断留下的记录（之后约每 10 分钟一次），升级前遗留的记录也在这时收尾：告警中心长期停在“执行中”的告警改为其最近一次分析的结果；长期“执行中”的问答（飞书或 Web）记为失败（`WorkerLost`），问答统计中的失败数可能因此一次性增加；排队超过 10 分钟、队列里对应任务已不存在或已结束的分析记为 `QueueLost`。只是收尾，不会重新执行。
+- **快速档采集次数**：默认值由 8 改为 10，只对没有保存过预算的环境自动生效。在“系统配置 → AI 配置”保存过一次的，分析预算表中的数字都已按当时显示的值保存，快速分析仍是 8，建议改为 10（或更多）后保存。8 次时预采集通常只放得下告警时段的历史，SSH 实时诊断等会在报告“证据覆盖”中列为跳过（“预采集次数不足”）。
+- **每日 Token 上限**：设置了“自动分析每日 Token 上限”（系统配置 → 飞书配置）的，排队中与执行中的自动分析按任务 Token 预算预先计入，告警集中到达时自动分析会比以前更早停止，需要时调高上限。
+- **停止宽限期**：`docker-compose.yml` 为 alert-analysis-worker、qa-worker、diagnostic-worker 增加 `stop_grace_period: 6m`。从本次新建的容器起，重建或停止时先完成当前分析再退出，有分析在进行时 `docker compose up -d --build`、`stop`、`down` 最多等待约 6 分钟；确需立即停止时加 `-t 10`。本次被替换的旧容器没有这项设置。
+- **改地址后的密钥**：验证连接（含验证模型连接）时改了模型或 MCP 的地址，须重新填写对应的 API Key 或令牌。保存配置不受此限制，这是有意保留的行为：只改地址、密钥保持掩码时，保存后沿用已保存的密钥，此后的诊断会把它发往新地址，确认新地址可信后再保存。
+- **密钥格式**：Zabbix Webhook 密钥与模型 API Key 只能使用 ASCII 可见字符、不能含空白，重新填写时不符合会被拒绝；已保存的值不受影响。已保存的 Webhook 密钥若含非 ASCII 字符（此前这样的推送就以 500 失败），现在返回 401，需换成 ASCII 密钥并同步修改 Zabbix 媒介类型的 `secret`。
+- **自定义 Skill**：v1.4.5 及更早版本在 Web 上编辑或启停自定义 Skill 时会去掉 SKILL.md 中的 `types` / `devices`。导入时带这两项、之后又在 Web 上改过的 Skill，升级后用原 ZIP 重新导入（选择更新同名 Skill）恢复限定；新版本在 Web 上修改不再丢失。
+
+### 5. 接口行为变化
+
+供用脚本或其他系统调用本平台 API 的对接方参考：
+
+- Skill 修改（`PUT /api/v1/platform/skills/{id}`）、替换导入（`POST /api/v1/platform/skills` 且 `replace_existing: true`）与删除（`DELETE /api/v1/platform/skills/{id}`）：操作后告警分析、飞书问答或 Web 诊断将没有任何可用的 Skill 时返回 409，`detail` 为 `{"code": "skill_scopes_uncovered", "scopes": [...], "message": "..."}`，`scopes` 取值为 `qa`、`web`、`alert`。确认后重发：修改与导入在请求体加 `"confirm": true`（JSON 布尔值），删除在地址后加 `?confirm=true`；不影响场景覆盖的操作不需要。删除平台维护的 Skill 仍返回 409，但 `detail` 是一段文字说明，可按 `detail.code` 区分。
+- 连接测试（`POST /api/v1/test/ai`，以及带 `values` 草稿的 `POST /api/v1/platform/tools/discover?provider=…`）：草稿改了 `openai_base_url`、`mcp_url`、`ssh_mcp_url` 或 `log_mcp_url`，而对应的 `openai_api_key`、`mcp_token`、`ssh_mcp_token`、`log_mcp_token` 缺省或为掩码 `********` 时返回 422“修改地址后请重新填写密钥/令牌”，已保存的密钥不会在验证时发往新地址。`PUT /api/v1/settings` 不做这项检查（有意保留）：同样的请求体照常保存，沿用已保存的密钥。
+- 配置校验（`PUT /api/v1/settings`、`POST /api/v1/settings/validate` 与上述连接测试）：`zabbix_webhook_secret`、`openai_api_key` 含非 ASCII 字符、不可打印字符或空白时返回 422。`POST /zabbix` 的 Authorization 头含非 ASCII 字符时返回 401（此前 500）。
+- 飞书投递：多个告警群中只有部分发送失败时，告警通知任务不再失败，事件的发送状态为 `sent`，worker 日志记 `FEISHU_APP_ALERT_PARTIAL delivered=N failed=M`；所有群都失败时仍记为 `failed`。
+- 诊断任务：排队的自动分析因每日额度未执行时为 `cancelled` + `DailyBudget`；排队超过 10 分钟、队列任务已不存在或已结束的为 `failed` + `QueueLost`，由 Worker 定期写入，不再只在同一事件再次提交时出现。`POST /api/v1/ask` 创建的任务 `actor` 为提问管理员的 Open ID（此前为 `system`）。
+- 审计：新增 `web_question`、`ai_model_test`、`feishu_connection_test`；`mcp_connection_test` 的 key 由提供方名改为“提供方 主机:端口”。
+- `POST /api/v1/setup` 的成功响应新增 `callback_url`（实际保存的回调地址）。
+
+### 6. 验收
+
+```bash
+docker compose --profile feishu ps
+docker compose config | grep stop_grace_period
+curl -fsS http://服务器IP:8088/healthz
+```
+
+- `ps` 中各服务都在运行、web 为 healthy，alert-analysis-worker 的数量与 `AI_ALERT_ANALYSIS_WORKERS` 一致（默认 2）；`grep` 输出 3 行，对应三个分析 Worker。
+- “Skill 管理”：platform-base、platform-java、platform-service 版本号加 1，页面顶部没有“没有可用的诊断 Skill”的提示。点 platform-base 的“停用”应先弹出确认框写明后果，点“取消”即可，不会保存。
+- “系统配置 → AI 配置 → 分析预算”：快速分析的采集次数为 10；显示 8 是升级前保存的值，按上面的说明处理。
+- 对一条测试告警（例如按 [7.4 告警恢复配置](ZABBIX-74-ALERT-RECOVERY.md) 用测试 Trapper 监控项产生的告警）在飞书卡片上点“🤖 AI分析”，从回复卡片的“查看完整诊断报告”打开报告核对：
+  - “诊断范围”的“设备类型与路径”只在实际取得 SSH 诊断结果时写“Zabbix 历史 + SSH 实时联合分析”；只解析到 SSH 资产时“能力说明”写“SSH MCP已授权但本次未调用”，SSH 不可用时写明原因。
+  - “证据覆盖”的“已采集”里有告警时段的 `history_get`（已在 SSH MCP 登记的 Linux 主机还有 `ssh_collect`）；放不下的预采集项列在“跳过”，原因为“预采集次数不足”，“分析预算”中同时有对应的预算限制说明。
+  - 飞书的“AI 分析结果”卡片容量写 GiB、没有证据编号。
+- 升级 10 分钟后执行 `docker compose logs --since=15m alert-analysis-worker qa-worker | grep -E "RECONCILE_FAILED|PROGRESS_CARD_CLOSE_FAILED"`，应没有输出。
+
+### 回滚
+
+没有表结构变化，不需要恢复备份。同样先确认没有“等待执行”或“执行中”的任务，然后切回 v1.4.5（`ed0d04e`）重建：
+
+```bash
+cd /data/ai-ops-platform
+git switch --detach ed0d04e
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://服务器IP:8088/healthz
+```
+
+healthz 应返回 version 1.4.5。新版本写入的数据 v1.4.5 都能读取：
+
+- 只在已有的表和字段中写入数据，状态取值都是 v1.4.5 已有的。错误类型为 `DailyBudget`、`QueueLost` 的任务在 v1.4.5 的报告页显示通用的“分析未完成……”提示，报告正文仍写明原因。
+- 报告中新增的 `coverage.limited`、证据上的 `limit_reached` / `rejected` 标记与新的线索类型，v1.4.5 忽略或按原文显示；日志窗口不足等说明同时写在“分析预算”的预算限制里，旧版照常显示。
+- Redis 中新增的 `feishu-ai:progress:*` 记录 24 小时内自动过期，v1.4.5 不读取；队列中的任务格式不变，旧 Worker 照常执行。
+- platform-base、platform-java、platform-service 在回滚后第一次创建诊断任务或打开“Skill 管理”时由 v1.4.5 改回旧正文（版本号再加 1）。在新版本保存的自定义 Skill 保留 `types` / `devices`，v1.4.5 能读取，但在 v1.4.5 的 Web 上再修改仍会丢掉这两项。
+- 在新版本保存过 AI 配置的，快速档采集次数 10 作为已保存值继续生效，需要时手动改回。
+- v1.4.5 的 Skill 修改与导入接口不接受请求体中的 `confirm` 字段（返回 422），对接脚本回滚后要去掉；删除地址上的 `?confirm=true` 会被 v1.4.5 忽略（v1.4.5 删除时不做这项检查）。
+- 旧的 `docker-compose.yml` 没有停止宽限期，回滚后重新部署又会中断进行中的分析；被中断留下的问答与飞书卡片也不再定期收尾。
+
 ## v1.4.4 → v1.4.5
 
 没有数据库迁移，不改配置，SSH MCP 与日志 MCP 无需升级。修复：纯文本回答的飞书卡片不再把“诊断结论”等小节名当作结论；整数百分比不再显示成“90.00%”；平台维护的 Skill `platform-java` 要求建议写明命令前提（如 `jcmd … VM.native_memory` 需要启动参数 `-XX:NativeMemoryTracking`），升级后第一次创建诊断任务或打开“Skill 管理”时自动刷新。在平台部署目录执行：
