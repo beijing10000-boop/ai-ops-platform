@@ -1211,15 +1211,12 @@ async def ask_web(body: AskRequest, identity=Depends(require_admin)):
     record_ai_question("web", request_id, body.question, "running")
     record_audit(identity["open_id"], "web_question", request_id)
     try:
-        # The shared runtime owns the saved task deadline, including Skill tasks.
-        answer, usage = await ask(body.question, return_usage=True)
-        if (usage or {}).get("task_id"):
-            # ai_agent.ask files the task as "system"; the asking user owns it.
-            with connection() as db:
-                db.execute(
-                    "UPDATE diagnostic_tasks SET actor=? WHERE task_id=? AND actor='system'",
-                    (identity["open_id"], usage["task_id"]),
-                )
+        # The shared runtime owns the saved task deadline, including Skill
+        # tasks. The task is the asker's from the start: while it runs and
+        # when the run fails after creating it.
+        answer, usage = await ask(
+            body.question, return_usage=True, actor=identity["open_id"]
+        )
         record_ai_question(
             "web", request_id, body.question, "success", token_usage=usage
         )

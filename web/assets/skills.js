@@ -37,6 +37,22 @@ async function confirmedSkillSave(name, warnings, send) {
   return true;
 }
 
+// Deletes a Skill as confirmedSkillSave saves a change: the question names
+// the scenarios it leaves without any Skill, and the server's 409 (the list
+// changed meanwhile) is confirmed the same way. Returns false when cancelled.
+async function confirmedSkillDelete(row, items, send) {
+  const warnings = skillChangeWarnings(row, {enabled: false, scopes: row.scopes}, items);
+  if (!window.confirm(`删除 ${row.name}？历史任务保留已加载的版本。${warnings.map(text => "\n· " + text).join("")}`)) return false;
+  try {
+    await send(warnings.length ? {confirm: true} : {});
+  } catch (error) {
+    if (error.status !== 409 || error.detail?.code !== "skill_scopes_uncovered") throw error;
+    if (!window.confirm(error.message + "。仍要删除？")) return false;
+    await send({confirm: true});
+  }
+  return true;
+}
+
 function skillChoices(values = {}) {
   const scopes = values.scopes || ["qa", "web", "alert"], providers = values.providers || ["ssh_mcp", "zabbix_mcp"];
   const mode = values.managed ? "" : field("mode", "与平台基础 Skill 的关系", values.mode || "supplement", "text", "补充 Skill 只写本环境的规则，平台升级时基础规则自动更新；替代模式需要自行维护全部规则。", SKILL_MODES);
@@ -117,8 +133,9 @@ document.addEventListener("click", async event => {
       if (!await confirmedSkillSave(row.name, warnings, extra => api(P + "/skills/" + id, "PUT", {enabled: !row.enabled, ...extra}))) return;
       await navigate(); toast(row.enabled ? "Skill 已停用，新任务将使用当前配置" : "Skill 已启用，新任务将按查询指引执行");
     } else if (action === "skill-delete") {
-      if (!window.confirm("删除此 Skill？历史任务保留已加载的版本。")) return;
-      await api(P + "/skills/" + id, "DELETE"); OpsUI.saved(form); go("skills");
+      const [row, list] = await Promise.all([api(P + "/skills/" + id), api(P + "/skills")]);
+      if (!await confirmedSkillDelete(row, list.items, extra => api(P + "/skills/" + id + (extra.confirm ? "?confirm=true" : ""), "DELETE"))) return;
+      OpsUI.saved(form); go("skills");
     }
     if (feedback) feedback.hidden = false;
   } catch (error) {

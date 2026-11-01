@@ -93,6 +93,9 @@ TRANSIENT_CODES = {"busy", "timeout"}
 CAPABILITY_NAME = re.compile(r"[A-Za-z0-9_.-]{1,40}")
 # ssh_collect steps that need the systemd unit (SSH MCP rejects them without).
 SERVICE_STEPS = {"service", "logs"}
+# ssh_collect steps that read the `minutes` log window (SSH MCP command_for);
+# the others are snapshots the window does not apply to.
+WINDOW_STEPS = {"kernel", "log_errors", "oom", "logs"}
 # Keys that are constants or metadata: a 7-day trend of them says nothing.
 CONSTANT_KEYS = re.compile(
     r"^(system\.cpu\.num|system\.hw|system\.sw|agent\.version"
@@ -1370,6 +1373,9 @@ async def run(
         def covered(jobs):
             return [job for job in jobs if id(job) in allowed]
 
+        # Only a job that runs can stop short of the alert moment.
+        for _, tool, args in covered(ssh_jobs):
+            window_note(tool, args)
         await asyncio.gather(
             collect(covered(ssh_jobs), room, charged=True),
             paged_history(covered(history), room, charged=True),
@@ -1502,7 +1508,6 @@ async def run(
                 for tool in bundled_tools[:6]:
                     single(tool, ssh_tools, base, jobs)
             else:
-                window_note("ssh_collect", args)
                 jobs.insert(0, ("ssh_mcp", "ssh_collect", args))
             for tool in bundled_tools[6:]:
                 single(tool, ssh_tools, base, jobs)
@@ -1510,7 +1515,11 @@ async def run(
 
     def window_note(tool, args):
         """Say so when a tool's window cap stops short of the alert moment, so
-        no one reads "nothing logged" as evidence for the alert time."""
+        no one reads "nothing logged" as evidence for the alert time. Only a
+        job that reads a log window has one: a tool taking `minutes`, a bundle
+        with a step that uses them."""
+        if tool == "ssh_collect" and not WINDOW_STEPS & set(args.get("actions") or ()):
+            return
         needed = minutes_needed(clock, now) if clock else 0
         if isinstance(args.get("minutes"), int) and args["minutes"] < needed:
             text = (
@@ -1537,7 +1546,6 @@ async def run(
                 {"tool": tool, "reason": "需要平台无法推导的参数（如服务名）"}
             )
             return
-        window_note(tool, args)
         if first:
             jobs.insert(0, ("ssh_mcp", tool, args))
         else:

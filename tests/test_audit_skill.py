@@ -454,8 +454,10 @@ def test_repeated_findings_do_not_crowd_out_java_rows():
     assert single["metric"] == "many_java_processes" and single["value"] == 13
     # The stored evidence keeps every finding as SSH MCP sent it.
     assert len(outcome["data"]["findings"]) == 14
-    # Signals read the raw result: every JVM's finding is still there.
-    assert len(derive_signals([("ssh_mcp", "ssh_diagnose_java", outcome, "E1")])) == 13
+    # Signals read the raw result: every JVM's finding is still there, merged
+    # into one signal so they leave room for the other sources' signals.
+    [signal] = derive_signals([("ssh_mcp", "ssh_diagnose_java", outcome, "E1")])
+    assert signal["count"] == 13 and len(signal["values"]) == 13
 
 
 def test_findings_are_shortened_with_a_count_as_a_last_resort():

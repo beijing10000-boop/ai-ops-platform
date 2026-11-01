@@ -6,6 +6,7 @@ import logging
 import re
 import sqlite3
 import uuid
+from rq.exceptions import StopRequested
 from ..platform_db import row_dict
 from . import queues
 
@@ -65,8 +66,9 @@ def reconcile(job_state=None):
     otherwise only runs when a task is read). A task queued for over ten
     minutes whose RQ job (job id = task id) is gone or over will never start:
     the job failed before starting it, its worker died, or Redis lost it.
-    `job_state(job_id)` gives the RQ status, None for a missing job; without
-    it (no Redis) queued tasks are left alone.
+    `job_state(job_id)` gives the RQ status, None for a missing job; a lookup
+    failing any other way counts as waiting. Without it (no Redis) queued
+    tasks are left alone.
     """
     from ..main import connection
 
@@ -81,7 +83,23 @@ def reconcile(job_state=None):
         ]
     if job_state is None:
         return
-    lost = [task_id for task_id in queued if job_state(task_id) not in WAITING]
+    lost = []
+    for task_id in queued:
+        try:
+            state = job_state(task_id)
+        except StopRequested:
+            raise  # RQ's SIGTERM while the worker is idle: let it stop
+        except Exception as exc:
+            # Redis answered something unexpected: the job may still run, and
+            # no task is failed on a guess.
+            log.warning(
+                "RECONCILE_JOB_STATE_UNKNOWN task_id=%s error=%s",
+                task_id,
+                type(exc).__name__,
+            )
+            continue
+        if state not in WAITING:
+            lost.append(task_id)
     if not lost:
         return
     report = encode(

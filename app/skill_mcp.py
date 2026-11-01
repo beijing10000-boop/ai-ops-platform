@@ -622,11 +622,17 @@ class SkillMCP:
                 raise RequestRejected("SSH 工具参数不在实际 Schema 中")
             timeout = min(120, int(self.read_setting("ssh_mcp_timeout_seconds") or 90))
             budget = properties.get("timeout_seconds")
-            if isinstance(budget, dict) and "timeout_seconds" not in args:
+            asked = args.get("timeout_seconds")
+            if isinstance(budget, dict) and (
+                asked is None or type(asked) in (int, float)
+            ):
                 # A service that takes a time budget answers with what it
                 # finished inside it, before this call's own timeout ends,
-                # instead of losing the slow host's partial evidence.
+                # instead of losing the slow host's partial evidence. A
+                # budget the model gives gets the same cap.
                 seconds = min(timeout, self.deadline - time.monotonic()) - 10
+                if asked is not None:
+                    seconds = min(asked, seconds)
                 low, high = bounds(budget)
                 low = 1 if low is None else low
                 high = seconds if high is None else high

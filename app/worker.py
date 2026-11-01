@@ -10,7 +10,7 @@ from urllib.parse import urlencode, urlsplit
 import httpx
 from redis import Redis
 from rq import Worker, Queue
-from rq.exceptions import NoSuchJobError
+from rq.exceptions import NoSuchJobError, StopRequested
 from rq.job import Job
 from .alert_mute import action_signature
 from .evidence_check import answer_object
@@ -90,19 +90,23 @@ FIELD_ALIASES = {
     ),
     "analysis": ("details", "reasoning", "explanation", "分析", "分析与依据"),
 }
+# Keys that make a JSON object in the answer the card's, under either name.
+CARD_KEYS = (
+    *FIELD_ALIASES,
+    *(name for names in FIELD_ALIASES.values() for name in names),
+)
 
 
 def card_fields(raw):
     """The answer's JSON object under the contract's field names, or None for
     prose and for an object holding none of the card fields (which then reads
-    as text instead of an empty "model gave no conclusion" card)."""
+    as text instead of an empty "model gave no conclusion" card). An object
+    under the other names is found where the contract's is: alone, in a code
+    fence or after a heading."""
     data = answer_object(raw)
     if data is None:
-        try:
-            data = json.loads(raw)
-        except ValueError:
-            return None
-    if not isinstance(data, dict):
+        data = answer_object(raw, CARD_KEYS)
+    if data is None:
         return None
     data = dict(data)
     for key, names in FIELD_ALIASES.items():
@@ -416,8 +420,10 @@ def without_evidence_ids(text):
 # `free -h` forms (Ki, Mi, Gi, Ti) and sizes written next to Chinese text.
 # Linux tools and Zabbix count these in 1024s, so they are binary sizes. Rates
 # (MB/s), bits (Mb, Gb) and bare letters (4G, -Xmx512m) stay as written.
+# Commas only group thousands ("1,024 MB"): a list ("16,32,64 GB") or a
+# decimal comma stays as written, its last number included.
 CAPACITY = re.compile(
-    r"(?<![A-Za-z0-9_.])(?P<number>\d[\d,]*(?:\.\d+)?)\s*"
+    r"(?<![A-Za-z0-9_.])(?<!\d,)(?P<number>(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)\s*"
     r"(?P<unit>[kK]i?B|[MT]i?B|GB|[KMGT]i)(?![A-Za-z0-9_/])"
 )
 
@@ -434,14 +440,20 @@ def _capacity(match):
 
 
 # The platform's hosts run without Swap on purpose, so advice to set it up and
-# notes that it is absent are noise. Only text saying just that is dropped.
+# notes that it is absent are noise. Only text saying just that is dropped,
+# and nothing when the user asked about Swap (asks_about_swap).
 SWAP = r"(?:[Ss][Ww][Aa][Pp]|交换(?:分区|空间|内存))(?:\s*(?:分区|空间|文件))?"
 SETUP = r"(?:配置|启用|开启|增加|添加|创建|设置|扩容|扩大|调大|分配|挂载)"
 WORDS = r"[^，,；;。！？\n]"
-# A suggestion to set up Swap ("建议配置 2 GiB Swap 作为缓冲").
+ADVISE = r"(?:(?:建议|可以?|应(?:该|当)?|需要?|考虑|评估|酌情)\s*)*"
+ASIDE = r"\s*(?:（[^）]{0,30}）|\([^)]{0,30}\))?"
+# A suggestion to set up Swap anywhere in an action item ("建议配置 2 GiB
+# Swap 作为缓冲").
 SWAP_SETUP = re.compile(
     SETUP + WORDS + "{0,12}?" + SWAP + "|" + SWAP + WORDS + "{0,6}?" + SETUP
 )
+# Advice that is only that: "建议开启 swap 作为缓冲", "启用 swap 分区".
+SWAP_ADVICE = ADVISE + SETUP + WORDS + "{0,12}?" + SWAP + WORDS + "{0,10}"
 # A clause saying only that Swap is absent or should be set up: "且未配置 Swap",
 # "Swap：未启用（总量 0 B）", "Swap 总量为 0", "建议开启 swap 作为缓冲".
 SWAP_CLAUSE = re.compile(
@@ -452,39 +464,80 @@ SWAP_CLAUSE = re.compile(
             SWAP + r"\s*[:：]?\s*(?:均|也|都|当前)?\s*(?:未|没有|无|不)" + SETUP + "?",
             SWAP + r"\s*(?:总量|大小|容量|空间)?\s*[:：]?\s*(?:为|是)?\s*"
             r"0(?:\.0+)?\s*(?:B|KiB|MiB|GiB|kB)?",
-            r"(?:(?:建议|可以?|应(?:该|当)?|需要?|考虑|评估|酌情)\s*)*"
-            + SETUP
-            + WORDS
-            + "{0,12}?"
-            + SWAP
-            + WORDS
-            + "{0,10}",
+            SWAP_ADVICE,
         )
     )
-    + r")\s*(?:（[^）]{0,30}）|\([^)]{0,30}\))?"
+    + ")"
+    + ASIDE
 )
+SWAP_ADVICE_PART = re.compile(SWAP_ADVICE + ASIDE)
+# 或、和、并… join Swap advice to other advice ("建议增加内存或启用 swap");
+# between two setup verbs they join one piece of advice ("创建并启用 Swap").
+JOINER = re.compile(r"((?<!" + SETUP + r")\s*(?:或者|或|以及|和|及|并且|并|、)\s*)")
+# A bare Swap after advice shares its setup verb ("增加内存和 Swap").
+SWAP_NOUN = re.compile(r"(?:\d+(?:\.\d+)?\s*[KMGT]i?B?\s*)?" + SWAP)
+SETUP_LEAD = re.compile(ADVISE + SETUP)
 CLAUSE = re.compile(r"([^，,；;。！？!?\n]*)([，,；;。！？!?]?)")
 COMMAS = ("，", ",", "；", ";")
 
 
+def asks_about_swap(question):
+    """A chat question about Swap itself: its answer keeps what it says of it."""
+    return re.search(SWAP, str(question or "")) is not None
+
+
+def without_swap_parts(text, swap):
+    """`text` without its parts joined by 或、和、并… that `swap` matches, each
+    with the joiner before it ("扩容内存或增加 Swap 空间" keeps "扩容内存");
+    "" when no other part is left."""
+    parts = JOINER.split(text)
+    texts = [part.strip() for part in parts[::2]]
+    drop = [
+        bool(swap(part))
+        or bool(n and SWAP_NOUN.fullmatch(part) and SETUP_LEAD.match(texts[n - 1]))
+        for n, part in enumerate(texts)
+    ]
+    if not any(drop):
+        return text
+    kept = [
+        [parts[2 * n - 1] if n else "", parts[2 * n]]
+        for n, gone in enumerate(drop)
+        if not gone
+    ]
+    if not any(part.strip() for _, part in kept):
+        return ""
+    kept[0][0] = ""
+    return "".join(join + part for join, part in kept)
+
+
 def without_swap_notes(text):
-    """Drop clauses that only say Swap is absent or should be set up; a clause
-    saying anything else stays whole ("内存不足且未配置 Swap" is kept)."""
+    """Drop clauses that only say Swap is absent or should be set up, and Swap
+    advice joined to other advice ("建议增加内存或启用 swap" keeps "建议增加
+    内存"); a clause saying anything else stays whole ("内存不足且未配置 Swap"
+    is kept)."""
     lines = []
     for line in str(text).split("\n"):
         mark = LIST_MARK.match(line)
         head, body = (line[: mark.end()], line[mark.end() :]) if mark else ("", line)
-        kept, dropped = [], False
+        kept, changed = [], False
         for clause, end in CLAUSE.findall(body):
-            if not SWAP_CLAUSE.fullmatch(clause.strip()):
-                if clause or end:
-                    kept.append([clause, end])
+            parts = [part.strip() for part in JOINER.split(clause)[::2]]
+            if any(parts) and all(
+                SWAP_CLAUSE.fullmatch(part) for part in parts if part
+            ):
+                rest = ""
+            else:
+                rest = without_swap_parts(clause, SWAP_ADVICE_PART.fullmatch)
+            if rest or not clause.strip():
+                changed = changed or rest != clause
+                if rest or end:
+                    kept.append([rest, end])
                 continue
-            dropped = True
+            changed = True
             # "A，且未配置 Swap。" keeps "A。"; a sentence of only Swap goes.
             if end not in COMMAS and kept and kept[-1][1] in COMMAS:
                 kept[-1][1] = end
-        if dropped:
+        if changed:
             body = "".join(clause + end for clause, end in kept).strip()
             if not body:
                 continue
@@ -503,24 +556,29 @@ def lark_safe(text):
     """Untrusted text for a lark_md card: no mention, tag or link except to the
     platform's own reports. The platform's own markup is added after this."""
     text = str(text or "")
-    if MD_LINK.search(text):
+    if "](" in text:
         base = report_base()
+        own = base + "/#report/" if base else ""
         text = MD_LINK.sub(
-            lambda link: (
-                link[0] if base and link[2].startswith(base + "/#report/") else link[1]
-            ),
+            lambda link: link[0] if own and link[2].startswith(own) else link[1],
             text,
+        )
+        # Other link forms ("[[x]](…)", "(…(…))", "( url)", '(url "title")')
+        # lose their "](" to a full-width bracket, which opens no link.
+        text = re.sub(
+            r"\]\(" + ("(?!" + re.escape(own) + ")" if own else ""), "］(", text
         )
     return TAG_OPEN.sub("＜", text)
 
 
-def feishu_text(text):
+def feishu_text(text, keep_swap=False):
     """Model and tool text as Feishu shows it: no evidence ids, sizes in GiB,
-    no Swap notes and no markup it could slip into the card."""
+    no Swap notes (kept when `keep_swap`: the user asked about Swap) and no
+    markup it could slip into the card."""
     from .report_presentation import human_metrics
 
     text = CAPACITY.sub(_capacity, human_metrics(without_evidence_ids(text)))
-    return lark_safe(without_swap_notes(text))
+    return lark_safe(text if keep_swap else without_swap_notes(text))
 
 
 def source_line(info):
@@ -703,10 +761,12 @@ def card_summary(info):
     lines += ["**诊断结论**", shown + "（详见完整报告）" if shown != full else full]
     if lines[-1] == "":
         lines[-1] = "模型未给出结论。"
+    # An item loses only its advice to set up Swap; one holding nothing else goes.
     items = [
-        clipped(card_text(item), ACTION_CHARS)
+        clipped(
+            card_text(without_swap_parts(str(item), SWAP_SETUP.search)), ACTION_CHARS
+        )
         for item in actions
-        if not SWAP_SETUP.search(str(item))
     ]
     items = [item for item in items if item]
     if items:
@@ -1569,6 +1629,9 @@ def close_abandoned_progress():
         clear_pending(record.get("chat_id"), reply_id)
         try:
             asyncio.run(update_card(reply_id, "AI 分析中断", text, "red"))
+        except StopRequested:
+            # RQ's SIGTERM handler raises it while the worker is idle.
+            raise
         except Exception:
             log.exception("PROGRESS_CARD_CLOSE_FAILED")
 
@@ -1577,8 +1640,9 @@ def reconcile(redis=None):
     """Close what a killed worker (deploy, OOM) left running: its task, the
     alert's AI status, the chat question and the Feishu progress card.
 
-    It never queues or re-runs anything and never stops the worker. `redis` is
-    RQ's connection, which tells a queued task whose job is gone.
+    It never queues or re-runs anything and never stops the worker itself; a
+    stop RQ asked for meanwhile (SIGTERM) goes through. `redis` is RQ's
+    connection, which tells a queued task whose job is gone.
     """
     from .orchestrator import tasks
 
@@ -1596,13 +1660,18 @@ def reconcile(redis=None):
     ):
         try:
             step(*args)
+        except StopRequested:
+            # RQ's SIGTERM handler raises it while the worker is idle (as it is
+            # during maintenance); swallowed, the worker would miss its stop.
+            raise
         except Exception:
             log.exception("RECONCILE_FAILED step=%s", step.__name__)
 
 
 class MaintainedWorker(Worker):
-    """An RQ worker whose maintenance (at start, then every ten minutes) also
-    runs reconcile(), so nothing waits for someone to open a task."""
+    """An RQ worker (alert analysis, chat questions) whose maintenance (at
+    start, then every ten minutes) also runs reconcile(), so nothing waits for
+    someone to open a task."""
 
     def run_maintenance_tasks(self):
         super().run_maintenance_tasks()
@@ -1618,11 +1687,12 @@ if __name__ == "__main__":
     )
     redis = Redis.from_url(REDIS_URL)
     # `python -m app.worker analysis` serves manual clicks before automatic analysis.
+    analysis = sys.argv[1:] == ["analysis"]
     names = (
-        [queues.ALERT_MANUAL, queues.ALERT_ANALYSIS]
-        if sys.argv[1:] == ["analysis"]
-        else [queues.ALERTS]
+        [queues.ALERT_MANUAL, queues.ALERT_ANALYSIS] if analysis else [queues.ALERTS]
     )
-    MaintainedWorker(
+    # Only the analysis workers reconcile: on the alerts worker its Feishu
+    # calls and SQLite waits would hold up the next alert's delivery.
+    (MaintainedWorker if analysis else Worker)(
         [Queue(name, connection=redis) for name in names], connection=redis
     ).work()

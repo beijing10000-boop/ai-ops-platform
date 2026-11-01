@@ -215,13 +215,14 @@ def _salvaged(text):
     return found if any(key in found for key in ANSWER_FIELDS) else None
 
 
-def answer_object(answer):
+def answer_object(answer, fields=ANSWER_FIELDS):
     """The model's structured answer as a dict, or None for a plain-text one.
 
     The prompts ask for bare JSON. Models sometimes wrap it in a code fence or
     put a heading before it ("## 诊断结果" + a fenced block); the object is then
     taken from the fence, or from the first "{" to the last "}", and only when
-    it carries one of the answer fields, so prose quoting JSON stays prose.
+    it carries one of `fields` (the answer fields; the alert card also takes
+    the names models use instead), so prose quoting JSON stays prose.
     Raw line breaks inside strings are accepted (``strict=False``): models
     write a multi-line "cause" that way, and strict JSON rejects it. A bracket
     the model lost or an output cut short is closed; failing that, each answer
@@ -246,7 +247,7 @@ def answer_object(answer):
             parsed = json.loads(candidate, strict=False)
         except ValueError:
             continue
-        if isinstance(parsed, dict) and any(key in parsed for key in ANSWER_FIELDS):
+        if isinstance(parsed, dict) and any(key in parsed for key in fields):
             return parsed
     if start < 0:
         return None
@@ -258,7 +259,7 @@ def answer_object(answer):
             continue
         if isinstance(parsed, dict):
             parsed = _hoisted(parsed)
-            if any(key in parsed for key in ANSWER_FIELDS):
+            if any(key in parsed for key in fields):
                 return parsed
     return _salvaged(text[start:])
 
