@@ -29,12 +29,14 @@ form.addEventListener("submit", async (e) => {
     if (!resp.ok)
       throw Error(typeof data.detail === "string" ? data.detail : "初始化失败");
     form.hidden = true;
+    // The saved address, not the form's: a repair keeps the stored protocol.
+    const callback =
+      data.callback_url ||
+      payload.web_protocol + "://" + payload.web_public_host + "/api/v1/auth/callback";
     show(
       "初始化成功。请确认飞书开放平台的回调地址为 " +
-        payload.web_protocol +
-        "://" +
-        payload.web_public_host +
-        "/api/v1/auth/callback ，再返回首页使用飞书登录。",
+        callback +
+        " ，再返回首页使用飞书登录。",
       "success",
     );
   } catch (err) {

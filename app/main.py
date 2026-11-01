@@ -26,7 +26,7 @@ from rq.registry import FailedJobRegistry
 from .bootstrap import persistent_secret
 from .configuration import validate_form
 from .orchestrator import queues
-from .security.rbac import enforce
+from .security.rbac import audit as record_audit, enforce
 
 log = logging.getLogger(__name__)
 
@@ -421,11 +421,22 @@ def validate_setup(body):
     return {
         "ok": True,
         "message": "初始化信息和一次性凭据校验通过，尚未保存。",
-        "callback_url": body.web_protocol
-        + "://"
-        + body.web_public_host.strip().rstrip("/")
-        + "/api/v1/auth/callback",
+        "callback_url": setup_callback_url(body),
     }
+
+
+def setup_callback_url(body):
+    """The login callback once setup has saved: a repair keeps a configured
+    host and its protocol; otherwise the submitted pair applies."""
+    host = read_setting("web_public_host").strip()
+    scheme = read_setting("web_protocol") if host else body.web_protocol
+    host = host or body.web_public_host.strip()
+    return (
+        (scheme or "http")
+        + "://"
+        + urlsplit("http://" + host).netloc
+        + "/api/v1/auth/callback"
+    )
 
 
 @app.post("/api/v1/setup/validate")
@@ -462,9 +473,12 @@ def complete_setup(body: SetupRequest):
 
         if all(configured(key) for key in BOOTSTRAP_KEYS):
             raise HTTPException(409, "初始化已完成")
+        # The protocol belongs to the host: a kept host keeps its protocol.
+        host_kept = configured("web_public_host")
         for key, value in entries.items():
             # Preserve pre-existing configuration during repair/migration.
-            if key != "web_protocol" and configured(key):
+            kept = host_kept if key == "web_protocol" else configured(key)
+            if kept:
                 continue
             secret = key in SENSITIVE
             stored = cipher().encrypt(value.encode()).decode() if secret else value
@@ -476,7 +490,12 @@ def complete_setup(body: SetupRequest):
         db.execute(
             "INSERT INTO audit(action,key) VALUES ('initial_setup','login_configuration')"
         )
-    return {"ok": True, "redirect": "/api/v1/auth/login"}
+    # The saved pair, which a repair may have kept, not the submitted one.
+    return {
+        "ok": True,
+        "redirect": "/api/v1/auth/login",
+        "callback_url": setup_callback_url(body),
+    }
 
 
 @app.get("/api/v1/settings", dependencies=[Depends(require_admin)])
@@ -534,10 +553,43 @@ def validate_settings_update(body, identity):
     return validate_form(body.values, read_setting)
 
 
+# Each saved credential belongs to the address it was saved with.
+ADDRESS_SECRETS = {
+    "openai_base_url": "openai_api_key",
+    "mcp_url": "mcp_token",
+    "ssh_mcp_url": "ssh_mcp_token",
+    "log_mcp_url": "log_mcp_token",
+}
+
+
+def endpoint_host(url):
+    """Host and port of an endpoint for the audit log: never its path, query
+    or credentials."""
+    try:
+        parts = urlsplit(str(url or "").strip())
+        return (parts.hostname or "") + (f":{parts.port}" if parts.port else "")
+    except ValueError:
+        return ""
+
+
 def draft_reader(body, identity):
+    """Settings for a connection test: the draft's values over the saved ones.
+
+    A masked or omitted secret means the saved one, which is only ever sent to
+    its saved address: a draft that changes the address must carry the secret.
+    """
     if body is None:
         return read_setting
     validate_settings_update(body, identity)
+    for address, secret in ADDRESS_SECRETS.items():
+        url = (body.values.get(address) or "").strip().rstrip("/")
+        if (
+            url
+            and url != read_setting(address).strip().rstrip("/")
+            and body.values.get(secret) in (None, "********")
+            and read_setting(secret)
+        ):
+            raise HTTPException(422, "修改地址后请重新填写密钥/令牌")
 
     def read(key):
         val = body.values.get(key)
@@ -985,6 +1037,11 @@ async def test_feishu(
     reader = draft_reader(body, identity)
     if not reader("lark_app_id") or not reader("lark_app_secret"):
         raise HTTPException(422, "请填写飞书 App ID 与 App Secret")
+    record_audit(
+        identity["open_id"],
+        "feishu_connection_test",
+        reader("lark_app_id") + (" groups" if check_groups else ""),
+    )
     try:
         async with httpx.AsyncClient(
             timeout=15, follow_redirects=False, trust_env=False
@@ -1083,6 +1140,7 @@ async def test_ai_model(
         raise HTTPException(
             status_code=422, detail="请先保存 AI Base URL、模型及 API Key"
         )
+    record_audit(identity["open_id"], "ai_model_test", endpoint_host(base_url))
     started = time.monotonic()
     try:
         # Disable SDK retries here: a 429 is diagnostic, not an invitation to retry.
@@ -1140,16 +1198,28 @@ async def test_ai_model(
     raise HTTPException(status_code=status, detail=f"{msg} 耗时 {elapsed} 秒") from None
 
 
-@app.post("/api/v1/ask", dependencies=[Depends(require_admin)])
-async def ask_web(body: AskRequest):
-    """Use the same read-only MCP agent as Feishu; never expose write tools."""
+@app.post("/api/v1/ask")
+async def ask_web(body: AskRequest, identity=Depends(require_admin)):
+    """Use the same read-only MCP agent as Feishu; never expose write tools.
+
+    Who asked is audited before the run (which may collect live from a host)
+    and becomes the actor of the task it created.
+    """
     from .ai_agent import ask
 
     request_id = uuid.uuid4().hex
     record_ai_question("web", request_id, body.question, "running")
+    record_audit(identity["open_id"], "web_question", request_id)
     try:
         # The shared runtime owns the saved task deadline, including Skill tasks.
         answer, usage = await ask(body.question, return_usage=True)
+        if (usage or {}).get("task_id"):
+            # ai_agent.ask files the task as "system"; the asking user owns it.
+            with connection() as db:
+                db.execute(
+                    "UPDATE diagnostic_tasks SET actor=? WHERE task_id=? AND actor='system'",
+                    (identity["open_id"], usage["task_id"]),
+                )
         record_ai_question(
             "web", request_id, body.question, "success", token_usage=usage
         )
@@ -1168,10 +1238,15 @@ async def ask_web(body: AskRequest):
 @app.post("/zabbix", status_code=202)
 def ingest(alert: Alert, authorization: str | None = Header(default=None)):
     secret = read_setting("zabbix_webhook_secret")
+    expected = "Bearer " + secret
+    # compare_digest refuses non-ASCII text: such a header or saved secret is a
+    # mismatch (401), never a server error that stops every alert.
     if (
         not secret
         or not authorization
-        or not hmac.compare_digest(authorization, "Bearer " + secret)
+        or not authorization.isascii()
+        or not expected.isascii()
+        or not hmac.compare_digest(authorization, expected)
     ):
         raise HTTPException(status_code=401, detail="unauthorized")
     # Zabbix recovery operations retain original {EVENT.VALUE}=1. Prefer the

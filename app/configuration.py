@@ -75,6 +75,18 @@ def validate_form(values, read):
         and not 8 <= len(values["lark_app_secret"]) <= 512
     ):
         raise HTTPException(422, "飞书 App Secret 长度应为 8–512 字符")
+    # Both are sent as an Authorization header, which only carries ASCII.
+    for key, label in (
+        ("zabbix_webhook_secret", "Zabbix Webhook 密钥"),
+        ("openai_api_key", "模型 API Key"),
+    ):
+        secret = values.get(key) or ""
+        if not (
+            secret.isascii()
+            and secret.isprintable()
+            and not any(c.isspace() for c in secret)
+        ):
+            raise HTTPException(422, label + "只能使用 ASCII 可见字符，不能包含空白")
     if "feishu_enabled" in values and values["feishu_enabled"] not in {"true", "false"}:
         raise HTTPException(422, "飞书开关无效")
     if "ai_min_severity" in values and values["ai_min_severity"] not in {

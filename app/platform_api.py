@@ -16,6 +16,7 @@ from .integrations import log_mcp, ssh_mcp, zabbix
 from .main import (
     connection,
     draft_reader,
+    endpoint_host,
     read_setting,
     settings_snapshot,
     SettingsUpdate,
@@ -820,7 +821,12 @@ async def discover(
         if provider != "zabbix_mcp":
             # The registry and later diagnostics re-read the token's catalog.
             _forget_ssh_catalogs()
-    audit(who["open_id"], "mcp_connection_test", provider)
+    # Which host the token went to; never its path or the token.
+    audit(
+        who["open_id"],
+        "mcp_connection_test",
+        (provider + " " + endpoint_host(reader(keys[0]))).strip(),
+    )
     return {
         "ok": status == "success",
         "provider": provider,
