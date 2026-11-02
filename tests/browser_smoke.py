@@ -30,6 +30,18 @@ for name in (
     "skills-1440.png",
 ):
     (OUT / name).unlink(missing_ok=True)
+
+
+def wait_until(page, expression, timeout=30.0):
+    """Poll from here: wait_for_function re-evaluates a string inside the page,
+    which the console's Content-Security-Policy (no 'unsafe-eval') refuses."""
+    deadline = time.monotonic() + timeout
+    while not page.evaluate(expression):
+        if time.monotonic() > deadline:
+            raise AssertionError("timed out waiting for " + expression)
+        page.wait_for_timeout(50)
+
+
 with socket.socket() as sock:
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
@@ -95,8 +107,9 @@ try:
                 "audit",
             ):
                 page.locator('nav [data-page="' + name + '"]').click()
-                page.wait_for_function(
-                    "!document.querySelector('#content').textContent.includes('正在加载…')"
+                wait_until(
+                    page,
+                    "!document.querySelector('#content').textContent.includes('正在加载…')",
                 )
                 assert not page.locator('#content [role="alert"]').count(), (
                     width,
@@ -284,7 +297,7 @@ try:
 
         page.on("dialog", handle_dialog)
         page.locator('nav [data-page="history"]').click()
-        page.wait_for_function("location.hash === '#settings/general'")
+        wait_until(page, "location.hash === '#settings/general'")
         assert len(dialogs) == 1
         assert page.locator("#page-title").inner_text() == "系统配置"
         assert (
@@ -502,8 +515,9 @@ try:
         page.locator('[data-page="diagnostics"]').click()
         page.locator('#ask-form textarea[name="question"]').fill("导航期间的问答")
         page.locator('#ask-form button[type="submit"]').click()
-        page.wait_for_function(
-            "document.querySelector('#ask-result').textContent.includes('正在查询')"
+        wait_until(
+            page,
+            "document.querySelector('#ask-result').textContent.includes('正在查询')",
         )
         page.locator('[data-page="overview"]').click()
         page.locator(".hero").wait_for()
@@ -637,9 +651,7 @@ try:
             lambda response: response.url.endswith("/tasks/" + running_id)
         ):
             pass
-        page.wait_for_function(
-            "document.querySelectorAll('details.evidence').length === 2"
-        )
+        wait_until(page, "document.querySelectorAll('details.evidence').length === 2")
         assert page.locator("details.evidence").first.get_attribute("open") is not None
         assert "AI 分析中" in page.locator(".report-progress").inner_text()
         # Model rounds and their previews keep their own state as well: one
@@ -651,9 +663,7 @@ try:
         page.locator('details[data-evidence="mi-2"]').wait_for(state="attached")
         page.locator('details[data-evidence="mi-1"] > summary').click()
         page.request.post(base + "/__ui_progress")
-        page.wait_for_function(
-            f'document.querySelectorAll("{mcp_evidence}").length === 4'
-        )
+        wait_until(page, f'document.querySelectorAll("{mcp_evidence}").length === 4')
         assert page.locator('details[data-evidence="mi-1"]').get_attribute("open") == ""
         assert page.locator('details[data-evidence^="mi-"][open]').count() == 1
         assert page.locator(mcp_evidence).first.get_attribute("open") is not None
