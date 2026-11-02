@@ -409,6 +409,17 @@ function logToolsSection(log) {
     (log.configured ? '<p class="muted small footnote">列出最近一次连接检测时本令牌可用的工具；可查询的日志类型与来源分组由日志分析平台「MCP 接入」中的令牌决定，平台只使用只读、不接受命令或 SQL 参数的 log_ 工具。</p>' : "") +
     "</div>";
 }
+// After the log MCP form is saved: what “检测 MCP 工具” and the tools area
+// go by (the page read it before the save). A changed address or token
+// drops the last check, as the server does.
+function logMcpSaved(values, changed) {
+  const configured = Boolean(String(values.log_mcp_url || "").trim() && values.log_mcp_token);
+  const previous = state.logMcp || {};
+  if (configured === previous.configured && !previous.error && !changed.some(key => key.startsWith("log_mcp_"))) return;
+  state.logMcp = {configured, status: "", checked_at: "", tools: [], reason: ""};
+  const section = document.getElementById("log-mcp-tools");
+  if (section) section.outerHTML = logToolsSection(state.logMcp);
+}
 async function diagnosticTools(refresh = false) {
   const [data, overview] = await Promise.all([
     api(P + "/tools" + (refresh ? "?refresh=true" : "")),
@@ -1298,11 +1309,13 @@ document.addEventListener("submit", async (event) => {
       await navigate();
     } else if (form.classList.contains("settings-form") || form.classList.contains("connection-form")) {
       const unlock = OpsUI.lock(form);
+      let saved;
       try {
-        await api("/api/v1/settings", "PUT", { values: data });
+        saved = await api("/api/v1/settings", "PUT", { values: data });
         form.querySelectorAll('.secret-control input').forEach(input => { if (input.value) input.value = "********"; input.type = "password"; });
         form.querySelectorAll('[data-action="toggle-secret"]').forEach(button => button.textContent = "显示");
       } finally { unlock(); }
+      if (form.dataset.provider === "logs") logMcpSaved(data, saved?.changed || []);
       OpsUI.saved(form);
       const result = form.querySelector("[data-verify-result]");
       result.dataset.result = "success";

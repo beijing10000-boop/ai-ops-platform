@@ -215,6 +215,66 @@ def test_the_log_mcp_shows_its_status_and_tools_with_the_other_two(tmp_path):
     assert "日志 MCP：未配置，未检测" in out["skipToast"][0]
 
 
+@needs_node
+def test_a_log_mcp_saved_for_the_first_time_is_checked_without_a_reload(tmp_path):
+    """The page read the log MCP's state before anything was saved; saving
+    its connection form updates that state, so 检测 MCP 工具 includes it."""
+    out = run_console(
+        tmp_path,
+        """
+  // FormData over a form stub's values, as the browser builds it.
+  context.FormData = class {
+    constructor(form) { this.entries = Object.entries(form.values); }
+    [Symbol.iterator]() { return this.entries[Symbol.iterator](); }
+    getAll(name) { return this.entries.filter(([key]) => key === name).map(([, value]) => value); }
+  };
+  const result = element();
+  const form = {
+    id: "logs-form", dataset: {provider: "logs"}, classList: {contains: name => name === "connection-form", toggle() {}},
+    values: {log_mcp_url: "http://198.51.100.7:7077/mcp", log_mcp_token: "logmcp_fixture"},
+    querySelector: selector => selector === "[data-verify-result]" ? result : element(),
+    querySelectorAll: () => [],
+  };
+  const submit = async changed => {
+    context.reply = (path, method) => method === "PUT" ? {ok: true, changed} : {provider: path.split("provider=")[1], ok: true, authorized_tools: ["log_search"]};
+    for (const listener of listeners.submit) await listener({target: form, preventDefault() {}});
+  };
+  const discover = async () => {
+    calls.length = 0;
+    await click("discover");
+    return calls.map(call => call[1].split("provider=")[1]);
+  };
+  const out = {};
+  run(`state.logMcp = logMcpState({log_mcp_configured: false, health: []})`);
+  elements["log-mcp-tools"] = element();
+  await submit(["log_mcp_url", "log_mcp_token"]);
+  out.saved = calls[0];
+  out.section = elements["log-mcp-tools"].outerHTML;
+  out.checked = await discover();
+  out.toast = notes.at(-1);
+  // Saved again unchanged: the check just made stays.
+  await submit([]);
+  out.kept = elements["log-mcp-tools"].outerHTML;
+  // A new address drops it, as the server does.
+  form.values.log_mcp_url = "http://198.51.100.8:7077/mcp";
+  await submit(["log_mcp_url"]);
+  out.dropped = elements["log-mcp-tools"].outerHTML;
+  // Cleared: not checked again.
+  form.values = {log_mcp_url: "", log_mcp_token: ""};
+  await submit(["log_mcp_url", "log_mcp_token"]);
+  out.cleared = await discover();
+  console.log(JSON.stringify(out));
+""",
+    )
+    assert out["saved"][:2] == ["PUT", "/api/v1/settings"]
+    assert "待验证" in out["section"] and "未配置" not in out["section"]
+    assert sorted(out["checked"]) == ["logs", "ssh_mcp", "zabbix_mcp"]
+    assert "日志 MCP：连接成功" in out["toast"][0]
+    assert "最近检测通过" in out["kept"] and "log_search" in out["kept"]
+    assert "待验证" in out["dropped"] and "log_search" not in out["dropped"]
+    assert out["cleared"] == ["zabbix_mcp", "ssh_mcp"]
+
+
 # --- OPS-FE-06: muting from an alert row ---------------------------------------------
 
 
