@@ -12,7 +12,7 @@ import httpx
 from fastapi import HTTPException, Request
 from fastapi.responses import RedirectResponse, JSONResponse
 
-from .main import app, connection, open_ids, read_setting
+from .main import app, connection, open_ids, read_setting, setting_value
 
 log = logging.getLogger(__name__)
 COOKIE = "zabbix_ai_session"
@@ -69,12 +69,16 @@ def _credentials():
     return app_id, secret
 
 
-def _admins():
-    result = set(open_ids(read_setting("feishu_admin_open_ids")))
-    with connection() as db:
-        result.update(
-            row[0] for row in db.execute("SELECT open_id FROM members WHERE enabled=1")
-        )
+def _admins(db=None):
+    """Who may log in: the configured Feishu admins and the enabled members.
+    One connection, `db` when the caller has one open."""
+    if db is None:
+        with connection() as db:
+            return _admins(db)
+    result = set(open_ids(setting_value(db, "feishu_admin_open_ids")))
+    result.update(
+        row[0] for row in db.execute("SELECT open_id FROM members WHERE enabled=1")
+    )
     return result
 
 
@@ -199,23 +203,26 @@ async def feishu_callback(request: Request, code: str = "", state: str = ""):
 
 
 def authenticate(request: Request):
+    """The signed-in identity with its role and permissions, read in one
+    connection; rbac.enforce() checks permissions against that role."""
     raw = request.cookies.get(COOKIE, "")
     if raw:
+        from .security.rbac import role_for, ROLES
+
         with connection() as db:
             _tables(db)
             row = db.execute(
                 "SELECT open_id,name,csrf,expires FROM admin_sessions WHERE token_hash=?",
                 (_hash(raw),),
             ).fetchone()
-        if row and row[3] > int(time.time()) and row[0] in _admins():
+            admitted = bool(row) and row[3] > int(time.time()) and row[0] in _admins(db)
+            role = role_for(row[0], db) if admitted else None
+        if admitted:
             if request.method not in ("GET", "HEAD", "OPTIONS"):
                 if not hmac.compare_digest(
                     row[2], request.headers.get("x-csrf-token", "")
                 ):
                     raise HTTPException(403, "CSRF token invalid")
-            from .security.rbac import role_for, ROLES
-
-            role = role_for(row[0])
             if not role:
                 raise HTTPException(403, "账号已停用")
             return {
@@ -230,7 +237,13 @@ def authenticate(request: Request):
         admin = os.getenv("ADMIN_API_TOKEN", "")
         supplied = request.headers.get("authorization", "")
         if admin and hmac.compare_digest(supplied, "Bearer " + admin):
-            return {"open_id": "legacy-admin", "name": "Legacy Admin", "csrf": ""}
+            return {
+                "open_id": "legacy-admin",
+                "name": "Legacy Admin",
+                "csrf": "",
+                "role": "super_admin",
+                "permissions": ["*"],
+            }
     raise HTTPException(401, "请先使用飞书账号登录")
 
 

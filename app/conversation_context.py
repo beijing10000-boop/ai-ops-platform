@@ -13,10 +13,37 @@ PENDING_PREFIX = "feishu-ai:pending:"
 # Progress cards on record until their analysis ends (worker.reconcile).
 PROGRESS_PREFIX = "feishu-ai:progress:"
 PROGRESS_TTL = 86400
+# A question's "AI 排队中" card, from the receiver to the question's worker;
+# STARTED once the worker began the question without one.
+QUEUED_PREFIX = "feishu-ai:queued-card:"
+STARTED = "started"
 
 
 def _client():
     return Redis.from_url(REDIS_URL, decode_responses=True)
+
+
+def offer_queued_card(message_id, card_id):
+    """The receiver hands the "AI 排队中" card it replied to a question with
+    to the question's worker. False when the worker began the question
+    first (take_queued_card) and answers on a card of its own."""
+    return bool(
+        _client().set(QUEUED_PREFIX + message_id, card_id, nx=True, ex=PROGRESS_TTL)
+    )
+
+
+def take_queued_card(message_id):
+    """The worker beginning a question: the receiver's "AI 排队中" card when
+    it is out, else None (the worker replies on its own, and a card still on
+    its way is not handed over: offer_queued_card). One atomic swap, so each
+    card goes to exactly one of the two."""
+    card = _client().set(QUEUED_PREFIX + message_id, STARTED, ex=PROGRESS_TTL, get=True)
+    return card if card and card != STARTED else None
+
+
+def question_started(message_id):
+    """Whether the question's worker has begun it (or holds its card)."""
+    return bool(_client().exists(QUEUED_PREFIX + message_id))
 
 
 def mark_pending(chat_id, reply_id, kind="alert"):

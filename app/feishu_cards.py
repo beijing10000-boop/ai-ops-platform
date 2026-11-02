@@ -17,6 +17,18 @@ def message_ids(value):
     return getattr(value, "message_ids", ()) or ((str(value),) if value else ())
 
 
+class CardBody(str):
+    """Card text whose elements are already built (worker.analysis_body):
+    feishu_client.make_card() sends `elements` as they are, report button and
+    footer included, instead of reading the text. As a str it is the card's
+    plain text, which logs and tests read."""
+
+    def __new__(cls, text, elements):
+        result = super().__new__(cls, text)
+        result.elements = list(elements)
+        return result
+
+
 def wire_size(card):
     payload = {
         "receive_id": "x" * 128,

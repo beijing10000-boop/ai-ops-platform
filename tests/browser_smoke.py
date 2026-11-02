@@ -30,6 +30,18 @@ for name in (
     "skills-1440.png",
 ):
     (OUT / name).unlink(missing_ok=True)
+
+
+def wait_until(page, expression, timeout=30.0):
+    """Poll from here: wait_for_function re-evaluates a string inside the page,
+    which the console's Content-Security-Policy (no 'unsafe-eval') refuses."""
+    deadline = time.monotonic() + timeout
+    while not page.evaluate(expression):
+        if time.monotonic() > deadline:
+            raise AssertionError("timed out waiting for " + expression)
+        page.wait_for_timeout(50)
+
+
 with socket.socket() as sock:
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
@@ -95,8 +107,9 @@ try:
                 "audit",
             ):
                 page.locator('nav [data-page="' + name + '"]').click()
-                page.wait_for_function(
-                    "!document.querySelector('#content').textContent.includes('正在加载…')"
+                wait_until(
+                    page,
+                    "!document.querySelector('#content').textContent.includes('正在加载…')",
                 )
                 assert not page.locator('#content [role="alert"]').count(), (
                     width,
@@ -201,6 +214,19 @@ try:
             "true"
         )
         page.locator('#ssh_mcp-form button[type="submit"]').click()
+        page.locator("#ssh_mcp-form [data-verify-result]").get_by_text(
+            "配置已保存", exact=False
+        ).wait_for()
+        page.locator('#logs-form input[name="log_mcp_url"]').fill(
+            "http://127.0.0.1:9098/mcp"
+        )
+        page.locator('#logs-form input[name="log_mcp_token"]').fill(
+            "logmcp_browser_token"
+        )
+        page.locator('#logs-form button[type="submit"]').click()
+        page.locator("#logs-form [data-verify-result]").get_by_text(
+            "配置已保存", exact=False
+        ).wait_for()
         page.locator('[data-page="overview"]').click()
         page.locator(".hero").wait_for()
         page.locator('[data-page="connections"]').click()
@@ -212,12 +238,14 @@ try:
         assert page.locator('[data-action="new-credential"]').count() == 0
         checks.append(
             {
-                "workflow": "two MCP forms + draft validation + masked token persistence",
+                "workflow": "three MCP forms + draft validation + masked token persistence",
                 "ok": True,
             }
         )
         assert page.get_by_role("heading", name="诊断工具", exact=True).count() == 1
         assert page.get_by_role("heading", name="诊断类型", exact=True).count() == 1
+        # The log MCP is listed with the other two, configured but not yet checked.
+        page.locator("#log-mcp-tools").get_by_text("待验证", exact=True).wait_for()
         discovered = []
 
         def discover(route):
@@ -232,8 +260,12 @@ try:
 
         page.route("**/api/v1/platform/tools/discover?provider=*", discover)
         page.locator('[data-action="discover"]').click()
-        page.locator("#toast").get_by_text("ssh_mcp：连接成功", exact=False).wait_for()
-        assert sorted(discovered) == ["ssh_mcp", "zabbix_mcp"]
+        page.locator("#ui-toast.success").get_by_text(
+            "日志 MCP：连接成功", exact=False
+        ).wait_for()
+        assert sorted(discovered) == ["logs", "ssh_mcp", "zabbix_mcp"]
+        page.locator("#log-mcp-tools").get_by_text("最近检测通过").wait_for()
+        assert "fixture" in page.locator("#log-mcp-tools").inner_text()
         page.unroute("**/api/v1/platform/tools/discover?provider=*")
         checks.append(
             {
@@ -265,7 +297,7 @@ try:
 
         page.on("dialog", handle_dialog)
         page.locator('nav [data-page="history"]').click()
-        page.wait_for_function("location.hash === '#settings/general'")
+        wait_until(page, "location.hash === '#settings/general'")
         assert len(dialogs) == 1
         assert page.locator("#page-title").inner_text() == "系统配置"
         assert (
@@ -408,19 +440,49 @@ try:
         page.locator('#mute-form input[name="trigger_id"]').fill("992")
         page.locator('#mute-form button[type="submit"]').click()
         page.locator('[data-action="unmute"][data-id="991:992"]').wait_for()
+        # Lifting a mute early asks first; declining keeps the rule.
         page.locator('[data-action="unmute"][data-id="991:992"]').click()
+        question = page.locator("dialog.ui-confirm")
+        question.get_by_text("提前解除主机 991 / 触发器 992 的屏蔽？").wait_for()
+        question.get_by_role("button", name="取消", exact=True).click()
+        question.wait_for(state="detached")
+        assert page.locator('[data-action="unmute"][data-id="991:992"]').count() == 1
+        page.locator('[data-action="unmute"][data-id="991:992"]').click()
+        question.get_by_role("button", name="解除屏蔽", exact=True).click()
         page.locator('[data-action="unmute"][data-id="991:992"]').wait_for(
             state="detached"
         )
         page.get_by_role("button", name="告警记录").click()
         page.wait_for_url(base + "/#alerts")
         page.get_by_role("heading", name="告警事件").wait_for()
+        # An alert row opens the mute form with its Host ID and trigger ID.
+        assert (
+            page.locator("tbody tr")
+            .filter(has_text="测试主机-31")
+            .locator('[data-action="mute-event"]')
+            .count()
+            == 0
+        )
+        page.locator("tbody tr").filter(has_text="测试主机-30").locator(
+            '[data-action="mute-event"]'
+        ).click()
+        page.wait_for_url(base + "/#alerts/mutes")
+        page.locator("#mute-form .context-banner").get_by_text(
+            "测试主机-30", exact=False
+        ).wait_for()
+        assert page.locator('#mute-form input[name="host_id"]').input_value() == "10001"
+        assert (
+            page.locator('#mute-form input[name="trigger_id"]').input_value() == "20002"
+        )
+        page.locator('[data-action="clear-mute-draft"]').click()
+        page.locator("#mute-form .context-banner").wait_for(state="detached")
+        assert page.locator('#mute-form input[name="host_id"]').input_value() == ""
         page.goto(base + "/#mutes")
         page.wait_for_url(base + "/#alerts/mutes")
         page.locator("#mute-form").wait_for()
         checks.append(
             {
-                "workflow": "alert center tabs + Web mute create/unmute + legacy link",
+                "workflow": "alert center tabs + Web mute create/confirmed unmute + mute from an alert + legacy link",
                 "ok": True,
             }
         )
@@ -453,8 +515,9 @@ try:
         page.locator('[data-page="diagnostics"]').click()
         page.locator('#ask-form textarea[name="question"]').fill("导航期间的问答")
         page.locator('#ask-form button[type="submit"]').click()
-        page.wait_for_function(
-            "document.querySelector('#ask-result').textContent.includes('正在查询')"
+        wait_until(
+            page,
+            "document.querySelector('#ask-result').textContent.includes('正在查询')",
         )
         page.locator('[data-page="overview"]').click()
         page.locator(".hero").wait_for()
@@ -463,7 +526,7 @@ try:
         page.unroute("**/api/v1/ask")
         page.wait_for_timeout(100)
         checks.append({"workflow": "late answer after page navigation", "ok": True})
-        page.locator("#toast").wait_for(state="hidden", timeout=8000)
+        page.locator("#ui-toast").wait_for(state="hidden", timeout=13000)
         page.evaluate("document.fonts.ready")
         page.screenshot(path=str(OUT / "overview-1440.png"), full_page=True)
         page.locator('[data-page="diagnostics"]').click()
@@ -588,14 +651,37 @@ try:
             lambda response: response.url.endswith("/tasks/" + running_id)
         ):
             pass
-        page.wait_for_function(
-            "document.querySelectorAll('details.evidence').length === 2"
-        )
+        wait_until(page, "document.querySelectorAll('details.evidence').length === 2")
         assert page.locator("details.evidence").first.get_attribute("open") is not None
         assert "AI 分析中" in page.locator(".report-progress").inner_text()
+        # Model rounds and their previews keep their own state as well: one
+        # open round must not reopen the others or its previews.
+        mcp_evidence = "details.evidence:not([data-evidence^='mi-'])"
+        page.request.post(base + "/__ui_model_round")
+        page.request.post(base + "/__ui_model_round")
+        page.request.post(base + "/__ui_progress")
+        page.locator('details[data-evidence="mi-2"]').wait_for(state="attached")
+        page.locator('details[data-evidence="mi-1"] > summary').click()
+        page.request.post(base + "/__ui_progress")
+        wait_until(page, f'document.querySelectorAll("{mcp_evidence}").length === 4')
+        assert page.locator('details[data-evidence="mi-1"]').get_attribute("open") == ""
+        assert page.locator('details[data-evidence^="mi-"][open]').count() == 1
+        assert page.locator(mcp_evidence).first.get_attribute("open") is not None
+        # Cancelling asks first, naming what is lost.
+        page.locator('[data-action="cancel-task"]').click()
+        question = page.locator("dialog.ui-confirm")
+        question.get_by_text("取消后不能恢复", exact=False).wait_for()
+        question.get_by_role("button", name="继续执行", exact=True).click()
+        question.wait_for(state="detached")
+        assert "已请求取消" not in page.locator(".report-progress").inner_text()
+        page.locator('[data-action="cancel-task"]').click()
+        question.get_by_role("button", name="取消任务", exact=True).click()
+        page.locator(".report-progress").get_by_text(
+            "已请求取消", exact=False
+        ).wait_for()
         checks.append(
             {
-                "workflow": "safe report formatting/export + lightweight polling preserves open evidence",
+                "workflow": "safe report formatting/export + lightweight polling preserves open evidence and model rounds + confirmed cancel",
                 "ok": True,
             }
         )
