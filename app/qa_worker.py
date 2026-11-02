@@ -16,6 +16,7 @@ from .conversation_context import (
     mark_pending,
     is_pending,
     clear_pending,
+    take_queued_card,
 )
 from .feishu_client import reply_card, update_card
 from .orchestrator import queues
@@ -75,8 +76,8 @@ async def execute(
     """Only the directly replied-to message determines the chain and depth.
 
     `queued_card`: the "AI 排队中" reply the receiver sent while the question
-    waited (feishu_bot.acknowledge); the first card this answers with
-    replaces it, so the question keeps one card.
+    waited (feishu_bot.acknowledge, handed over by process_question); the
+    first card this answers with replaces it, so the question keeps one card.
     """
 
     async def respond(title, text, template):
@@ -260,14 +261,16 @@ async def execute(
 
 
 def process_question(
-    chat_id,
-    question,
-    message_id,
-    sender_open_id=None,
-    parent_id=None,
-    root_id=None,
-    queued_card=None,
+    chat_id, question, message_id, sender_open_id=None, parent_id=None, root_id=None
 ):
+    # The receiver's "AI 排队中" card, if it is out. Taking the question also
+    # keeps a card still on its way from being handed over: the receiver
+    # then turns it into "AI 分析已开始", so no card stays "排队中".
+    try:
+        queued_card = take_queued_card(message_id)
+    except Exception:
+        log.exception("FEISHU_QUEUED_CARD_TAKE_FAILED message_id=%s", message_id)
+        queued_card = None
     return asyncio.run(
         execute(
             chat_id,

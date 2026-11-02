@@ -136,27 +136,40 @@ def handle_analyze_action(value, operator_open_id, message_id=None, chat_id=None
         return False, "无法验证消息与告警所属群，请使用平台发送的原始卡片"
     chat_id = row[0]
     from .orchestrator import queues
-    from .worker import enqueue_analysis
+    from .worker import claim_queued, enqueue_analysis
 
     # The queued task is created before the job; the active-task index then
     # refuses repeated clicks for as long as the job waits or runs.
-    try:
-        # The clicking user is the actor, so manual runs stay outside the
-        # daily budget for automatic analysis.
-        _, created = enqueue_analysis(
-            queues.ALERT_MANUAL,
-            "app.worker.process_manual_analysis",
-            event,
-            message_id,
-            chat_id,
-            actor=operator_open_id,
-        )
-    except Exception:
-        log.exception("MANUAL_ANALYSIS_ENQUEUE_FAILED")
-        return False, "AI 分析任务提交失败"
-    if not created:
-        return True, "正在分析中，请勿重复提交。"
-    return True, "已提交 AI 分析，结果将回复原告警消息"
+    for _ in range(2):
+        try:
+            # The clicking user is the actor, so manual runs stay outside the
+            # daily budget for automatic analysis.
+            task, created = enqueue_analysis(
+                queues.ALERT_MANUAL,
+                "app.worker.process_manual_analysis",
+                event,
+                message_id,
+                chat_id,
+                actor=operator_open_id,
+            )
+        except Exception:
+            log.exception("MANUAL_ANALYSIS_ENQUEUE_FAILED")
+            return False, "AI 分析任务提交失败"
+        if created:
+            return True, "已提交 AI 分析，结果将回复原告警消息"
+        # The alert's analysis is already queued or running. A queued
+        # automatic one becomes this click's: it then runs whatever its
+        # queue check would say, and replies under the alert's card.
+        joined = claim_queued(task["task_id"], operator_open_id)
+        log.info("FEISHU_ANALYZE_JOINED state=%s", joined)
+        if joined == "claimed":
+            return True, "该告警的 AI 分析已在排队，结果将回复原告警消息"
+        if joined == "active":
+            return True, "正在分析中，请勿重复提交。"
+        if joined == "web":
+            return False, "该告警正在平台上做 Web 诊断，结果请在平台分析历史查看"
+        # "ended": cancelled by its queue check just now; submit this click's.
+    return False, "AI 分析任务提交失败，请稍后重试"
 
 
 def card_after_mute(value, operator_open_id):

@@ -42,50 +42,59 @@ def questions_ahead():
         return None
 
 
-def call_feishu(coroutine, timeout=5):
-    """Run a Feishu API call from a callback, which runs inside the WebSocket
-    client's event loop: on a loop of its own in a short-lived thread. The
-    result, or None when the call failed or took longer than `timeout`."""
-    result = []
-
-    def run():
-        try:
-            result.append(asyncio.run(asyncio.wait_for(coroutine, timeout)))
-        except Exception:
-            log.exception("FEISHU_RECEIVER_CALL_FAILED")
-
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-    thread.join(timeout + 1)
-    return result[0] if result else None
-
-
-def acknowledge(message_id, question):
-    """Reply "AI 排队中" to a question that will wait: other questions are
-    ahead of it (how many) or no qa-worker is running. Its message id goes to
-    the job, whose worker turns that card into the progress card and then the
-    answer. None when the question starts at once (the worker replies "AI 分析
-    中" itself, as before) or the counts or the reply failed."""
-    counts = questions_ahead()
+def waiting_text(counts):
+    """Why a question about to be queued will wait, from questions_ahead():
+    other questions are ahead of it (how many) or no qa-worker is running.
+    None when it starts at once (or Redis could not tell): its worker
+    replies "AI 分析中" itself, as before."""
     if counts is None:
         return None
     ahead, workers = counts
     if ahead == 0 and workers:
         return None
-    from .worker import lark_safe
-
-    wait = (
+    return (
         f"前面还有 {ahead} 个问题，轮到后自动开始分析"
         if workers
         else "问答分析服务暂未运行，恢复后按顺序开始分析"
     )
-    return call_feishu(
-        feishu_client.reply_card(
-            message_id,
-            "AI 排队中",
-            "**问题：** " + lark_safe(question[:180]) + "\n\n⏳ 已排队，" + wait + "。",
+
+
+def acknowledge(message_id, question, wait):
+    """Reply "AI 排队中" to a queued question and hand the card to its worker
+    (offer_queued_card), which turns it into the progress card and then the
+    answer. Runs on a thread of its own: the WebSocket client runs callbacks
+    on its event loop, and card buttons must be answered within 3 seconds.
+
+    The question is queued already, so nothing here can lose it. A worker
+    that began it before the card was out replied "AI 分析中" itself: the
+    card is not sent then, or, sent meanwhile, says so instead of staying
+    "排队中". A card that failed is simply missing; the worker replies."""
+    from .conversation_context import offer_queued_card, question_started
+    from .worker import lark_safe
+
+    asked = "**问题：** " + lark_safe(question[:180])
+    try:
+        if question_started(message_id):
+            return
+        card = asyncio.run(
+            feishu_client.reply_card(
+                message_id, "AI 排队中", asked + "\n\n⏳ 已排队，" + wait + "。"
+            )
         )
-    )
+        if offer_queued_card(message_id, card):
+            log.info("FEISHU_QUEUED_CARD_SENT message_id=%s", message_id)
+            return
+        asyncio.run(
+            feishu_client.update_card(
+                card,
+                "AI 分析已开始",
+                asked + "\n\n已开始分析，进度和结果见本问题下的另一条回复。",
+                "grey",
+            )
+        )
+        log.info("FEISHU_QUEUED_CARD_LATE message_id=%s", message_id)
+    except Exception:
+        log.exception("FEISHU_QUEUED_CARD_FAILED message_id=%s", message_id)
 
 
 def on_message(data: P2ImMessageReceiveV1):
@@ -128,7 +137,8 @@ def on_message(data: P2ImMessageReceiveV1):
         return
     parent_id = getattr(message, "parent_id", None)
     root_id = getattr(message, "root_id", None)
-    queued_card = acknowledge(msg_id, question)
+    # Counted before this question joins the queue: the ones ahead of it.
+    wait = waiting_text(questions_ahead())
     try:
         queue.enqueue(
             "app.qa_worker.process_question",
@@ -139,26 +149,19 @@ def on_message(data: P2ImMessageReceiveV1):
             parent_id or root_id,
             root_id,
             job_timeout=-1,
-            # Passed only when sent: a worker of an earlier release, still
-            # running during an upgrade, takes no such argument.
-            **({"queued_card": queued_card} if queued_card else {}),
         )
-        log.warning(
-            "FEISHU_QUEUED message_id=%s queued_card=%s", msg_id, bool(queued_card)
-        )
+        log.warning("FEISHU_QUEUED message_id=%s waits=%s", msg_id, bool(wait))
     except Exception:
         redis.delete(key)
         log.exception("FEISHU_ENQUEUE_FAILED message_id=%s", msg_id)
-        if queued_card:
-            call_feishu(
-                feishu_client.update_card(
-                    queued_card,
-                    "AI 分析失败",
-                    "问题未能提交到分析队列，请稍后在群里重新发送该问题。",
-                    "red",
-                )
-            )
         raise
+    if wait:
+        threading.Thread(
+            target=acknowledge,
+            args=(msg_id, question, wait),
+            name="feishu-queued-card",
+            daemon=True,
+        ).start()
 
 
 def on_card_action(data: P2CardActionTrigger) -> P2CardActionTriggerResponse:

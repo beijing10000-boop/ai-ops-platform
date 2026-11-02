@@ -120,8 +120,9 @@ def cipher():
 
 # The schema init_schema() sets up. Bump it with any change there (platform_db
 # migrations are versioned on their own): connection() sets up again, once,
-# every database whose user_version differs.
-SCHEMA_VERSION = 1
+# every database whose user_version is older (never a newer one: a rollback).
+# 2: alert_events.reused_task_id.
+SCHEMA_VERSION = 2
 
 
 @contextmanager
@@ -149,32 +150,36 @@ def connection():
 
 
 def schema_current(db):
-    """Whether the database is at this code's schema: one read of its
-    user_version and newest platform migration."""
+    """Whether the database needs no setting up: at this code's schema or a
+    newer one, by one read of its user_version and newest platform migration.
+    A newer one is what a rollback finds: the later release's additions stay
+    and this release's schema is part of it, so it is left as it is."""
     from .platform_db import LATEST
 
     try:
-        row = db.execute(
+        version, migration = db.execute(
             "SELECT user_version,(SELECT MAX(version) FROM platform_migrations) "
             "FROM pragma_user_version"
         ).fetchone()
     except sqlite3.OperationalError:  # not set up yet: no platform_migrations
         return False
-    return tuple(row) == (SCHEMA_VERSION, LATEST)
+    return version >= SCHEMA_VERSION and (migration or 0) >= LATEST
 
 
 def ensure_schema(db):
     """Set the schema up once per version, safely across processes (web,
     workers, the Feishu receiver): the first to find it outdated takes the
     write lock (BEGIN IMMEDIATE), checks again and runs init_schema(); the
-    others wait for the lock and find it done."""
+    others wait for the lock and find it done. user_version is never
+    lowered."""
     if schema_current(db):
         return
     db.execute("BEGIN IMMEDIATE")
     try:
         if not schema_current(db):
             init_schema(db)
-            db.execute(f"PRAGMA user_version={int(SCHEMA_VERSION)}")
+            if db.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
+                db.execute(f"PRAGMA user_version={int(SCHEMA_VERSION)}")
         db.commit()
     except BaseException:
         db.rollback()
@@ -266,6 +271,14 @@ def init_schema(db):
     columns = {row[1] for row in db.execute("PRAGMA table_info(alert_events)")}
     if "event_json" not in columns:
         db.execute("ALTER TABLE alert_events ADD COLUMN event_json TEXT")
+    if "reused_task_id" not in columns:
+        # Schema 2: the analysis a later alert of the same trigger was told to
+        # wait for or stands on (worker.attach), which keeps it running.
+        db.execute("ALTER TABLE alert_events ADD COLUMN reused_task_id TEXT")
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS ix_alert_events_reused ON alert_events"
+        "(reused_task_id) WHERE reused_task_id IS NOT NULL"
+    )
     for table in ("alert_events", "ai_questions"):
         existing = {row[1] for row in db.execute("PRAGMA table_info(" + table + ")")}
         for field in ("token_total", "token_input", "token_output"):

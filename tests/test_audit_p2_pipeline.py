@@ -1,17 +1,22 @@
 """Regressions for the remaining P2 findings of the 2026-11 audit
-(OPS-PIPE-04/05/11/13, OPS-WEB-03/06)."""
+(OPS-PIPE-04/05/11/13, OPS-WEB-03/06) and for the review of their fixes."""
 
 import asyncio
 import json
 import re
+import threading
+import time
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from app import conversation_context, feishu_client, main, qa_worker, worker
+from app.alert_mute import action_signature
 from app.orchestrator import tasks
 
 TASK_ID = "0123456789abcdef0123456789abcdef"
+REPLY = feishu_client.ROOT + "/im/v1/messages/{}/reply"
 
 
 @pytest.fixture(autouse=True)
@@ -104,19 +109,97 @@ def capture(monkeypatch):
     return cards, queued
 
 
-def analyses_run(monkeypatch):
+def analyses_run(monkeypatch, notify=True):
+    """The model stand-in: the task ids it analysed. `notify`: also stand in
+    for the Feishu delivery (False keeps it, for a test faking Feishu)."""
     ran = []
 
     async def analyze(event, task_id=None):
         ran.append(task_id)
         return {"cause": "内存不足", "action": ["重启 dsp-api"], "analysis": ""}
 
-    async def notify(card, event=None, **kwargs):
+    async def delivered(card, event=None, **kwargs):
         pass
 
     monkeypatch.setattr(worker, "analyze", analyze)
-    monkeypatch.setattr(worker, "notify", notify)
+    if notify:
+        monkeypatch.setattr(worker, "notify", delivered)
     return ran
+
+
+def reused_task(event_id):
+    with main.connection() as db:
+        return db.execute(
+            "SELECT reused_task_id FROM alert_events WHERE event_id=? AND event_value='1'",
+            (event_id,),
+        ).fetchone()[0]
+
+
+def cards_sent(monkeypatch):
+    """Alert cards as the alert-worker sends them; analyses queue for real
+    (rq_jobs) so their tasks are created as in production."""
+    cards = []
+
+    async def notify(card, event=None, **kwargs):
+        cards.append(json.dumps(card, ensure_ascii=False))
+
+    monkeypatch.setattr(worker, "notify", notify)
+    return cards
+
+
+def rq_jobs(monkeypatch):
+    """RQ stand-in: (queue, function, args) of every job enqueued."""
+    jobs = []
+
+    class Queue:
+        def __init__(self, name, connection=None):
+            self.name = name
+
+        def enqueue(self, func, *args, **kwargs):
+            jobs.append((self.name, func, args))
+
+    monkeypatch.setattr(worker, "Queue", Queue)
+    monkeypatch.setattr(
+        worker, "Job", SimpleNamespace(exists=lambda job_id, connection=None: True)
+    )
+    return jobs
+
+
+def feishu(monkeypatch):
+    """Feishu API stand-in: (method, url, body) of every call; a card sent to
+    a group gets the message id om_<group>."""
+    sent = []
+
+    async def token(_client):
+        return "fixture-token"
+
+    async def request(_client, method, url, auth=None, **kwargs):
+        body = kwargs.get("json") or {}
+        sent.append((method, url, body))
+        return {"data": {"message_id": "om_" + str(body.get("receive_id") or "reply")}}
+
+    monkeypatch.setattr(feishu_client, "get_token", token)
+    monkeypatch.setattr(feishu_client, "request", request)
+    monkeypatch.setattr(conversation_context, "remember", lambda *a, **k: None)
+    return sent
+
+
+def click(event_id, message_id, trigger="66713", event_value="1"):
+    """A click on the "🤖 AI分析" button of the alert card `message_id`."""
+    from app.alert_actions import handle_analyze_action
+
+    return handle_analyze_action(
+        {
+            "op": "analyze_alert",
+            "event_id": event_id,
+            "trigger_id": trigger,
+            "event_value": event_value,
+            "sig": action_signature(event_id, trigger, 0),
+        },
+        "ou_super",
+        message_id,
+        "oc_group",
+    )
 
 
 # OPS-PIPE-04: a flapping trigger's alerts wait for the analysis in progress.
@@ -210,15 +293,17 @@ def test_queued_analysis_of_a_recovered_alert_is_not_run(monkeypatch):
     ran = analyses_run(monkeypatch)
     assert worker.process_alert_analysis(first, waited_for)["diagnosed"]
     assert ran == [waited_for]
-    # Both recovered: not run.
+    # Both recovered: not run, and the later alert no longer says it waits.
     again = alert("772020", trigger="772020")
     store_alert(again)
     skipped = queued_task(again)
     follower = alert("772021", trigger="772020")
-    store_alert(follower, ai_status="reused")
+    store_alert(follower)
+    assert asyncio.run(worker.handle_alert(follower))["reused_task_id"] == skipped
     recover(again)
     recover(follower)
     assert worker.process_alert_analysis(again, skipped)["reason"] == "AlertRecovered"
+    assert ai_status("772021") == "cancelled"
     # A click on "🤖 AI分析" is a request: it runs, recovered or not.
     clicked = alert("772030", trigger="772030")
     store_alert(clicked)
@@ -261,17 +346,34 @@ def test_queued_analysis_past_the_queue_limit_is_not_run(monkeypatch):
 
 
 class ReceiverRedis:
-    def __init__(self):
-        self.keys = set()
+    """Redis stand-in for the receiver's duplicate check and the queued-card
+    hand-off (SET NX, SET ... GET, EXISTS), one lock as Redis is one thread."""
 
-    def set(self, key, value, nx=False, ex=None):
-        if nx and key in self.keys:
-            return None
-        self.keys.add(key)
-        return True
+    def __init__(self):
+        self.items = {}
+        self.lock = threading.Lock()
+
+    def set(self, key, value, nx=False, ex=None, get=False):
+        with self.lock:
+            old = self.items.get(key)
+            if nx and old is not None:
+                return None
+            self.items[key] = value
+            return old if get else True
+
+    def exists(self, key):
+        with self.lock:
+            return int(key in self.items)
 
     def delete(self, key):
-        self.keys.discard(key)
+        with self.lock:
+            self.items.pop(key, None)
+
+
+def queued_card_threads():
+    for thread in threading.enumerate():
+        if thread.name == "feishu-queued-card":
+            thread.join(10)
 
 
 def chat_message(message_id, text):
@@ -299,6 +401,7 @@ def test_a_question_that_waits_says_so_and_keeps_one_card(monkeypatch):
     with main.connection() as db:
         db.execute("INSERT INTO settings VALUES ('allowed_chat_ids','oc_group',0)")
     replies, updates, jobs = [], [], []
+    store = ReceiverRedis()
 
     async def reply(message_id, title, text, template="blue", link=None):
         replies.append((message_id, title, text))
@@ -315,23 +418,42 @@ def test_a_question_that_waits_says_so_and_keeps_one_card(monkeypatch):
     monkeypatch.setattr(feishu_client, "update_card", update)
     monkeypatch.setattr(feishu_bot, "queue", Jobs())
     monkeypatch.setattr(feishu_bot, "redis", ReceiverRedis())
+    monkeypatch.setattr(conversation_context, "_client", lambda: store)
     # Two questions ahead (one being answered, one waiting).
     monkeypatch.setattr(feishu_bot, "questions_ahead", lambda: (2, 1))
     feishu_bot.on_message(chat_message("om_question", "<at id=all></at> 内存高吗"))
+    queued_card_threads()
     [(target, title, text)] = replies
     assert (target, title) == ("om_question", "AI 排队中")
     assert "前面还有 2 个问题，轮到后自动开始分析" in text and "<at" not in text
+    # The job is the one v1.5.0 queued; the card goes to its worker via Redis.
     [(args, kwargs)] = jobs
-    assert args[2] == "om_question" and kwargs["queued_card"] == "om_queued"
+    assert args[2] == "om_question" and kwargs == {"job_timeout": -1}
+    assert store.items["feishu-ai:queued-card:om_question"] == "om_queued"
     # Nothing ahead: it starts at once and the worker replies as before.
     monkeypatch.setattr(feishu_bot, "questions_ahead", lambda: (0, 1))
     feishu_bot.on_message(chat_message("om_next", "CPU 呢"))
-    assert len(replies) == 1 and "queued_card" not in jobs[-1][1]
+    queued_card_threads()
+    assert len(replies) == 1 and len(jobs) == 2
     # No qa-worker running: the question waits for one, and is told so.
     monkeypatch.setattr(feishu_bot, "questions_ahead", lambda: (0, 0))
     feishu_bot.on_message(chat_message("om_third", "磁盘呢"))
+    queued_card_threads()
     assert "问答分析服务暂未运行" in replies[-1][2]
-    # The worker turns the queued card into its progress card and then the answer.
+    # The question's worker takes the card over: it turns into its progress
+    # card and then the answer.
+    started, real_execute = [], qa_worker.execute
+
+    async def execute(*args):
+        started.append(args)
+
+    monkeypatch.setattr(qa_worker, "execute", execute)
+    qa_worker.process_question("oc_group", "内存高吗", "om_question", "ou_super")
+    assert started[-1][-1] == "om_queued"
+    # Taken once: a job run again does not take it a second time.
+    qa_worker.process_question("oc_group", "内存高吗", "om_question", "ou_super")
+    assert started[-1][-1] is None
+    monkeypatch.setattr(qa_worker, "execute", real_execute)
     settings(monkeypatch)
     task, _ = tasks.create({"question": "CPU"}, source="qa")
     tasks.finish(task["task_id"], {"answer": "CPU 正常"})
@@ -586,7 +708,8 @@ def test_schema_version_names_the_schema():
             )
         ]
     digest = hashlib.sha256(json.dumps(shape, sort_keys=True).encode()).hexdigest()
-    assert (main.SCHEMA_VERSION, digest[:16]) == (1, "591f9608ce793306")
+    # 2: alert_events.reused_task_id and its index.
+    assert (main.SCHEMA_VERSION, digest[:16]) == (2, "242f8f81c0ddfe23")
 
 
 def test_an_authenticated_request_reads_the_database_once(monkeypatch):
@@ -671,3 +794,445 @@ def test_dependencies_stay_within_one_major_and_declare_tzdata():
     assert {
         name: (low, high) for name, (low, high) in ranges.items() if high != low + 1
     } == {}
+
+
+# Review of the fixes above. Each test follows production's order: the
+# webhook stores the alert row, later the alert-worker (handle_alert) sends
+# the card and queues the analysis, the analysis worker
+# (process_alert_analysis) takes it when the backlog reaches it.
+
+
+def test_a_click_on_a_queued_automatic_analysis_gets_its_reply(monkeypatch):
+    """The click joins the automatic analysis (one per alert at a time), which
+    then runs as a click does: the alert recovering and the day's automatic
+    budget running out meanwhile no longer cancel it."""
+    feishu_on = {"feishu_enabled": "true", "feishu_alert_chat_ids": "oc_group"}
+    settings(monkeypatch, ai_alert_reuse_hours="2", **feishu_on)
+    sent, jobs = feishu(monkeypatch), rq_jobs(monkeypatch)
+    event = alert("883001")
+    store_alert(event)
+    queued = asyncio.run(worker.handle_alert(event))
+    task_id = queued["task_id"]
+    assert queued["analysis_queued"] and [job[1] for job in jobs] == [
+        "app.worker.process_alert_analysis"
+    ]
+    # The card the alert-worker sent to the group is om_oc_group.
+    ok, message = click("883001", "om_oc_group")
+    assert ok and message == "该告警的 AI 分析已在排队，结果将回复原告警消息"
+    assert len(jobs) == 1 and tasks.get(task_id)["actor"] == "ou_super"
+    # A second click finds it the first click's.
+    assert click("883001", "om_oc_group") == (True, "正在分析中，请勿重复提交。")
+    recover(event)
+    assert asyncio.run(worker.handle_alert({**event, "event_value": "0"}))["notified"]
+    settings(
+        monkeypatch, ai_alert_reuse_hours="2", ai_daily_token_limit="1", **feishu_on
+    )
+    ran = analyses_run(monkeypatch, notify=False)
+    sent.clear()
+    assert worker.process_alert_analysis(event, task_id)["diagnosed"]
+    assert ran == [task_id] and ai_status("883001") == "success"
+    [(method, url, body)] = sent
+    assert url == REPLY.format("om_oc_group") and "AI 分析结果" in body["content"]
+
+
+def test_a_click_after_the_queue_check_cancelled_the_analysis_runs_its_own(
+    monkeypatch,
+):
+    settings(monkeypatch, ai_alert_reuse_hours="2")
+    cards_sent(monkeypatch)
+    jobs = rq_jobs(monkeypatch)
+    ran = analyses_run(monkeypatch)
+    event = alert("883101")
+    store_alert(event)
+    task_id = asyncio.run(worker.handle_alert(event))["task_id"]
+    with main.connection() as db:
+        db.execute(
+            "INSERT INTO feishu_event_messages VALUES ('om_card','883101','1','oc_group','problem')"
+        )
+    recover(event)
+    claim = worker.claim_queued
+
+    def backlog_first(task, actor):
+        # The analysis worker reaches the task between the click finding it
+        # and taking it over: the alert has recovered, so it is cancelled.
+        assert worker.process_alert_analysis(event, task)["reason"] == "AlertRecovered"
+        return claim(task, actor)
+
+    monkeypatch.setattr(worker, "claim_queued", backlog_first)
+    ok, message = click("883101", "om_card")
+    assert ok and message == "已提交 AI 分析，结果将回复原告警消息"
+    name, func, args = jobs[-1]
+    assert (name, func) == ("ai-alert-manual", "app.worker.process_manual_analysis")
+    assert args[1:3] == ("om_card", "oc_group") and args[3] != task_id
+    assert ran == [] and tasks.get(args[3])["actor"] == "ou_super"
+
+
+def test_a_later_alert_keeps_the_analysis_it_waits_for_whenever_its_row_came(
+    monkeypatch,
+):
+    settings(monkeypatch, ai_alert_reuse_hours="2")
+    cards = cards_sent(monkeypatch)
+    rq_jobs(monkeypatch)
+    first, follower = alert("880001"), alert("880002")
+    # One burst: the webhook stores both rows before the alert-worker gets to
+    # the first and creates its analysis.
+    store_alert(first)
+    store_alert(follower)
+    with main.connection() as db:
+        db.execute("UPDATE alert_events SET received_at=datetime('now','-20 seconds')")
+    task_id = asyncio.run(worker.handle_alert(first))["task_id"]
+    result = asyncio.run(worker.handle_alert(follower))
+    assert result["reused_task_id"] == task_id and result["reused_in_progress"]
+    assert "结果将回复在该次告警的卡片下" in cards[-1]
+    assert reused_task("880002") == task_id and ai_status("880002") == "reused"
+    # The first recovers before the backlog reaches it; the later one has not.
+    recover(first)
+    ran = analyses_run(monkeypatch)
+    assert worker.process_alert_analysis(first, task_id)["diagnosed"]
+    assert ran == [task_id] and ai_status("880002") == "reused"
+
+
+def test_an_alert_whose_analysis_ends_before_it_waits_gets_its_own(monkeypatch):
+    """The analysis is cancelled between recent_analysis() picking it and the
+    alert recording that it waits: the card must not promise its result."""
+    settings(monkeypatch, ai_alert_reuse_hours="2")
+    cards = cards_sent(monkeypatch)
+    jobs = rq_jobs(monkeypatch)
+    first = alert("880101")
+    store_alert(first)
+    task_id = asyncio.run(worker.handle_alert(first))["task_id"]
+    pick = worker.recent_analysis
+
+    def then_cancelled(event):
+        found = pick(event)
+        assert found["task_id"] == task_id and found["in_progress"]
+        recover(first)
+        assert worker.process_alert_analysis(first, task_id)["skipped"]
+        return found
+
+    monkeypatch.setattr(worker, "recent_analysis", then_cancelled)
+    follower = alert("880102")
+    store_alert(follower)
+    result = asyncio.run(worker.handle_alert(follower))
+    assert result["analysis_queued"] and "reused_task_id" not in result
+    assert jobs[-1][2][0]["event_id"] == "880102" and len(cards) == 2
+    assert "结果将回复" not in cards[-1] and reused_task("880102") is None
+    assert tasks.get(task_id)["error_type"] == "AlertRecovered"
+
+
+def test_the_queue_limit_counts_from_the_latest_alert_waiting(monkeypatch):
+    settings(monkeypatch, ai_alert_reuse_hours="2")
+    cards_sent(monkeypatch)
+    rq_jobs(monkeypatch)
+
+    def queued_for(task_id, minutes):
+        update_task(task_id, f"created_at=datetime('now','-{minutes} minutes')")
+
+    def received(event_id, minutes):
+        with main.connection() as db:
+            db.execute(
+                "UPDATE alert_events SET received_at=datetime('now',?) WHERE event_id=?",
+                (f"-{minutes} minutes", event_id),
+            )
+
+    first = alert("881001")
+    store_alert(first)
+    waited_for = asyncio.run(worker.handle_alert(first))["task_id"]
+    # The backlog grows; 90 minutes on, the trigger fires again and waits.
+    queued_for(waited_for, 90)
+    received("881001", 90)
+    follower = alert("881002")
+    store_alert(follower)
+    assert asyncio.run(worker.handle_alert(follower))["reused_task_id"] == waited_for
+    # 31 minutes later the backlog reaches it: over the 2 hours itself, but
+    # the alert waiting for it came 31 minutes ago.
+    queued_for(waited_for, 121)
+    received("881002", 31)
+    ran = analyses_run(monkeypatch)
+    assert worker.process_alert_analysis(first, waited_for)["diagnosed"]
+    assert ran == [waited_for]
+    # The latest alert waiting is over the limit too: cancelled, and the alert
+    # no longer shows "复用近期分析".
+    first = alert("881010", trigger="881010")
+    store_alert(first)
+    task_id = asyncio.run(worker.handle_alert(first))["task_id"]
+    follower = alert("881011", trigger="881010")
+    store_alert(follower)
+    assert asyncio.run(worker.handle_alert(follower))["reused_task_id"] == task_id
+    queued_for(task_id, 200)
+    received("881010", 200)
+    received("881011", 130)
+    result = worker.process_alert_analysis(first, task_id)
+    assert result["reason"] == "QueueExpired" and ran == [waited_for]
+    message = tasks.get(task_id)["report"]["message"]
+    assert re.search(r"排队 20\d 分钟仍未开始", message)
+    assert "后续告警最近一条也已超过" in message
+    assert ai_status("881010") == ai_status("881011") == "cancelled"
+    # A later alert that recovered does not hold it either.
+    first = alert("881020", trigger="881020")
+    store_alert(first)
+    task_id = asyncio.run(worker.handle_alert(first))["task_id"]
+    follower = alert("881021", trigger="881020")
+    store_alert(follower)
+    asyncio.run(worker.handle_alert(follower))
+    recover(follower)
+    update_task(task_id, "created_at=datetime('now','-130 minutes')")
+    assert worker.process_alert_analysis(first, task_id)["reason"] == "QueueExpired"
+
+
+def test_only_automatic_analyses_in_progress_are_waited_for(monkeypatch):
+    """A Web diagnosis or a click's analysis of an earlier alert never replies
+    under that alert's card for the later one; a finished one is still reused
+    as in v1.5.0 (its card links the report, nothing is promised)."""
+    settings(monkeypatch, ai_alert_reuse_hours="2")
+    cards, jobs = cards_sent(monkeypatch), rq_jobs(monkeypatch)
+    first = alert("882001")
+    store_alert(first)
+    web, created = tasks.create(
+        {"event": first, "question": "看看磁盘"},
+        source="web",
+        actor="ou_operator",
+        event_id="882001",
+        diagnostic_type="disk",
+        profile="quick",
+    )
+    assert created
+    follower = alert("882002")
+    store_alert(follower)
+    result = asyncio.run(worker.handle_alert(follower))
+    assert "reused_task_id" not in result and result["analysis_queued"]
+    assert [job[2][0]["event_id"] for job in jobs] == ["882002"]
+    assert "结果将回复在该次告警的卡片下" not in cards[-1]
+    # A click on the earlier alert's card is told where that result is.
+    with main.connection() as db:
+        db.execute(
+            "INSERT INTO feishu_event_messages VALUES ('om_card','882001','1','oc_group','problem')"
+        )
+    ok, message = click("882001", "om_card")
+    assert not ok and "Web 诊断" in message and len(jobs) == 1
+    assert tasks.get(web["task_id"])["actor"] == "ou_operator"
+    # A click's analysis in progress is not waited for either.
+    clicked = alert("882010", trigger="882010")
+    store_alert(clicked)
+    queued_task(clicked, actor="ou_super")
+    assert worker.recent_analysis(alert("882011", trigger="882010")) is None
+    # Finished, the Web diagnosis is reused.
+    tasks.finish(web["task_id"], {"answer": "磁盘正常"})
+    again = alert("882003")
+    store_alert(again)
+    result = asyncio.run(worker.handle_alert(again))
+    assert result["reused_task_id"] == web["task_id"]
+    assert "reused_in_progress" not in result and "已完成 AI 分析" in cards[-1]
+
+
+def test_alerts_waiting_for_an_analysis_that_ended_without_a_result_say_so(
+    monkeypatch,
+):
+    settings(monkeypatch, ai_alert_reuse_hours="2")
+    cards_sent(monkeypatch)
+    rq_jobs(monkeypatch)
+    pairs = {}
+    for trigger in ("884010", "884020", "884030", "884040"):
+        first, follower = (
+            alert(trigger, trigger=trigger),
+            alert(str(int(trigger) + 1), trigger=trigger),
+        )
+        store_alert(first)
+        task_id = asyncio.run(worker.handle_alert(first))["task_id"]
+        store_alert(follower)
+        assert asyncio.run(worker.handle_alert(follower))["reused_task_id"] == task_id
+        pairs[trigger] = (first, task_id, follower["event_id"])
+    # The model failed.
+    first, task_id, waiting = pairs["884010"]
+
+    async def broken(event, task_id=None):
+        raise RuntimeError("model offline")
+
+    monkeypatch.setattr(worker, "analyze", broken)
+    assert worker.process_alert_analysis(first, task_id)["ai_failed"]
+    assert ai_status(waiting) == "failed"
+    # Cancelled from the Web while queued: its job finds it cancelled.
+    first, task_id, waiting = pairs["884020"]
+    update_task(task_id, "status='cancelled'")
+    assert worker.process_alert_analysis(first, task_id)["skipped"]
+    assert ai_status(waiting) == "cancelled"
+    # Over the daily budget when it starts (the day used 5,000 Token).
+    update_task(pairs["884010"][1], "token_total=5000")
+    first, task_id, waiting = pairs["884030"]
+    settings(monkeypatch, ai_alert_reuse_hours="2", ai_daily_token_limit="5000")
+    assert worker.process_alert_analysis(first, task_id)["reason"] == "DailyBudget"
+    assert ai_status(waiting) == "skipped_budget"
+    # Its job lost (reconcile: QueueLost): the periodic sync catches it.
+    first, task_id, waiting = pairs["884040"]
+    update_task(task_id, "status='failed',error_type='QueueLost'")
+    worker.sync_ai_states()
+    assert ai_status(waiting) == "failed"
+
+
+def test_invalid_saved_budgets_do_not_stop_the_alert_card(monkeypatch):
+    settings(monkeypatch, ai_alert_reuse_hours="2")
+    cards, queued = capture(monkeypatch)
+    first = alert("885001")
+    store_alert(first)
+    task_id = queued_task(first)
+    with main.connection() as db:
+        db.execute(
+            "INSERT INTO settings VALUES ('ai_profile_budgets','{\"turbo\": {}}',0)"
+        )
+    with pytest.raises(Exception):
+        tasks.stall_seconds()
+    assert worker.stalled_after() == 600
+    follower = alert("885002")
+    store_alert(follower)
+    assert asyncio.run(worker.handle_alert(follower))["reused_task_id"] == task_id
+    assert len(cards) == 1
+
+
+def test_the_receiver_never_waits_for_feishu(monkeypatch):
+    """lark-oapi runs callbacks on its WebSocket event loop: while one waits,
+    no other message or card button (3 s limit) is handled. The question is
+    queued at once; the "AI 排队中" card follows from a thread."""
+    from app import feishu_bot
+
+    with main.connection() as db:
+        db.execute("INSERT INTO settings VALUES ('allowed_chat_ids','oc_group',0)")
+    store, jobs, replies, updates = ReceiverRedis(), [], [], []
+    inside, release = threading.Event(), threading.Event()
+
+    async def reply(message_id, title, text, template="blue", link=None):
+        # Whether the question was queued before its card was asked for.
+        replies.append((message_id, title, message_id in jobs))
+        inside.set()
+        release.wait(30)  # Feishu answers when the test lets it
+        return "om_card_" + message_id
+
+    def sending():
+        return any(
+            thread.name == "feishu-queued-card" and thread.is_alive()
+            for thread in threading.enumerate()
+        )
+
+    async def update(message_id, title, text, template="green", link=None):
+        updates.append((message_id, title, template))
+
+    class Jobs:
+        def enqueue(self, func, *args, **kwargs):
+            jobs.append(args[2])
+
+    monkeypatch.setattr(feishu_client, "reply_card", reply)
+    monkeypatch.setattr(feishu_client, "update_card", update)
+    monkeypatch.setattr(feishu_bot, "queue", Jobs())
+    monkeypatch.setattr(feishu_bot, "redis", ReceiverRedis())
+    monkeypatch.setattr(conversation_context, "_client", lambda: store)
+    monkeypatch.setattr(feishu_bot, "questions_ahead", lambda: (3, 1))
+    try:
+        feishu_bot.on_message(chat_message("om_q1", "内存高吗"))
+        # The callback has returned while Feishu is still sending the card.
+        assert jobs == ["om_q1"] and inside.wait(30) and sending()
+        release.set()
+        queued_card_threads()
+        assert replies == [("om_q1", "AI 排队中", True)]
+        assert conversation_context.take_queued_card("om_q1") == "om_card_om_q1"
+        replies.clear()
+        # Its worker began the question while the card was on its way: it
+        # replied on its own, so the late card says so, not "排队中".
+        inside.clear()
+        release.clear()
+        feishu_bot.on_message(chat_message("om_q2", "CPU 呢"))
+        assert inside.wait(30)
+        assert conversation_context.take_queued_card("om_q2") is None
+        release.set()
+        queued_card_threads()
+        assert replies == [("om_q2", "AI 排队中", True)]
+        assert updates == [("om_card_om_q2", "AI 分析已开始", "grey")]
+        replies.clear()
+        # It began before the card was sent: no card at all.
+        jobs_enqueue = Jobs.enqueue
+
+        def taken_at_once(self, func, *args, **kwargs):
+            jobs_enqueue(self, func, *args, **kwargs)
+            conversation_context.take_queued_card(args[2])
+
+        monkeypatch.setattr(Jobs, "enqueue", taken_at_once)
+        feishu_bot.on_message(chat_message("om_q3", "磁盘呢"))
+        queued_card_threads()
+        assert jobs[-1] == "om_q3" and replies == [] and len(updates) == 1
+    finally:
+        release.set()
+        queued_card_threads()
+
+
+def test_the_tenant_token_is_fetched_once_until_it_expires(monkeypatch):
+    monkeypatch.setattr(feishu_client, "_token", {})
+    with main.connection() as db:
+        db.execute("INSERT INTO settings VALUES ('lark_app_id','cli_fixture',0)")
+        db.execute("INSERT INTO settings VALUES ('lark_app_secret','secret-1',0)")
+    fetched, answers = [], []
+
+    class Client:
+        async def request(self, method, url, headers=None, **kwargs):
+            if url.endswith("/tenant_access_token/internal"):
+                fetched.append(kwargs["json"]["app_secret"])
+                body = {"code": 0, "tenant_access_token": f"t-{len(fetched)}"}
+                body.update(answers.pop(0) if answers else {"expire": 7200})
+                return httpx.Response(
+                    200, json=body, request=httpx.Request(method, url)
+                )
+            # Feishu refuses the token.
+            return httpx.Response(
+                400,
+                json={"code": 99991663, "msg": "Invalid access token"},
+                request=httpx.Request(method, url),
+            )
+
+    def token():
+        return asyncio.run(feishu_client.get_token(Client()))
+
+    assert token() == token() == "t-1" and fetched == ["secret-1"]
+    # Renewed before Feishu's expiry.
+    feishu_client._token["until"] = time.monotonic() - 1
+    assert token() == "t-2" and token() == "t-2" and len(fetched) == 2
+    # New credentials, new token.
+    with main.connection() as db:
+        db.execute("UPDATE settings SET value='secret-2' WHERE key='lark_app_secret'")
+    assert token() == "t-3" and fetched[-1] == "secret-2"
+    # A token Feishu refuses is dropped.
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(
+            feishu_client.request(Client(), "GET", feishu_client.ROOT + "/x", "t-3")
+        )
+    assert token() == "t-4"
+    # Without an expiry it is not kept.
+    feishu_client.forget_token()
+    answers.extend([{}, {}])
+    assert token() == "t-5" and token() == "t-6"
+
+
+def test_a_newer_database_is_left_as_it_is(monkeypatch):
+    """After a rollback the database is newer than the code: it is not set
+    up (or its version rewritten) again, let alone on every connection."""
+    from app import platform_db
+
+    newer = main.SCHEMA_VERSION + 1
+    with main.connection() as db:
+        db.execute(f"PRAGMA user_version={newer}")
+        db.execute(
+            "INSERT INTO platform_migrations(version) VALUES (?)",
+            (platform_db.LATEST + 1,),
+        )
+    setups = []
+    monkeypatch.setattr(main, "init_schema", setups.append)
+    runs = traced(monkeypatch)
+    assert main.read_setting("web_protocol") == "http"
+    with main.connection() as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == newer
+    statements = [s.upper().replace(" ", "") for run in runs for s in run]
+    assert setups == [] and len(runs) == 2
+    assert not [s for s in statements if s.startswith(WRITES) or "USER_VERSION=" in s]
+    # An older one is set up, once, and only ever raised to this version.
+    with main.connection() as db:
+        db.execute("PRAGMA user_version=1")
+    for _ in range(2):
+        with main.connection() as db:
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+    assert len(setups) == 1 and version == main.SCHEMA_VERSION == 2
