@@ -7,13 +7,24 @@ no longer validates is skipped and shown, not fatal (OPS-SKILL-12); an alert
 analysis whose Skills cannot load says why (OPS-SKILL-13); log sources found
 by exact, unambiguous identities in turn (OPS-CORE-08); a failed analysis
 round still ends in a summary, and prefetch has its own time cap (OPS-CORE-09).
+
+The independent review of these fixes found: correct quotes of small values
+and states rejected while wrong small counts and times next to a large value
+passed, two "status: success" quotes reaching 高; versioned containers taking
+turns rewriting a template one of them could not read; prefetch's cap
+abandoning SSH diagnostics the server keeps running and leaving a session
+without tools; one log source called two (a sender IP as host name, FQDN and
+short name) and a host name from foreign addresses called one. Each case of
+the review is a test below.
 """
 
 import asyncio
 import base64
 from contextlib import asynccontextmanager
 import json
+import time
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from cryptography.fernet import Fernet
 import httpx
@@ -22,8 +33,10 @@ import pytest
 
 from app import evidence_check, main, mcp_runtime, operations, skill_runtime, worker
 from app import skill_store as skills
+from app.diagnostics import playbooks
 from app.integrations import log_mcp, ssh_mcp, zabbix
 from app.orchestrator import tasks
+from app.skill_mcp import SkillMCP, clear_catalog_cache
 from test_acceptance_scenarios import (
     LINUX_HOST,
     SSH,
@@ -40,7 +53,7 @@ from test_acceptance_scenarios import (
     step,
 )
 from test_log_mcp import CONFIG as LOG_CONFIG
-from test_log_mcp import LogSession, analyze, text_reply, tool
+from test_log_mcp import Call, LogSession, analyze, response, text_reply, tool
 from test_platform import client_for
 
 P = "/api/v1/platform/skills"
@@ -136,8 +149,90 @@ def test_checked_quotes_still_reach_high():
     result = evidence_check.check(answer, INDEX)
     assert result["method"] == "quote" and result["confidence"] == "高"
     assert "confidence_note" not in result
+    assert [item["basis"] for item in result["valid"]] == ["number", "text"]
     assert evidence_check.parse_answer(answer)[1] == "json"
     assert evidence_check.parse_answer("纯文本") == (None, None)
+
+
+# Review (cmp_high.py): quotes that prove nothing used to reach 高.
+ENVELOPES = {
+    "E1": {
+        "provider": "ssh_mcp",
+        "tool": "ssh_diagnose_cpu",
+        "text": json.dumps(
+            {"evidence_id": "E1", "status": "success", "data": {"load_1": 1.2}}
+        ),
+    },
+    "E2": {
+        "provider": "zabbix_mcp",
+        "tool": "item_get",
+        "text": json.dumps(
+            {
+                "evidence_id": "E2",
+                "status": "success",
+                "records": [{"key_": "system.cpu.load", "lastvalue": "1.1"}],
+            }
+        ),
+    },
+}
+
+
+def test_status_success_quotes_do_not_prove_a_contradicted_conclusion():
+    answer = json.dumps(
+        {
+            "cause": "负载 38.5（E1），远超核数（E2）",
+            "evidence": [
+                {"id": "E1", "quote": "status: success"},
+                {"id": "E2", "quote": "status: success"},
+            ],
+            "findings": {"confirmed": [{"statement": "负载 38.5", "evidence": ["E1"]}]},
+        },
+        ensure_ascii=False,
+    )
+    result = evidence_check.check(answer, ENVELOPES)
+    # At most 中; here 低, since neither quote checks out.
+    assert result["confidence"] == "低" and result["valid"] == []
+    assert [item["reason"] for item in result["invalid"]] == [
+        evidence_check.GENERIC
+    ] * 2
+    assert result["facts"]["counts"]["demoted"] == 1
+    # A key name alone is no quote either.
+    assert quotes(("E1", "load_1"), index=ENVELOPES) == []
+
+
+def test_text_quotes_alone_reach_medium_at_most():
+    """Two text quotes from two sources match real values, but no number was
+    checked: 中, and the report says why."""
+    index = {
+        "E1": {
+            "provider": "ssh_mcp",
+            "tool": "ssh_diagnose_service_detail",
+            "text": json.dumps(
+                {"data": {"unit": "nginx.service", "result": "oom-kill"}},
+            ),
+        },
+        "E2": {
+            "provider": "logs",
+            "tool": "log_search",
+            "text": json.dumps(
+                {"data": {"lines": ["Out of memory: Killed process java"]}},
+            ),
+        },
+    }
+    answer = json.dumps(
+        {
+            "cause": "x",
+            "evidence": [
+                {"id": "E1", "quote": "result oom-kill"},
+                {"id": "E2", "quote": "Killed process java"},
+            ],
+        }
+    )
+    result = evidence_check.check(answer, index)
+    assert [item["basis"] for item in result["valid"]] == ["text", "text"]
+    assert result["confidence"] == "中"
+    assert result["confidence_note"] == evidence_check.NO_NUMBER
+    assert evidence_check.NO_NUMBER in evidence_check.render(result)
 
 
 # --- OPS-SKILL-10: times, dates and small integers do not ground a quote ----------------
@@ -189,18 +284,21 @@ def test_digits_of_a_timestamp_in_the_evidence_ground_nothing():
     assert quotes(("E4", "最大 6.3"), ("E4", "均值 4.75")) == ["最大 6.3", "均值 4.75"]
 
 
-def test_small_integers_alone_must_be_quoted_as_text():
+def test_small_integers_must_name_their_field():
     """ "D 状态 6 个" passed because some 6 was somewhere in the evidence (here
-    the R count); a small number alone now needs the evidence's own text."""
+    the R count); a small number is now compared with the field it names."""
     assert quotes(("E4", "D 状态 6 个")) == []
-    assert quotes(("E4", "state_counts D 2")) == ["state_counts D 2"]
+    assert quotes(("E4", "state_counts D 2"), ("E4", "D 状态 2 个")) == [
+        "state_counts D 2",
+        "D 状态 2 个",
+    ]
 
 
 def test_a_quote_resting_on_a_time_alone_must_match_as_text():
     # Its digits all occur in the evidence's timestamps, which proved nothing.
     assert quotes(("E4", "19:55 发生告警")) == []
-    # A moment copied as the evidence shows it, or a value next to a time,
-    # still checks out: the time is not a number to look for.
+    # A moment as the evidence shows it, or a value next to a time, still
+    # checks out: the time is compared as a time, not as numbers.
     assert quotes(
         ("E4", "2026-10-29 19:55:21"),
         ("E4", "2026-10-29 20:01:00"),
@@ -217,9 +315,264 @@ def test_derived_signal_numbers_stay_citable_under_the_same_rule():
     assert quotes(
         ("E5", "是基线的 2.5 倍"),
         ("E5", "触发 14 次"),
+        # Named: the signal's own field.
         ("E5", "7 个监控项"),
+        # Named, but that field holds 14; and a bare 7.
+        ("E5", "7 个事件"),
+        ("E5", "7"),
         index=index,
-    ) == ["是基线的 2.5 倍", "触发 14 次"]
+    ) == ["是基线的 2.5 倍", "触发 14 次", "7 个监控项"]
+
+
+# The review's quotes (cmp_quotes.py) against the evidence they were written
+# for: correct small values with their field pass, a bare small number does
+# not; a wrong small count, time or date next to a correct large value fails.
+REVIEWED = {
+    "cpu": {
+        "evidence_id": "E1",
+        "data": {
+            "cpu_count": 4,
+            "load_1": 12.4,
+            "load_5": 9.87,
+            "idle_pct": 3.2,
+            "iowait_pct": 45.3,
+            "state_counts": {"R": 5, "D": 2, "S": 312},
+            "captured_at": "2026-10-29 19:12:21",
+        },
+    },
+    "ports": {
+        "evidence_id": "E2",
+        "data": {
+            "listen": [{"local": "0.0.0.0:8080", "process": "java"}, {"local": "*:22"}]
+        },
+    },
+    "mem": {
+        "evidence_id": "E3",
+        "data": {"mem_total_gib": 7.62, "mem_available_gib": 0.42},
+    },
+    "disk": {
+        "evidence_id": "E4",
+        "records": [{"key_": "vfs.fs.size[/,pused]", "lastvalue": "95.3"}],
+    },
+    "version": {
+        "evidence_id": "E5",
+        "data": {"server": "nginx/1.24.0", "agent": "zabbix_agent 6.0.25"},
+    },
+    "logs": {"evidence_id": "E6", "data": {"errors": 1234, "previous": 56}},
+    "proc": {
+        "evidence_id": "E7",
+        "data": {"processes": [{"pid": 4242, "comm": "java", "pcpu": 380.5}]},
+    },
+    "loss": {
+        "evidence_id": "E8",
+        "records": [{"key_": "icmppingloss", "lastvalue": "0"}],
+    },
+    "svc": {
+        "evidence_id": "E9",
+        "data": {"unit": "nginx.service", "restarts": 3, "result": "oom-kill"},
+    },
+}
+REVIEWED_QUOTES = [
+    ("cpu", "load_1 12.4", True),
+    ("cpu", "4", False),
+    ("cpu", "CPU 核数 4", True),
+    ("cpu", "cpu_count 4", True),
+    ("cpu", "空闲 3%", True),
+    ("cpu", "idle 3.2", True),
+    ("cpu", "D 状态 2 个", True),
+    ("cpu", '"D": 2', True),
+    ("cpu", "load 12.4，D 状态进程 6 个", False),
+    ("cpu", "19:55 负载 12.4", False),
+    ("cpu", "2026-10-30 负载 12.4", False),
+    ("ports", "8080 端口监听", True),
+    ("ports", "端口 22", True),
+    ("mem", "可用 0.42 GiB", True),
+    ("mem", "总内存 8 GiB", True),
+    ("disk", "使用率 95%", True),
+    ("disk", "95.3%", True),
+    ("version", "nginx/1.24.0", True),
+    ("version", "zabbix agent 6.0", True),
+    ("logs", "错误 1234 条", True),
+    ("logs", "上一窗口 56 条", True),
+    ("proc", "java PID 4242 CPU 380.5%", True),
+    ("loss", "丢包率 0%", True),
+    ("loss", "0", False),
+    ("svc", "重启 3 次", True),
+    ("svc", "restarts 3", True),
+    ("svc", "result oom-kill", True),
+    # Beyond the review's list: the same names with a wrong value, a pid
+    # alone, the time the evidence was taken, numbers written without spaces.
+    ("cpu", "D 状态 6 个", False),
+    ("cpu", "6 个 D 状态进程", False),
+    ("cpu", "19:12 负载 12.4", True),
+    ("mem", "可用 8 GiB", False),
+    ("proc", "PID 4242", False),
+    ("loss", "丢包率 1%", False),
+    ("svc", "重启3次", True),
+    ("svc", "restarts 4", False),
+]
+
+
+@pytest.mark.parametrize("key, quote, valid", REVIEWED_QUOTES)
+def test_reviewed_quotes(key, quote, valid):
+    index = {
+        "E1": {
+            "provider": "ssh_mcp",
+            "tool": key,
+            "text": json.dumps(REVIEWED[key], ensure_ascii=False),
+        }
+    }
+    assert quotes(("E1", quote), index=index) == ([quote] if valid else [])
+
+
+def reasons(*pairs, index):
+    answer = json.dumps(
+        {"cause": "x", "evidence": [{"id": i, "quote": q} for i, q in pairs]},
+        ensure_ascii=False,
+    )
+    return [item["reason"] for item in evidence_check.check(answer, index)["invalid"]]
+
+
+def test_rejections_say_what_is_wrong():
+    index = {
+        "E1": {
+            "provider": "ssh_mcp",
+            "tool": "ssh_diagnose_cpu",
+            "text": json.dumps(REVIEWED["cpu"], ensure_ascii=False),
+        }
+    }
+    assert reasons(
+        ("E1", "4"),
+        ("E1", "19:55 负载 12.4"),
+        ("E1", "load 12.4，D 状态进程 6 个"),
+        ("E1", "load_1"),
+        index=index,
+    ) == [
+        evidence_check.UNNAMED,
+        evidence_check.WRONG_MOMENT,
+        evidence_check.MISMATCH,
+        evidence_check.GENERIC,
+    ]
+
+
+# The review's availability evidence (cmp_state.py): item_get as prefetch asks
+# for it, and a state-change signal of a history query.
+AVAILABILITY = {
+    "evidence_id": "E2",
+    "records": [
+        {
+            "itemid": "45120",
+            "name": "Zabbix agent ping",
+            "key_": "agent.ping",
+            "value_type": "3",
+            "units": "",
+            "lastvalue": "0",
+            "lastclock": "1793274921",
+        },
+        {
+            "itemid": "45121",
+            "name": "Number of CPUs",
+            "key_": "system.cpu.num",
+            "value_type": "3",
+            "units": "",
+            "lastvalue": "8",
+            "lastclock": "1793274921",
+        },
+    ],
+    "total_records": 2,
+}
+
+
+def availability():
+    index = {
+        "E2": {
+            "provider": "zabbix_mcp",
+            "tool": "item_get",
+            "text": json.dumps(AVAILABILITY),
+        },
+        "E3": {
+            "provider": "zabbix_mcp",
+            "tool": "history_get",
+            "text": json.dumps({"evidence_id": "E3", "records": []}),
+        },
+    }
+    evidence_check.attach_signals(
+        index,
+        [
+            {
+                "evidence_id": "E3",
+                "value": {
+                    "itemid": "45120",
+                    "key": "icmpping",
+                    "changes": 2,
+                    "latest": 0,
+                    "latest_at": "2026-10-29 19:55:21",
+                    "last_change": {
+                        "from": 1,
+                        "to": 0,
+                        "local_time": "2026-10-29 19:55:21",
+                    },
+                },
+            }
+        ],
+    )
+    return index
+
+
+def test_states_are_checked_against_the_item_or_field_they_name():
+    index = availability()
+    assert quotes(
+        ("E2", "agent.ping 0"),
+        ("E2", "agent.ping lastvalue 0"),
+        ("E2", "system.cpu.num 8"),
+        ("E3", "changes 2"),
+        ("E3", "latest 0"),
+        # The platform's own hint, and the clock of the item in Beijing time.
+        ("E3", "19:55:21 由 1 变为 0"),
+        ("E2", "lastclock 2026-10-29 19:55:21"),
+        index=index,
+    ) == [
+        "agent.ping 0",
+        "agent.ping lastvalue 0",
+        "system.cpu.num 8",
+        "changes 2",
+        "latest 0",
+        "19:55:21 由 1 变为 0",
+        "lastclock 2026-10-29 19:55:21",
+    ]
+    # Wrong values for the same names, a value column that names no item, the
+    # row's value_type (3) taken for agent.ping, a bare 0.
+    assert (
+        quotes(
+            ("E2", "agent.ping 1"),
+            ("E2", "system.cpu.num 4"),
+            ("E2", '"lastvalue": "0"'),
+            ("E2", "agent.ping 3"),
+            ("E3", "changes 3"),
+            ("E3", "0"),
+            index=index,
+        )
+        == []
+    )
+
+
+def test_a_mixed_quote_needs_every_number_and_moment():
+    """A correct large value used to carry a wrong small count and a wrong time
+    along (cmp_high.py): every number and moment of the quote must be found."""
+    assert quotes(("E1", "08:15 load_1 1.2，D 状态 7 个"), index=ENVELOPES) == []
+    assert quotes(("E1", "load_1 1.2"), index=ENVELOPES) == ["load_1 1.2"]
+    # A timestamp with its zone is compared in Beijing time.
+    index = {
+        "E1": {
+            "provider": "logs",
+            "tool": "log_search",
+            "text": json.dumps({"lines": [{"ts": "2026-10-29T11:12:21Z", "n": 37}]}),
+        }
+    }
+    assert quotes(
+        ("E1", "19:12:21 出现 37 次"), ("E1", "11:12:21 出现 37 次"), index=index
+    ) == ["19:12:21 出现 37 次", "11:12:21 出现 37 次"]
+    assert quotes(("E1", "19:13 出现 37 次"), index=index) == []
 
 
 # --- OPS-SKILL-11: platform Skills only replaced by a newer template ------------------
@@ -233,8 +586,8 @@ TEMPLATE_LOCK = {
         "14b5c28feb0a4e9d74975eb7307b586b63abc82fb352f708c20a087dc1117260",
     ),
     "platform-logs": (
-        1,
-        "a6a512616f8c73c26637d19a894d9580b3ee4ccd65f56a5a4848cd2242aa766b",
+        2,
+        "19c30e10262b9ad1f01693dd8a01fe8f5fcc624f79421814bf55910c542b6117",
     ),
     "platform-linux": (
         1,
@@ -281,6 +634,15 @@ def test_every_platform_template_carries_a_version_raised_with_its_text():
     assert "platform-template-version" not in skills.skill_body(
         {"files": package["files"]}
     )
+
+
+def test_platform_logs_says_how_the_log_source_is_found():
+    """It said the source is found by the alert IP alone."""
+    package = skills.managed_package("platform-logs")
+    text = package["instructions"]
+    assert "Zabbix 主机名" in text and "`identity`" in text and "`tried`" in text
+    assert "完整域名与短名" in text and "`ambiguous`" in text
+    assert "IP 与主机名" in package["description"]
 
 
 def stored_row(name):
@@ -339,24 +701,162 @@ def test_a_copy_saved_before_template_versions_is_upgraded_once(monkeypatch):
     assert stored_row("platform-linux")["revision"] == upgraded["revision"]
 
 
-def test_a_stored_platform_copy_this_version_cannot_read_is_replaced():
-    """Even at a higher version: after a rollback the older release repairs a
-    copy whose metadata it does not know, instead of losing the Skill."""
-    stored_row("platform-java")
+def tamper(name, bundle):
+    """A stored platform copy other than the bundled one."""
+    with main.connection() as db:
+        db.execute(
+            "UPDATE platform_skills SET bundle=?,digest='x' WHERE name=?",
+            (bundle, name),
+        )
+
+
+def stored_bundle(name):
+    with main.connection() as db:
+        row = db.execute(
+            "SELECT bundle,revision FROM platform_skills WHERE name=?", (name,)
+        ).fetchone()
+    return skills.decode(row[0]), row[1]
+
+
+def test_a_newer_copy_this_release_cannot_read_is_kept_and_not_used(
+    monkeypatch, caplog
+):
+    """After a rollback, or next to a newer container: the copy a newer release
+    stored with metadata this one does not know stays in the database for
+    that release; this process loads its own bundled template instead, and
+    says so once."""
+    monkeypatch.setattr(skills, "_LOGGED", set())
+    first = stored_row("platform-java")
     text = (
         "---\nname: platform-java\ndescription: 下一版本\nfuture_key: 1\n---\n\n正文\n"
         "\n<!-- platform-template-version: 99 -->\n"
     )
-    with main.connection() as db:
-        db.execute(
-            "UPDATE platform_skills SET bundle=?,digest='x' WHERE name='platform-java'",
-            (skills.encode({"SKILL.md": text}),),
-        )
-    repaired = stored_row("platform-java")
-    assert repaired["digest"] == skills.digest(
-        skills.managed_package("platform-java")["files"]
+    tamper("platform-java", skills.encode({"SKILL.md": text}))
+    bundled_files = skills.managed_package("platform-java")["files"]
+    for _ in range(3):
+        served = stored_row("platform-java")
+        assert served["digest"] == skills.digest(bundled_files)
+        assert "invalid" not in served and served["revision"] == first["revision"]
+    assert stored_bundle("platform-java") == ({"SKILL.md": text}, first["revision"])
+    loaded = next(
+        row for row in skills.snapshot({}, "web") if row["name"] == "platform-java"
     )
-    assert "invalid" not in repaired
+    assert loaded["files"] == bundled_files
+    assert (
+        loaded["instructions"]
+        == skills.managed_package("platform-java")["instructions"]
+    )
+    assert caplog.text.count("PLATFORM_SKILL_NEWER_UNREADABLE name=platform-java") == 1
+
+
+def test_an_unreadable_platform_copy_is_repaired_in_the_database():
+    first = stored_row("platform-java")
+    bundled_files = skills.managed_package("platform-java")["files"]
+    broken = [
+        # Encrypted with another key, without SKILL.md, and rejected by this
+        # release at a version not above its own.
+        Fernet(Fernet.generate_key())
+        .encrypt(json.dumps({"SKILL.md": "x"}).encode())
+        .decode(),
+        skills.encode({"references/notes.md": "x"}),
+        skills.encode(
+            {
+                "SKILL.md": "---\nname: platform-java\ndescription: x\nfuture_key: 1\n"
+                "---\n\n正文\n\n<!-- platform-template-version: 1 -->\n"
+            }
+        ),
+    ]
+    for count, bundle in enumerate(broken, 1):
+        tamper("platform-java", bundle)
+        repaired = stored_row("platform-java")
+        assert repaired["digest"] == skills.digest(bundled_files)
+        assert repaired["revision"] == first["revision"] + count
+        assert stored_bundle("platform-java")[0] == bundled_files
+
+
+def test_versioned_containers_no_longer_take_turns(monkeypatch, caplog):
+    """The review's rolling upgrade: container B's platform-linux v2 adds a
+    prefetch rule for a diagnostic type container A does not know. A used to
+    "repair" it on every read and B to upgrade it again, the revision
+    climbing with each read (1, 2, 3 ... 7 in three rounds)."""
+    monkeypatch.setattr(skills, "_LOGGED", set())
+    original_package = skills.managed_package
+    original_playbooks = dict(playbooks.PLAYBOOKS)
+    base = original_package("platform-linux")["files"]["SKILL.md"]
+    version = skills.template_version({"SKILL.md": base})
+    newer = skills.TEMPLATE_VERSION.sub(
+        f"<!-- platform-template-version: {version + 1} -->",
+        base.replace(
+            "prefetch:\n",
+            "prefetch:\n- scopes: [alert]\n  types: [database]\n"
+            "  ssh: [ssh_diagnose_processes]\n",
+            1,
+        ),
+    )
+
+    def as_b():
+        monkeypatch.setattr(
+            playbooks,
+            "PLAYBOOKS",
+            {**original_playbooks, "database": original_playbooks["cpu"]},
+        )
+        skills._checked.cache_clear()
+        package = {
+            **skills.parse_document(newer),
+            "files": {**original_package("platform-linux")["files"], "SKILL.md": newer},
+        }
+        monkeypatch.setattr(
+            skills,
+            "managed_package",
+            lambda name: (
+                package if name == "platform-linux" else original_package(name)
+            ),
+        )
+
+    def as_a():
+        monkeypatch.setattr(playbooks, "PLAYBOOKS", original_playbooks)
+        skills._checked.cache_clear()
+        monkeypatch.setattr(skills, "managed_package", original_package)
+
+    as_a()
+    first = stored_row("platform-linux")
+    as_b()
+    upgraded = stored_row("platform-linux")
+    assert upgraded["revision"] == first["revision"] + 1
+    for _ in range(3):
+        as_a()
+        seen = stored_row("platform-linux")
+        assert seen["revision"] == upgraded["revision"] and "invalid" not in seen
+        assert seen["digest"] == skills.digest(
+            original_package("platform-linux")["files"]
+        )
+        as_b()
+        assert stored_row("platform-linux")["revision"] == upgraded["revision"]
+    assert stored_bundle("platform-linux")[0]["SKILL.md"] == newer
+    as_a()
+    loaded = next(
+        row for row in skills.snapshot({}, "web") if row["name"] == "platform-linux"
+    )
+    assert loaded["files"]["SKILL.md"] == base
+    assert caplog.text.count("PLATFORM_SKILL_NEWER_UNREADABLE name=platform-linux") == 1
+
+
+def test_a_template_changed_without_its_version_is_logged_once(monkeypatch, caplog):
+    """Every rows() call used to log PLATFORM_SKILL_VERSION_UNCHANGED."""
+    monkeypatch.setattr(skills, "_LOGGED", set())
+    original = skills.managed_package
+    version = skills.template_version(original("platform-base")["files"])
+    other = bundled("platform-base", version, "\n另一份同版本的规则。\n")
+    monkeypatch.setattr(
+        skills,
+        "managed_package",
+        lambda name: other if name == "platform-base" else original(name),
+    )
+    stored_row("platform-base")
+    monkeypatch.setattr(skills, "managed_package", original)
+    for _ in range(3):
+        assert stored_row("platform-base")["digest"] == skills.digest(other["files"])
+    assert caplog.text.count("PLATFORM_SKILL_VERSION_UNCHANGED name=platform-base") == 1
 
 
 # --- OPS-SKILL-12: a stored Skill that no longer validates -----------------------------
@@ -433,6 +933,56 @@ def test_one_skill_that_no_longer_validates_does_not_stop_everyone(caplog):
     # Re-importing a corrected version replaces it.
     imported(client, "legacy-rules", "新正文", replace_existing=True)
     assert "invalid" not in stored_row("legacy-rules")
+
+
+def test_a_skill_that_fails_validation_covers_no_scope(monkeypatch):
+    """The coverage check counted a Skill new tasks never load: switching
+    platform-base off left a scope with nothing that loads, unasked, and
+    the failed task blamed the disabled base Skill alone."""
+    client = client_for()
+    imported(client, "legacy-rules", scopes=["qa"])
+    overwrite(
+        "legacy-rules",
+        skills.encode(
+            {
+                "SKILL.md": "---\nname: legacy-rules\ndescription: 旧\nretired: 1\n---\n\n旧正文\n"
+            }
+        ),
+    )
+    base = stored_row("platform-base")
+    refused = client.put(P + "/" + base["id"], json={"scopes": ["web", "alert"]})
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["scopes"] == ["qa"]
+    confirmed = client.put(
+        P + "/" + base["id"], json={"scopes": ["web", "alert"], "confirm": True}
+    )
+    assert confirmed.status_code == 200
+    assert skills.uncovered(client.get(P).json()["items"]) == ["qa"]
+    # A question in that scope fails and says which Skills did not load.
+    monkeypatch.setattr(
+        mcp_runtime,
+        "read_setting",
+        lambda key: "fixture" if key == "openai_model" else "",
+    )
+    create = AsyncMock()
+    reply, usage = asyncio.run(
+        mcp_runtime.run(
+            "report",
+            "CPU 为什么高",
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            return_usage=True,
+        )
+    )
+    task = tasks.get(usage["task_id"])
+    assert task["status"] == "failed" and task["error_type"] == "NoSkillEnabled"
+    assert not create.called
+    assert "legacy-rules" in reply and "未通过当前版本的校验" in reply
+    assert "也已停用" not in reply and task["report"]["answer"] == reply
+    # Deleting the broken Skill takes no coverage away: no confirmation asked.
+    legacy = next(
+        row for row in client.get(P).json()["items"] if row["name"] == "legacy-rules"
+    )
+    assert client.delete(P + "/" + legacy["id"]).status_code == 200
 
 
 # --- OPS-SKILL-13: an alert analysis whose Skills cannot load says why ----------------
@@ -530,20 +1080,36 @@ LINK_DOWN = {
 
 
 class Sources(LogSession):
-    """log_resolve_target by identity: `known` maps ("ip" | "hostname", value)
-    to the host names of the sources found; anything else has no logs."""
+    """log_resolve_target as the log platform answers it (GROUP BY host,
+    sender IP): `known` maps ("ip" | "hostname", value) to its rows, each a
+    host name sent from the IP looked up (from 10.0.0.9 for a host name) or a
+    (host, sender IP) pair; anything else has no logs. `flagged`: the log
+    platform v0.2.0 also says `ambiguous` (more than one row) and `relayed`."""
 
-    def __init__(self, known):
+    def __init__(self, known, flagged=True, slow_first_listing=False):
         super().__init__(types=("network",))
-        self.known = known
+        self.known, self.flagged = known, flagged
+        self.listings, self.slow_first_listing = 0, slow_first_listing
+
+    async def list_tools(self, cursor=None):
+        self.listings += 1
+        if self.slow_first_listing and self.listings == 1:
+            # Never answers: prefetch's time cap cuts the session's opening.
+            await asyncio.sleep(3600)
+        return await super().list_tools(cursor)
 
     async def call_tool(self, name, args):
         if name != "log_resolve_target":
             return await super().call_tool(name, args)
         self.calls.append((name, args))
         [(kind, value)] = args.items()
-        hosts = self.known.get((kind, value))
-        if not hosts:
+        rows = [
+            (row, value if kind == "ip" else "10.0.0.9")
+            if isinstance(row, str)
+            else row
+            for row in self.known.get((kind, value)) or []
+        ]
+        if not rows:
             return text_reply(
                 {
                     "found": False,
@@ -553,6 +1119,7 @@ class Sources(LogSession):
                     "status": "success",
                 }
             )
+        relayed = self.flagged and kind == "ip"
         return text_reply(
             {
                 "found": True,
@@ -560,12 +1127,14 @@ class Sources(LogSession):
                 "matches": [
                     {
                         "host": host,
-                        "ip": "10.0.0.9",
+                        "ip": ip,
                         "types": ["network"],
                         "count_7d": 9,
+                        **({"relayed": True} if relayed and ip != value else {}),
                     }
-                    for host in hosts
+                    for host, ip in rows
                 ],
+                **({"ambiguous": len(rows) > 1} if self.flagged else {}),
                 "status": "success",
             }
         )
@@ -619,9 +1188,11 @@ def device_logs(monkeypatch):
     monkeypatch.setattr(log_mcp, "connect", log_connect)
     monkeypatch.setattr(ssh_mcp, "configured", no_ssh)
 
-    def run(known):
-        session["logs"] = sources = Sources(known)
-        task, sent, _ = analyze(LINK_DOWN)
+    def run(known, *replies, **options):
+        clear_catalog_cache()
+        session["logs"] = sources = Sources(known, **options)
+        task, sent, create = analyze(LINK_DOWN, *replies)
+        sources.create = create
         return task, sent, sources
 
     return run
@@ -644,12 +1215,93 @@ def test_several_sources_behind_one_ip_are_ambiguous_and_not_read(device_logs):
     assert "日志 MCP不可用：198.51.100.50 对应多个日志来源" in task["report"]["answer"]
 
 
-def test_one_host_sending_from_two_addresses_is_not_ambiguous(device_logs):
+def test_one_host_whose_name_differs_only_in_case_is_not_ambiguous(device_logs):
+    """Both rows come from the IP looked up; only the case of the name differs
+    (this test once claimed to cover "two addresses")."""
     _, sent, sources = device_logs(
         {("ip", "198.51.100.50"): ["core-switch-01", "CORE-SWITCH-01"]}
     )
     assert sent["capabilities"]["logs"]["target"] == "198.51.100.50"
     assert sources.targets() == {"198.51.100.50"}
+
+
+def test_rows_the_sender_ip_names_are_that_sender_not_another_source(device_logs):
+    """The log platform writes the sender IP as host of a message without a
+    host name: the device's own other messages. The review's repro called
+    this one device ambiguous and read no logs."""
+    task, sent, sources = device_logs(
+        {("ip", "198.51.100.50"): ["core-switch-01", "198.51.100.50"]}
+    )
+    state = sent["capabilities"]["logs"]
+    assert (state["status"], state["target"]) == ("available", "198.51.100.50")
+    assert sources.targets() == {"198.51.100.50"}
+    assert task["report"]["capabilities"]["logs"]["status"] == "used"
+
+
+def test_a_host_name_sent_from_foreign_addresses_is_ambiguous(device_logs):
+    """By host name, two senders that are not this device's interfaces are two
+    machines with one name; the review's repro merged them."""
+    _, sent, sources = device_logs(
+        {
+            ("hostname", "core-switch-01"): [
+                ("core-switch-01", "10.0.0.8"),
+                ("core-switch-01", "10.0.0.9"),
+            ]
+        }
+    )
+    assert sent["capabilities"]["logs"] == {
+        "status": "unavailable",
+        "error_code": "ambiguous",
+        "reason": "主机名 core-switch-01 对应多个日志来源（core-switch-01（10.0.0.8）、"
+        "core-switch-01（10.0.0.9）），无法确定哪个是目标主机，未合并读取",
+    }
+    assert sources.targets() == set()
+
+
+INTERFACES = {"198.51.100.50", "198.51.100.51"}
+
+
+def sources_of(kind, value, rows, flagged=True):
+    """log_sources() for an answer as Sources gives it."""
+    matches = [
+        {
+            "host": host,
+            "ip": ip,
+            **({"relayed": True} if flagged and ip != value and kind == "ip" else {}),
+        }
+        for host, ip in rows
+    ]
+    data = {"found": True, "target": value, "matches": matches}
+    if flagged:
+        data["ambiguous"] = len(rows) > 1
+    return skill_runtime.log_sources(kind, value, data, INTERFACES)
+
+
+def test_which_answers_name_one_source():
+    ip = "198.51.100.50"
+    # One machine: a fully qualified name and its short form, a case
+    # difference, the sender's rows without a host name next to its named ones.
+    assert sources_of(
+        "ip", ip, [("core-sw-01", ip), ("core-sw-01.example.net", ip)]
+    ) == (False, ["core-sw-01", "core-sw-01.example.net"])
+    assert not sources_of("ip", ip, [("core-sw-01", ip), ("CORE-SW-01", ip)])[0]
+    assert not sources_of("ip", ip, [("core-sw-01", ip), ("", ip), (ip, ip)])[0]
+    # Two machines behind one address (NAT), and two FQDNs of other domains.
+    assert sources_of("ip", ip, [("edge-a", ip), ("edge-b", ip)])[0]
+    assert sources_of("ip", ip, [("app.a.example", ip), ("app.b.example", ip)])[0]
+    # A device a relay forwards names itself by the IP: one relay is the
+    # source (log platform v0.2.0), two relays are not one source.
+    assert sources_of("ip", ip, [(ip, "10.0.0.8")]) == (False, [f"{ip}（10.0.0.8）"])
+    assert sources_of("ip", ip, [(ip, "10.0.0.8"), (ip, "10.0.0.9")])[0]
+    # By host name: senders that are all this host's interfaces are one
+    # device (a log platform without `ambiguous`), foreign ones are not, and
+    # the platform's own `ambiguous` is honored.
+    both = [("core-sw-01", "198.51.100.50"), ("core-sw-01", "198.51.100.51")]
+    assert not sources_of("hostname", "core-sw-01", both, flagged=False)[0]
+    assert sources_of("hostname", "core-sw-01", both)[0]
+    foreign = [("core-sw-01", "198.51.100.50"), ("core-sw-01", "10.0.0.9")]
+    assert sources_of("hostname", "core-sw-01", foreign, flagged=False)[0]
+    assert not sources_of("hostname", "core-sw-01", [("core-sw-01", "10.0.0.9")])[0]
 
 
 def test_an_ip_without_logs_moves_on_to_the_next_ip(device_logs):
@@ -813,6 +1465,14 @@ def test_a_slow_mcp_service_cannot_use_the_whole_task_time(monkeypatch):
     assert not any(e["tool"] == "host_get" for e in report["coverage"]["failed"])
     assert "item_get" in report["coverage"]["collected"]
     assert report["budget"]["used"]["rounds"] >= 1
+    # The cap fired before stage B: SSH was cut short, not "authorized but
+    # not called".
+    assert report["capabilities"]["ssh_mcp"] == {
+        "status": "unavailable",
+        "error_code": "timeout",
+        "reason": "预采集超过时间上限（16 秒），未到 SSH 实时诊断阶段",
+    }
+    assert "已授权但本次未调用" not in report["answer"]
 
 
 def test_ssh_time_budget_ends_before_the_prefetch_cap(monkeypatch):
@@ -843,3 +1503,216 @@ def test_ssh_time_budget_ends_before_the_prefetch_cap(monkeypatch):
     bundle = next(args for name, args in ssh_calls(ssh) if name == "ssh_collect")
     # Standard: 180 s, prefetch at most 90 s: answered ~10 s before that (was 110 s).
     assert 10 <= bundle["timeout_seconds"] <= 80
+
+
+def test_only_ssh_diagnostics_with_a_time_budget_are_left_to_the_cap():
+    bridge = SkillMCP(
+        lambda key: "",
+        ["ssh_mcp", "zabbix_mcp", "logs"],
+        deadline=time.monotonic() + 60,
+    )
+    budget = {"host_id": {"type": "integer"}, "timeout_seconds": {"type": "integer"}}
+    bridge.tools["ssh_mcp"] = {
+        "ssh_collect": tool("ssh_collect", budget),
+        "ssh_diagnose_cpu": tool("ssh_diagnose_cpu", {"host_id": {"type": "integer"}}),
+    }
+    assert bridge.stoppable("ssh_mcp", "ssh_collect")
+    assert not bridge.stoppable("ssh_mcp", "ssh_diagnose_cpu")
+    # Lookups run nothing on a host; Zabbix and log queries keep the cap.
+    assert bridge.stoppable("ssh_mcp", "ssh_resolve_host")
+    assert bridge.stoppable("zabbix_mcp", "history_get")
+    assert bridge.stoppable("logs", "log_overview")
+
+
+def test_an_ssh_diagnostic_the_server_cannot_stop_is_waited_for(monkeypatch):
+    """The cap used to abandon an ssh_collect the SSH MCP server kept running
+    on the host (no `timeout_seconds` to tell it when to answer): its result
+    was lost. Now prefetch waits for it; the Zabbix query is still skipped."""
+    monkeypatch.setattr(skill_runtime, "PREFETCH_SHARE", 0.05)  # 180 s -> 9 s
+    clock = alert_clock()
+    zbx = cpu_alert(clock)
+    answered = zbx.call_tool
+    capped = asyncio.Event()
+
+    async def call_tool(name, args):
+        if name == "history_get":
+            try:
+                await asyncio.sleep(600)
+            except asyncio.CancelledError:
+                capped.set()
+                raise
+        return await answered(name, args)
+
+    zbx.call_tool = call_tool
+    ssh = SSH({})
+    original = ssh.call_tool
+
+    async def collect_after_the_cap(name, args):
+        if name == "ssh_collect":
+            # The host is slow: the bundle answers only after the cap fired.
+            await asyncio.wait_for(capped.wait(), 120)
+        return await original(name, args)
+
+    ssh.call_tool = collect_after_the_cap
+    rig(monkeypatch, zbx, ssh)
+    model = Model(lambda r: answer("结论"))
+    task, _ = run_alert(event_for(CPU_ALERT, "71001", clock), model)
+    report = task["report"]
+    assert "ssh_collect" in report["coverage"]["collected"]
+    assert not any(e["tool"] == "ssh_collect" for e in report["coverage"]["skipped"])
+    assert {
+        "tool": "history_get",
+        "reason": skill_runtime.PREFETCH_LATE,
+    } in report["coverage"]["skipped"]
+    assert prefetched(model.requests[0], "ssh_collect")
+    hit = next(
+        hit
+        for hit in report["budget"]["limits_hit"]
+        if hit.startswith("预采集超过时间上限（9 秒")
+    )
+    assert (
+        "history_get" in hit
+        and "SSH 诊断不能中途停止，已等到结果（ssh_collect）" in hit
+    )
+    assert report["capabilities"]["ssh_mcp"]["status"] == "used"
+
+
+def test_a_session_cancelled_while_listing_its_tools_is_opened_again(monkeypatch):
+    """Registered before its tools were listed, a session the cap cancelled in
+    between answered every later call with "MCP 工具发现失败"."""
+    session = Sources({}, slow_first_listing=True)
+
+    @asynccontextmanager
+    async def connect(*args, **kwargs):
+        yield session
+
+    monkeypatch.setattr(log_mcp, "connect", connect)
+    clear_catalog_cache()
+
+    async def scenario():
+        async with SkillMCP(
+            lambda key: LOG_CONFIG.get(key, ""),
+            ["logs"],
+            deadline=time.monotonic() + 60,
+        ) as bridge:
+            with pytest.raises(TimeoutError):
+                async with asyncio.timeout(0.5):
+                    await bridge.catalog("logs")
+            assert "logs" not in bridge.sessions and "logs" not in bridge.tools
+            assert "logs" not in bridge.failures
+            assert "log_overview" in await bridge.catalog("logs")
+            assert bridge.sessions["logs"] is session and session.listings == 2
+
+    asyncio.run(scenario())
+
+
+def test_a_log_session_cut_while_it_opens_still_serves_the_model(
+    device_logs, monkeypatch
+):
+    """The review's repro: the cap fired while the log session listed its
+    tools; the model's log query then failed with "MCP 工具发现失败"."""
+    monkeypatch.setattr(skill_runtime, "PREFETCH_SHARE", 0.05)  # 180 s -> 9 s
+    ask = response(
+        Call(
+            "call_mcp_tool",
+            {
+                "provider": "logs",
+                "name": "log_overview",
+                "arguments": {"target": "198.51.100.50"},
+            },
+        )
+    )
+    task, _, sources = device_logs(
+        {("ip", "198.51.100.50"): ["core-switch-01"]}, ask, slow_first_listing=True
+    )
+    second = sources.create.call_args_list[1].kwargs["input"]
+    [output] = [
+        item["output"]
+        for item in second
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    ]
+    assert "MCP 工具发现失败" not in output and "5210" in output
+    assert sources.listings == 2 and sources.targets() == {"198.51.100.50"}
+    report = task["report"]
+    assert report["capabilities"]["logs"]["status"] == "used"
+    assert any(
+        hit.startswith("预采集超过时间上限（9 秒")
+        for hit in report["budget"]["limits_hit"]
+    )
+
+
+def test_what_the_cap_cut_short_is_not_reported_unused(device_logs, monkeypatch):
+    """The log session never finished opening and the model did not ask for
+    logs: 能力说明 says the cap cut it, not "authorized but not called". A
+    network device's SSH was not applicable whatever the cap."""
+    monkeypatch.setattr(skill_runtime, "PREFETCH_SHARE", 0.05)  # 180 s -> 9 s
+    task, sent, sources = device_logs(
+        {("ip", "198.51.100.50"): ["core-switch-01"]}, slow_first_listing=True
+    )
+    report = task["report"]
+    assert report["capabilities"]["logs"] == {
+        "status": "unavailable",
+        "error_code": "timeout",
+        "reason": "预采集超过时间上限（9 秒），日志 MCP 连接未完成",
+    }
+    assert sent["capabilities"]["ssh_mcp"]["status"] == "not_applicable"
+    assert report["capabilities"]["ssh_mcp"]["status"] == "not_applicable"
+    assert (
+        "日志 MCP不可用：预采集超过时间上限（9 秒），日志 MCP 连接未完成"
+        in (report["answer"])
+    )
+    assert "已授权但本次未调用" not in report["answer"]
+    assert sources.resolved() == []
+
+
+def test_named_small_values_need_no_extra_evidence_round(monkeypatch):
+    """Correct quotes of small values were rejected, so the platform sent the
+    model back for more evidence it did not need. A bare small number is
+    still no citation, and the round is still asked for."""
+    clock = alert_clock()
+    zbx = Zabbix(
+        LINUX_HOST,
+        [
+            item("201", "system.cpu.load[all,avg5]", 12.4),
+            item("203", "system.cpu.num", 4, "3"),
+        ],
+        [item("202", "system.cpu.util", 18.5)],
+        [],
+        {"201": step(clock, 3.0, 12.0), "202": step(clock, 15.0, 18.0)},
+        {"201": (1.0, 2.5, 4.0), "202": (5.0, 15.0, 30.0)},
+    )
+    rig(monkeypatch, zbx, SSH({}))
+
+    def conclude(quote):
+        def reply(request):
+            items = prefetched(request, "item_get")[0]
+            return answer(
+                json.dumps(
+                    {
+                        "cause": f"5 分钟负载 12.4，主机 4 核（{items}）",
+                        "action": ["核对告警时段的批处理任务"],
+                        "evidence": [
+                            {"id": items, "quote": "system.cpu.load[all,avg5] 12.4"},
+                            {"id": items, "quote": quote},
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+        return reply
+
+    task, _ = run_alert(
+        event_for(CPU_ALERT, "71001", clock), Model(conclude("system.cpu.num 4"))
+    )
+    report = task["report"]
+    assert len(report["citations"]["valid"]) == 2
+    assert "平台要求模型补充证据后再总结（1 次）" not in report["budget"]["limits_hit"]
+    task, _ = run_alert(
+        event_for(CPU_ALERT, "71001", clock, event_id="880002"), Model(conclude("4"))
+    )
+    report = task["report"]
+    assert [item["reason"] for item in report["citations"]["invalid"]] == [
+        evidence_check.UNNAMED
+    ]
+    assert "平台要求模型补充证据后再总结（1 次）" in report["budget"]["limits_hit"]

@@ -2,33 +2,60 @@
 
 Every MCP result the model sees carries an evidence id (E1, E2, ...). The final
 answer cites ids with a short quote; a citation counts only when the id exists,
-the evidence was collected successfully, and every significant number in the
-quote appears in that evidence (at the quote's own precision) or in a platform
-signal derived from it, so a value cannot be attributed to evidence that does
-not contain it. Digits of dates and clock times, and integers below 10, are not
-significant: almost any evidence holds them (timestamps, small counts), so a
-quote resting on them alone must appear in the evidence as text. Identifier
-fields (item ids, clocks, pids) never ground a quote. Confidence is derived
-from the citations whose quotes were checked, never from the model: an answer
-with no quotes to check (no evidence array, or a broken JSON answer of which
-only some fields could be recovered) reaches 中 at most. Structured facts
-without a valid citation are demoted.
+the evidence was collected successfully and the quote checks out against that
+evidence or the platform signals derived from it:
+
+- Dates and clock times in a quote must occur in the evidence, compared in a
+  normalized form (Unix seconds and time zones in Beijing time); their digits
+  are never numbers to look for.
+- A quote with a significant number (10 or more, or one with decimals) needs
+  every number it holds among the evidence's measurements, at the quote's own
+  precision. Integers below 10 count too, but cannot ground a quote alone.
+  Identifier fields (item ids, clocks, pids) never ground a quote; a pid next
+  to a measurement ("java PID 4242 CPU 380.5%") is still found.
+- A quote whose numbers are all below 10 must name the field each belongs to
+  (an item key, a field name, or a Chinese name such as 核数, 重启, 丢包率):
+  the number is compared with the value of that field, of the item_get row
+  that key names, or of a signal value (changes, latest). A small number
+  without a name proves nothing: almost any evidence holds one.
+- A quote without numbers must occur in the evidence as text and match one of
+  its values, not only key names or generic words (status, success).
+
+Confidence is derived from the checked citations, never from the model: 高
+needs several valid citations across sources or queries, at least one of them
+checked by a number; an answer with no quotes to check (no evidence array, or
+a broken JSON answer of which only some fields could be recovered) reaches 中
+at most. Structured facts without a valid citation are demoted.
 """
 
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 import json
 import re
 from zoneinfo import ZoneInfo
 
 BEIJING = ZoneInfo("Asia/Shanghai")
-NUMBER = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?")
-# Dates and clock times inside text ("2026-10-29 19:55:21", "10:21:40.120",
-# "2026年10月29日"): their digits are positions in time, not measurements.
-DATETIME = re.compile(
-    r"(?<![\d.])(?:\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}日?"
-    r"|\d{1,2}月\d{1,2}日"
-    r"|\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)(?!\d)"
+# A number standing on its own: not glued to a name ("load_1", "E2", "eth0"),
+# never part of a longer number, and no HTTP status class ("5xx").
+NUMBER = re.compile(r"(?<![A-Za-z0-9_.])-?\d+(?:\.\d+)?(?!\d)(?![xX]{2})")
+# Dates and clock times ("2026-10-29 19:55:21", "10:21:40.120", "2026年10月29日",
+# "10月29日"): checked as moments, never as numbers.
+MOMENT = re.compile(
+    r"(?<![\d.])(?:(?P<year>\d{4})[-/.年](?P<month>\d{1,2})[-/.月](?P<day>\d{1,2})日?"
+    r"|(?P<m>\d{1,2})月(?P<d>\d{1,2})日"
+    r"|(?P<hour>\d{1,2}):(?P<minute>\d{2})(?::(?P<second>\d{2}))?(?:\.\d+)?)(?!\d)"
 )
+# A timestamp with its zone ("2026-10-29T11:12:21Z"): also read in Beijing time.
+ZONED = re.compile(
+    r"(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?"
+    r"\s?(Z|[+-]\d{2}:?\d{2})"
+)
+# Names: identifiers ("agent.ping", "system.cpu.load[all,avg5]", "GE0/0/1";
+# digits inside one are no numbers) and runs of Chinese (U+3400–U+9FFF).
+HAN = chr(0x3400) + "-" + chr(0x9FFF)
+WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_.\-/\[\],]*")
+NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.\-/\[\],]*|[" + HAN + "]+")
+LETTER = re.compile("[A-Za-z" + HAN + "]")
+TOKEN_SPLIT = re.compile("[^0-9a-z" + HAN + "]+")
 # Integers below this occur in almost any evidence (counts, states, flags):
 # on their own they cannot tie a quote to the evidence it names.
 SMALL_INTEGER = 10
@@ -71,9 +98,213 @@ IDENTIFIER_KEYS = {
 }
 
 
+# Identifiers a quote may give next to a measurement ("java PID 4242 CPU
+# 380.5%"): found when the evidence holds them, but they never ground a quote.
+NAMED_IDS = {
+    "pid",
+    "ppid",
+    "itemid",
+    "eventid",
+    "r_eventid",
+    "triggerid",
+    "hostid",
+    "objectid",
+}
+# Fields that describe an item row or a result instead of measuring anything:
+# "agent.ping 3" must not pass on the row's value_type 3.
+METADATA_KEYS = {
+    "value_type",
+    "type",
+    "flags",
+    "status",
+    "state",
+    "delay",
+    "history",
+    "trends",
+    "units",
+    "valuemapid",
+    "templateid",
+}
+# Keys holding Unix seconds (Zabbix clock, lastclock, time_from ...).
+TIME_KEY = re.compile(r"clock|time|^(?:at|since|until|ts)$")
+# Names that point at no measurement in particular: the value column of every
+# item row, result envelopes, units. A small number next to them alone is as
+# unnamed as a bare one ('"lastvalue": "0"' does not say which item).
+GENERIC_NAMES = {
+    "value",
+    "values",
+    "lastvalue",
+    "prevvalue",
+    "status",
+    "state",
+    "result",
+    "results",
+    "data",
+    "record",
+    "records",
+    "evidence",
+    "evidence_id",
+    "b",
+    "byte",
+    "bytes",
+    "k",
+    "kb",
+    "kib",
+    "m",
+    "mb",
+    "mib",
+    "g",
+    "gb",
+    "gib",
+    "ms",
+    "s",
+    "sec",
+    "second",
+    "seconds",
+    "pct",
+    "percent",
+    "x",
+}
+# Words every result holds: a quote of them (and key names) proves nothing.
+GENERIC_WORDS = GENERIC_NAMES | {
+    "success",
+    "succeeded",
+    "ok",
+    "true",
+    "false",
+    "null",
+    "none",
+    "partial",
+    "yes",
+    "no",
+    "成功",
+}
+GENERIC_CHINESE = {
+    "状态",
+    "数值",
+    "数量",
+    "次数",
+    "个数",
+    "当前",
+    "达到",
+    "约为",
+    "大约",
+    "共有",
+    "合计",
+}
+# Chinese names of measurements and the fragments of the field names and
+# item keys that hold them ("CPU 核数 4" names cpu_count / system.cpu.num).
+FIELD_WORDS = {
+    "核数": ("cpu_count", "cpu.num", "cores", "ncpu", "cpus", "processors"),
+    "核": ("cpu_count", "cpu.num", "cores", "ncpu", "cpus"),
+    "空闲": ("idle",),
+    "等待": ("wait",),
+    "负载": ("load",),
+    "使用率": ("util", "pused", "percent", "usage", "used"),
+    "利用率": ("util", "percent", "usage"),
+    "重启": ("restart",),
+    "丢包": ("loss",),
+    "延迟": ("latency", "rtt", "delay"),
+    "响应": ("response", "rtt"),
+    "内存": ("mem",),
+    "交换": ("swap",),
+    "总": ("total",),
+    "可用": ("avail", "free"),
+    "剩余": ("free", "avail"),
+    "已用": ("used",),
+    "错误": ("error", "err"),
+    "失败": ("fail",),
+    "进程": ("proc", "process"),
+    "线程": ("thread",),
+    "连接": ("conn", "socket", "established"),
+    "端口": ("port",),
+    "磁盘": ("disk", "vfs.fs"),
+    "文件系统": ("vfs.fs", "filesystem"),
+    "可用性": ("ping", "avail"),
+    "在线": ("ping", "avail"),
+    "变化": ("change",),
+    # A state change as the platform's hint words it: "由 1 变为 0".
+    "由": ("from",),
+    "从": ("from",),
+    "变为": ("to",),
+    "最新": ("latest", "last"),
+    "最近": ("latest", "last"),
+    "最大": ("max",),
+    "最高": ("max", "peak"),
+    "最小": ("min",),
+    "最低": ("min",),
+    "平均": ("avg", "mean"),
+    "均值": ("avg", "mean"),
+    "告警前": ("before",),
+    "告警后": ("after",),
+    "基线": ("baseline",),
+    "倍": ("ratio",),
+    "监控项": ("item",),
+    "事件": ("event", "problem"),
+    "触发": ("problem", "event", "trigger"),
+    "上一窗口": ("previous",),
+    "上一": ("previous",),
+    "接口": ("interface", "net.if"),
+    "抖动": ("flap",),
+    "中断": ("down",),
+    "主机": ("host",),
+    "流量": ("traffic", "bytes", "bps"),
+    "温度": ("temp",),
+    "风扇": ("fan",),
+    "电源": ("power", "psu"),
+    "堆": ("heap",),
+    "运行时间": ("uptime",),
+    "队列": ("queue",),
+    "僵尸": ("zombie",),
+    "句柄": ("handle", "file"),
+    "请求": ("request",),
+}
+# Why a citation was dropped.
+MISSING = "证据编号不存在"
+FAILED = "引用的是失败或未完成的采集结果"
+MISMATCH = "证据中找不到引用的数值或原文"
+WRONG_MOMENT = "证据中没有引用的日期或时刻"
+UNNAMED = "小于 10 的数值没有写明监控项 key 或字段名，无法核对"
+GENERIC = "引用只有字段名或通用字样（如 status、success），证明不了结论"
+IDENTIFIER = "引用的只有编号类字段（itemid、pid 等），证明不了结论"
+
+
+def _moment(match):
+    """(the form a date or time must have in the evidence, every form it
+    stands for), or None when the digits are no date or time ("25:99")."""
+    group = match.groupdict()
+    try:
+        if group["year"]:
+            day = date(int(group["year"]), int(group["month"]), int(group["day"]))
+            return "d:" + day.isoformat(), {
+                "d:" + day.isoformat(),
+                "md:" + day.strftime("%m-%d"),
+            }
+        if group["m"]:
+            # A leap year, so that 2月29日 stays a date.
+            form = "md:" + date(2000, int(group["m"]), int(group["d"])).strftime(
+                "%m-%d"
+            )
+            return form, {form}
+    except ValueError:
+        return None
+    hour, minute = int(group["hour"]), int(group["minute"])
+    second = None if group["second"] is None else int(group["second"])
+    if hour > 23 or minute > 59 or (second or 0) > 59:
+        return None
+    short = f"t:{hour:02d}:{minute:02d}"
+    if second is None:
+        return short, {short}
+    return f"{short}:{second:02d}", {short, f"{short}:{second:02d}"}
+
+
+def _without_moments(text):
+    return MOMENT.sub(lambda match: " " if _moment(match) else match.group(0), text)
+
+
 def _numbers(text):
     """The numbers of a text; the digits of its dates and times are left out."""
-    return [match.group(0) for match in NUMBER.finditer(DATETIME.sub(" ", str(text)))]
+    return [match.group(0) for match in NUMBER.finditer(_without_moments(str(text)))]
 
 
 def _significant(raw):
@@ -82,8 +313,337 @@ def _significant(raw):
     return not (value.is_integer() and abs(value) < SMALL_INTEGER)
 
 
+def _near(raw, candidates):
+    """Whether a quoted number is among `candidates` at its own precision
+    (12% for 12.4, 8 GiB for 7.62)."""
+    value = float(raw)
+    decimals = len(raw.split(".")[1]) if "." in raw else 0
+    tolerance = 0.5 * 10**-decimals
+    return any(abs(candidate - value) <= tolerance for candidate in candidates)
+
+
 def _squeezed(value):
     return re.sub(r"[\s\"'{}\[\]:,，：]", "", str(value))
+
+
+def _clock_forms(moment, found):
+    found.update(
+        {
+            "d:" + moment.strftime("%Y-%m-%d"),
+            "md:" + moment.strftime("%m-%d"),
+            "t:" + moment.strftime("%H:%M"),
+            "t:" + moment.strftime("%H:%M:%S"),
+        }
+    )
+
+
+def _moments(text, found):
+    """Add the dates and times a text holds, as written and, for a timestamp
+    with its zone, in Beijing time."""
+    for match in MOMENT.finditer(text):
+        parsed = _moment(match)
+        if parsed:
+            found.update(parsed[1])
+    for match in ZONED.finditer(text):
+        *fields, zone = match.groups()
+        digits = zone[1:].replace(":", "")
+        offset = (
+            timedelta(0)
+            if zone == "Z"
+            else timedelta(hours=int(digits[:2]), minutes=int(digits[2:]))
+            * (1 if zone[0] == "+" else -1)
+        )
+        try:
+            moment = datetime(
+                *(int(part or 0) for part in fields), tzinfo=timezone(offset)
+            )
+        except ValueError:
+            continue
+        _clock_forms(moment.astimezone(BEIJING), found)
+
+
+def _epoch(raw, found):
+    """Add the Beijing date and time of a Unix-seconds value (Zabbix clocks)."""
+    try:
+        stamp = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return
+    if not isinstance(raw, bool) and 1e9 <= stamp < 1e10:
+        _clock_forms(datetime.fromtimestamp(stamp, BEIJING), found)
+
+
+def _folded(name):
+    return name.casefold().rstrip(".,")
+
+
+def _named_numbers(text):
+    """[(the words before it, number)] for each number of a text that stands on
+    its own, not inside a name such as "eth0" or "nginx/1.24.0"."""
+    text = _without_moments(text)
+    names = [
+        (match.start(), match.end(), match.group(0)) for match in NAME.finditer(text)
+    ]
+    found = []
+    for match in NUMBER.finditer(text):
+        start = match.start()
+        if any(left <= start < right for left, right, _ in names):
+            continue
+        before = [_folded(name) for _, right, name in names if right <= start][-2:]
+        found.append((tuple(before), float(match.group(0))))
+    return found
+
+
+def _walk(value, path, profile, evidence):
+    """Collect what quotes are checked against from an evidence document
+    (`evidence`) or a signal value derived from it: each number with the
+    names it goes by, key names, string values, dates and times.
+
+    A number's own names are its key and, inside a string, the words before
+    it; its context is the keys above it and the other strings of its object
+    (an item_get row's key_ and name for its lastvalue, a signal's key).
+    Signal strings ground nothing; their dates and times count.
+    """
+    if isinstance(value, list):
+        for item in value:
+            _walk(item, path, profile, evidence)
+        return
+    if isinstance(value, str):
+        _moments(value, profile["moments"])
+        if evidence:
+            profile["strings"].append(value)
+        return
+    if not isinstance(value, dict):
+        return
+    context = tuple(
+        item.casefold()
+        for key, item in value.items()
+        if isinstance(item, str)
+        and str(key) not in IDENTIFIER_KEYS
+        and len(item) <= 160
+        and LETTER.search(item)
+    )
+    for key, item in value.items():
+        name = str(key)
+        folded = name.casefold()
+        profile["keys"].add(folded)
+        if isinstance(item, (dict, list)):
+            _walk(item, path + (folded,), profile, evidence)
+            continue
+        if TIME_KEY.search(folded):
+            _epoch(item, profile["moments"])
+        if isinstance(item, str):
+            _moments(item, profile["moments"])
+            if evidence:
+                profile["strings"].append(item)
+        if evidence and name in NAMED_IDS:
+            profile["ids"].extend(float(n) for n in _numbers(item))
+        if (
+            isinstance(item, bool)
+            or item is None
+            or name in IDENTIFIER_KEYS
+            or folded in METADATA_KEYS
+        ):
+            continue
+        if isinstance(item, (int, float)):
+            others = path + context
+            profile["leaves"].append(((folded,), others, (float(item),)))
+        elif evidence:
+            others = path + tuple(
+                label for label in context if label != item.casefold()
+            )
+            for words, number in _named_numbers(item):
+                profile["leaves"].append(((folded, *words), others, (number,)))
+
+
+def _profile(text, derived=()):
+    """What one evidence id's quotes are checked against: its measurements
+    and identifiers, named field values, keys, string values and moments,
+    with the numbers and moments of the signals derived from it."""
+    profile = {
+        "numbers": [],
+        "ids": [],
+        "leaves": [],
+        "keys": set(),
+        "strings": [],
+        "moments": set(),
+    }
+    try:
+        document = json.loads(text)
+    except (TypeError, ValueError):
+        text = str(text)
+        profile["numbers"] = [float(n) for n in _numbers(text)]
+        profile["strings"].append(text)
+        _moments(text, profile["moments"])
+        for line in text.splitlines():
+            profile["leaves"].extend(
+                (words, (), (number,)) for words, number in _named_numbers(line)
+            )
+    else:
+        profile["numbers"] = _measurements(document)
+        _walk(document, (), profile, True)
+    for value in derived:
+        profile["numbers"].extend(_derived(value))
+        _walk(value, ("signals",), profile, False)
+    profile["squeezed"] = _squeezed(text)
+    profile["values"] = "\n".join(profile["strings"]).casefold()
+    return profile
+
+
+def _chinese(run):
+    """Name specs of a run of Chinese: the field words it holds (with the
+    fragments of the field names they stand for) and its other parts of two
+    characters or more, each matched as written."""
+    specs, rest, start = [], "", 0
+    while start < len(run):
+        size = next(
+            (
+                size
+                for size in range(min(4, len(run) - start), 0, -1)
+                if run[start : start + size] in FIELD_WORDS
+            ),
+            0,
+        )
+        if not size:
+            rest += run[start]
+            start += 1
+            continue
+        if len(rest) >= 2 and rest not in GENERIC_CHINESE:
+            specs.append(((rest,), False, False))
+        rest, term = "", run[start : start + size]
+        specs.append((FIELD_WORDS[term] + ((term,) if size >= 2 else ()), False, False))
+        start += size
+    if len(rest) >= 2 and rest not in GENERIC_CHINESE:
+        specs.append(((rest,), False, False))
+    return specs
+
+
+def _names(text):
+    """[(fragments, generic, identifier)] for the names in a piece of a quote."""
+    specs = []
+    for match in NAME.finditer(text):
+        token = match.group(0)
+        if not token[0].isascii():
+            specs.extend(_chinese(token))
+            continue
+        word = _folded(token)
+        if word:
+            specs.append(((word,), word in GENERIC_NAMES, True))
+    return specs
+
+
+def _matches(fragment, label, identifier):
+    """Whether a name from a quote names this label: equal to it, a whole token
+    of it (one or two letters), the start of one of its tokens (three), part
+    of it (longer); Chinese as written. A long label inside an identifier the
+    quote gives ("NRestarts" for restarts) counts too."""
+    if fragment == label:
+        return True
+    if not fragment.isascii():
+        return len(fragment) >= 2 and fragment in label
+    if len(fragment) <= 2:
+        return fragment in TOKEN_SPLIT.split(label)
+    if len(fragment) == 3:
+        hit = re.search(r"(?<![0-9a-z])" + re.escape(fragment), label) is not None
+    else:
+        hit = fragment in label
+    return hit or (
+        identifier and len(label) >= 4 and label.isascii() and label in fragment
+    )
+
+
+def _field_value(raw, specs, leaves):
+    """Whether a small number is the value of the field its names point at.
+
+    Each name a field goes by scores 2 as its own name (its key, or the words
+    before it in a string), 1 as context (keys above it, its row's key_ or
+    name); a field needs at least one name that is not generic. The number
+    must be the value of one of the best-named fields: "可用 8 GiB" is checked
+    against mem_available_gib, not against the total that is 8.
+    """
+    best, values = 0, []
+    for own, context, numbers in leaves:
+        score, named = 0, False
+        for fragments, generic, identifier in specs:
+            if any(_matches(f, label, identifier) for f in fragments for label in own):
+                score += 2
+            elif any(
+                _matches(f, label, identifier) for f in fragments for label in context
+            ):
+                score += 1
+            else:
+                continue
+            named = named or not generic
+        if not named or score < best:
+            continue
+        if score > best:
+            best, values = score, []
+        values.extend(numbers)
+    return bool(values) and _near(raw, values)
+
+
+def _has_value(text, profile):
+    """Whether a quote without numbers matches one of the evidence's values:
+    a word of three letters (two Chinese characters) or more that is neither
+    a key of the evidence nor a generic word ("status: success")."""
+    for match in NAME.finditer(text):
+        token = _folded(match.group(0))
+        if token in profile["keys"] or token in GENERIC_WORDS:
+            continue
+        if len(token) >= (3 if token.isascii() else 2) and token in profile["values"]:
+            return True
+    return False
+
+
+def _assessed(quote, profile):
+    """(how the quote checked out: "number", "text" or "moment", None) or
+    (None, why it did not)."""
+    moments = [parsed for parsed in map(_moment, MOMENT.finditer(quote)) if parsed]
+    if any(form not in profile["moments"] for form, _ in moments):
+        return None, WRONG_MOMENT
+    text = _without_moments(quote)
+    words = [match.span() for match in WORD.finditer(text)]
+    numbers = [
+        match
+        for match in NUMBER.finditer(text)
+        if not any(left <= match.start() < right for left, right in words)
+    ]
+    rest = _squeezed(text)
+    if not numbers:
+        if rest not in profile["squeezed"]:
+            return None, MISMATCH
+        if _has_value(text, profile):
+            return "text", None
+        if moments:
+            # Dates and times, found above, with at most the key that holds
+            # them ("lastclock 2026-10-29 19:55:21").
+            return "moment", None
+        return None, GENERIC if LETTER.search(rest) else MISMATCH
+    raws = [match.group(0) for match in numbers]
+    if any(_significant(raw) for raw in raws):
+        # Every number is found; a significant measurement grounds the quote.
+        grounded = False
+        for raw in raws:
+            if _near(raw, profile["numbers"]):
+                grounded = grounded or _significant(raw)
+            elif not _near(raw, profile["ids"]):
+                return None, MISMATCH
+        return ("number", None) if grounded else (None, IDENTIFIER)
+    # Only integers below 10: each must be the value of the field it names,
+    # named before it ("agent.ping 0", "重启 3 次") or after it ("2 个 D 状态进程").
+    verbatim = len(rest) >= 4 and any(
+        rest in _squeezed(value) for value in profile["strings"]
+    )
+    for position, match in enumerate(numbers):
+        start = numbers[position - 1].end() if position else 0
+        end = numbers[position + 1].start() if position + 1 < len(numbers) else None
+        specs = _names(text[start : match.start()])
+        if all(generic for _, generic, _ in specs):
+            specs += _names(text[match.end() : end])
+        if all(generic for _, generic, _ in specs):
+            return ("text", None) if verbatim else (None, UNNAMED)
+        if not _field_value(match.group(0), specs, profile["leaves"]):
+            return ("text", None) if verbatim else (None, MISMATCH)
+    return "number", None
 
 
 def _measurements(value):
@@ -111,14 +671,6 @@ def _measurements(value):
     return [float(n) for n in _numbers(value)]
 
 
-def evidence_numbers(evidence_text):
-    try:
-        document = json.loads(evidence_text)
-    except (TypeError, ValueError):
-        return [float(n) for n in _numbers(evidence_text)]
-    return _measurements(document)
-
-
 def _derived(value):
     """Numbers of attached signal values, identifier fields skipped. Their
     strings (keys, times, log templates) repeat the evidence and are left out."""
@@ -143,8 +695,8 @@ def attach_signals(index, signals):
     counts) are computed from the evidence it names and occur in no tool
     result; each signal's `value` joins that evidence's comparable numbers as
     `signals`, so quoting them under the signal's evidence id checks out
-    (under the same rule as tool numbers: a count below 10 alone grounds
-    nothing).
+    (under the same rules as tool numbers: a count below 10 must be named,
+    "changes 2", and the dates and times of a signal count as the evidence's).
     """
     for signal in signals or []:
         if not isinstance(signal, dict):
@@ -154,36 +706,32 @@ def attach_signals(index, signals):
             source.setdefault("signals", []).append(signal["value"])
 
 
-def _grounded(quote, evidence_text, derived=()):
-    """Every significant number of the quote occurs in the evidence (or in the
-    signals derived from it). A quote without one (only times, dates or small
-    integers, or no number at all) must occur in the evidence as text."""
-    wanted = [raw for raw in _numbers(quote) if _significant(raw)]
-    if not wanted:
-        text = _squeezed(quote)
-        return len(text) >= 4 and text in _squeezed(evidence_text)
-    available = evidence_numbers(evidence_text) + _derived(list(derived))
-    for raw in wanted:
-        value = float(raw)
-        decimals = len(raw.split(".")[1]) if "." in raw else 0
-        tolerance = 0.5 * 10**-decimals
-        if not any(abs(candidate - value) <= tolerance for candidate in available):
-            return False
-    return True
-
-
 def _failed(source):
     status = str(source.get("status") or "")
     return bool(source.get("failed")) or status in {"failed", "cancelled"}
 
 
-def confidence(valid, invalid=()):
-    """高: several checked citations across tools (or both sources); 中: at least
-    one; 低: none. A Zabbix-only task can reach 高 by citing distinct queries."""
+NO_NUMBER = "有效引用都只核对了原文或时刻，没有一条核对过数值，可信度最高评为中"
+
+
+def _broad(valid, invalid=()):
+    """Several valid citations across sources (or distinct queries of one,
+    for a Zabbix-only task), not outweighed by rejected ones."""
     providers = {item["provider"] for item in valid}
     tools = {(item["provider"], item["tool"]) for item in valid}
-    if len(valid) >= 2 and (len(providers) >= 2 or len(tools) >= 2 and len(valid) >= 3):
-        return "高" if not invalid or len(valid) >= 2 * len(invalid) else "中"
+    return (
+        len(valid) >= 2
+        and (len(providers) >= 2 or len(tools) >= 2 and len(valid) >= 3)
+        and (not invalid or len(valid) >= 2 * len(invalid))
+    )
+
+
+def confidence(valid, invalid=()):
+    """高: several checked citations across tools (or both sources), at least
+    one of them checked by a number; 中: at least one; 低: none. Quotes that
+    only matched text or a moment ("result oom-kill") reach 中 at most."""
+    if _broad(valid, invalid) and any(item.get("basis") == "number" for item in valid):
+        return "高"
     return "中" if valid else "低"
 
 
@@ -367,11 +915,12 @@ def check(answer, index):
     Without an evidence array whose quotes can be checked (plain text, JSON
     without one, a broken answer read field by field) only the cited ids are
     checked; their existence alone never makes the confidence 高, and
-    `confidence_note` says why it is capped.
+    `confidence_note` says why it is capped. A valid quote's `basis` says how
+    it checked out: "number", "text" or "moment".
     """
     parsed, how = parse_answer(answer)
     if parsed is not None and isinstance(parsed.get("evidence"), list):
-        valid, invalid = [], []
+        valid, invalid, profiles = [], [], {}
         for item in parsed["evidence"][:20]:
             if not isinstance(item, dict):
                 continue
@@ -379,21 +928,26 @@ def check(answer, index):
             quote = str(item.get("quote", "")).strip()[:200]
             source = index.get(ident)
             if not source:
-                reason = "证据编号不存在"
+                reason = MISSING
             elif _failed(source):
-                reason = "引用的是失败或未完成的采集结果"
-            elif not _grounded(quote, source["text"], source.get("signals") or ()):
-                reason = "证据中找不到引用的数值或原文"
+                reason = FAILED
             else:
-                valid.append(
-                    {
-                        "id": ident,
-                        "quote": quote,
-                        "provider": source["provider"],
-                        "tool": source["tool"],
-                    }
-                )
-                continue
+                if ident not in profiles:
+                    profiles[ident] = _profile(
+                        source["text"], source.get("signals") or ()
+                    )
+                basis, reason = _assessed(quote, profiles[ident])
+                if basis:
+                    valid.append(
+                        {
+                            "id": ident,
+                            "quote": quote,
+                            "provider": source["provider"],
+                            "tool": source["tool"],
+                            "basis": basis,
+                        }
+                    )
+                    continue
             invalid.append({"id": ident, "quote": quote, "reason": reason})
         result = {
             "method": "quote",
@@ -401,6 +955,8 @@ def check(answer, index):
             "invalid": invalid,
             "confidence": confidence(valid, invalid),
         }
+        if result["confidence"] == "中" and _broad(valid, invalid):
+            result["confidence_note"] = NO_NUMBER
         facts = _check_facts(parsed, {item["id"] for item in valid})
         if facts:
             result["facts"] = facts
@@ -432,9 +988,7 @@ def check(answer, index):
         {
             "id": ident,
             "quote": "",
-            "reason": "证据编号不存在"
-            if ident not in index
-            else "引用的是失败或未完成的采集结果",
+            "reason": MISSING if ident not in index else FAILED,
         }
         for ident in cited
         if ident not in index or _failed(index[ident])

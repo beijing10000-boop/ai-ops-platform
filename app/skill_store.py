@@ -408,15 +408,31 @@ def template_version(files):
     return int(match[1]) if match else 0
 
 
-def stored_version(bundle):
-    """template_version() of a stored platform Skill; -1 when the copy cannot
-    be read or no longer validates, so the bundled one repairs it."""
+def stored_copy(bundle):
+    """How this release reads a stored platform Skill: ("unreadable", -1) when
+    it cannot be decrypted or has no SKILL.md, ("rejected", version) when its
+    SKILL.md does not pass this release's validation, else ("ok", version)."""
     try:
         files = decode(bundle)
-        parse_document(files["SKILL.md"])
+        text = files["SKILL.md"]
     except Exception:
-        return -1
-    return template_version(files)
+        return "unreadable", -1
+    try:
+        parse_document(text)
+    except Exception:
+        return "rejected", template_version(files)
+    return "ok", template_version(files)
+
+
+# Conditions already logged by this process: ensure_base() runs on every
+# rows() call, its warnings once.
+_LOGGED = set()
+
+
+def _warn_once(key, message, *args):
+    if key not in _LOGGED:
+        _LOGGED.add(key)
+        log.warning(message, *args)
 
 
 def ensure_base(db):
@@ -426,7 +442,15 @@ def ensure_base(db):
     disabled. A copy at the same or a higher template version (written by a
     newer release, or a container patched in place) is kept: containers that
     bundle different templates do not take turns overwriting each other.
+
+    A stored copy that cannot be read (decryption fails, no SKILL.md) or does
+    not validate at a version not above the bundled one is repaired. A
+    readable copy at a higher version that this release's validation rejects
+    (metadata a newer release added) is never written: it stays for that
+    release, and this process serves its own bundled template meanwhile.
+    Returns those {name: bundled package} for rows().
     """
+    served = {}
     for name, priority in MANAGED.items():
         package = managed_package(name)
         wanted = digest(package["files"])
@@ -441,12 +465,25 @@ def ensure_base(db):
         if row and row[1] == wanted:
             continue
         if row:
-            bundled, stored = template_version(package["files"]), stored_version(row[3])
-            if stored >= bundled:
+            bundled = template_version(package["files"])
+            state, stored = stored_copy(row[3])
+            if state == "rejected" and stored > bundled:
+                served[name] = package
+                _warn_once(
+                    ("newer", name, row[1]),
+                    "PLATFORM_SKILL_NEWER_UNREADABLE name=%s stored=%s bundled=%s "
+                    "(kept; this process uses its bundled template)",
+                    name,
+                    stored,
+                    bundled,
+                )
+                continue
+            if state == "ok" and stored >= bundled:
                 if stored == bundled:
                     # Same version, other text: a template changed without
                     # raising its version. Neither copy replaces the other.
-                    log.warning(
+                    _warn_once(
+                        ("unchanged", name, row[1], wanted),
                         "PLATFORM_SKILL_VERSION_UNCHANGED name=%s version=%s",
                         name,
                         bundled,
@@ -485,6 +522,7 @@ def ensure_base(db):
         except sqlite3.IntegrityError:
             # Another worker installed it first.
             log.info("PLATFORM_SKILL_NOT_INSTALLED race name=%s", name)
+    return served
 
 
 def encode(files):
@@ -508,12 +546,14 @@ def rows(include_content=False):
     A stored Skill this version cannot read or no longer accepts (an upgrade
     tightened validation) carries `invalid`, the reason, instead of failing
     the list, every task snapshot and Skill 管理 for everyone; snapshot()
-    leaves it out, and an administrator can see, export or delete it.
+    leaves it out, and an administrator can see, export or delete it. A
+    platform Skill stored by a newer release in a form this one cannot read
+    is shown and loaded as this release's bundled template (ensure_base()).
     """
     from .main import connection
 
     with connection() as db:
-        ensure_base(db)
+        served = ensure_base(db)
         cursor = db.execute("SELECT * FROM platform_skills ORDER BY priority DESC,name")
         values = [
             dict(zip([col[0] for col in cursor.description], row))
@@ -526,11 +566,17 @@ def rows(include_content=False):
             json.loads(row["scopes"]),
             json.loads(row["providers"]),
         )
-        try:
-            files = decode(row.pop("bundle"))
-            text = files["SKILL.md"]
-        except Exception:
-            files, text, reason = {}, None, UNREADABLE
+        bundle = row.pop("bundle")
+        if row["managed"] and row["name"] in served:
+            package = served[row["name"]]
+            files, text = dict(package["files"]), package["files"]["SKILL.md"]
+            row["description"], row["digest"] = package["description"], digest(files)
+        else:
+            try:
+                files = decode(bundle)
+                text = files["SKILL.md"]
+            except Exception:
+                files, text, reason = {}, None, UNREADABLE
         row["resources"] = sorted(path for path in files if path != "SKILL.md")
         if text is not None and include_content:
             try:
@@ -582,13 +628,14 @@ def validate_choices(scopes, providers):
 
 def uncovered(skills):
     """Scopes in which snapshot() would load no Skill: no enabled custom Skill
-    and no enabled platform-base (the other platform Skills extend the base
-    and are not loaded without it)."""
+    that this release accepts and no enabled platform-base (the other platform
+    Skills extend the base and are not loaded without it)."""
     return [
         scope
         for scope in SCOPE_LABELS
         if not any(
             row["enabled"]
+            and not row.get("invalid")
             and scope in row["scopes"]
             and (not row["managed"] or row["name"] == BASE_NAME)
             for row in skills
@@ -596,9 +643,20 @@ def uncovered(skills):
     ]
 
 
+def _problem(bundle):
+    """Why this release would not load a stored custom Skill, or None."""
+    try:
+        text = decode(bundle)["SKILL.md"]
+    except Exception:
+        return UNREADABLE
+    return _checked(text)[1]
+
+
 def check_coverage(db, ident, *, enabled, scopes, confirm):
     """Refuse a change that leaves a scope without any Skill unless the caller
-    confirms it: new tasks there would fail at once. The 409 names the scopes."""
+    confirms it: new tasks there would fail at once. The 409 names the scopes.
+    A Skill this release does not accept covers nothing (snapshot() leaves it
+    out); the one changed is saved valid (a corrected import) or switched off."""
     current = [
         {
             "id": row[0],
@@ -606,13 +664,16 @@ def check_coverage(db, ident, *, enabled, scopes, confirm):
             "enabled": bool(row[2]),
             "scopes": json.loads(row[3]),
             "managed": bool(row[4]),
+            # Platform Skills are repaired or served from the bundled
+            # template (ensure_base()); only custom ones stay invalid.
+            "invalid": None if row[4] else _problem(row[5]),
         }
         for row in db.execute(
-            "SELECT id,name,enabled,scopes,managed FROM platform_skills"
+            "SELECT id,name,enabled,scopes,managed,bundle FROM platform_skills"
         )
     ]
     changed = [
-        {**row, "enabled": bool(enabled), "scopes": list(scopes)}
+        {**row, "enabled": bool(enabled), "scopes": list(scopes), "invalid": None}
         if row["id"] == ident
         else row
         for row in current
@@ -722,6 +783,17 @@ def configure_base(
             ),
         )
     return get(ident)
+
+
+def unloaded(request, source):
+    """Names of the enabled Skills of this request's scope that this release
+    does not accept: snapshot() leaves them out (SKILL_SKIPPED_INVALID)."""
+    scope = scope_of(request, source)
+    return [
+        row["name"]
+        for row in rows()
+        if row["enabled"] and scope in row["scopes"] and row.get("invalid")
+    ]
 
 
 def snapshot(request, source):
