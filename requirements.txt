@@ -9,7 +9,7 @@ httpx>=0.28.1,<1
 mcp>=1.10,<2
 lark-oapi>=1.7.5,<2
 jsonschema>=4.23,<5
-PyYAML>=6,<7
+PyYAML>=6.0.3,<7
 # zoneinfo (Beijing time in the API) needs the IANA data, which python:3.11-slim
 # lacks; it used to arrive only through rq -> croniter -> python-dateutil.
 # Calendar-versioned data (2026.6): no upper bound, rule updates must flow.
