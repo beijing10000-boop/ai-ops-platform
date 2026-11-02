@@ -7,15 +7,36 @@ function alertTabs(selected) {
     (can("alerts.manage") ? tab("go-mutes", "mutes", "暂时屏蔽") : "") +
     "</div>";
 }
+// The mute API's identity format; an alert without both IDs cannot be muted.
+const MUTE_ID = /^[0-9]{1,20}$/;
+const hasMuteIdentity = (row) => MUTE_ID.test(String(row.host_id ?? "")) && MUTE_ID.test(String(row.trigger_id ?? ""));
+const muteExpiry = (rule) => date(new Date(rule.expires_at * 1000).toISOString());
+// Opened from an alert's 屏蔽 button: its host and trigger, and a rule already in force.
+function muteContext(draft, rules) {
+  if (!draft) return "";
+  const current = rules.find(r => r.host_id === draft.host_id && r.trigger_id === draft.trigger_id);
+  const about = [draft.host_name, draft.event_name].filter(Boolean).join(" · ");
+  return `<div class="notice context-banner"><div><strong>屏蔽告警 ${E(draft.event_id)} 所属的触发器</strong><p>${E(about || "主机 " + draft.host_id + " / 触发器 " + draft.trigger_id)}${current ? ` · 已有屏蔽，${muteExpiry(current)} 到期；再次设置将从现在起按所选时长计算` : ""}</p></div>${btn("clear-mute-draft", "取消关联", "", "small")}</div>`;
+}
+function unmuteQuestion(host, trigger, rule) {
+  return {
+    title: `提前解除主机 ${host} / 触发器 ${trigger} 的屏蔽？`,
+    message: (rule ? `原定 ${muteExpiry(rule)} 到期。` : "") + "解除后立即生效：该触发器再发生问题时，本平台照常发送飞书告警通知。需要时可重新设置屏蔽。",
+    confirmText: "解除屏蔽",
+    danger: true,
+  };
+}
 async function mutesPanel() {
   const [rows, expired] = await Promise.all([
     api("/api/v1/alert-mutes?status=active"),
     api("/api/v1/alert-mutes?status=expired"),
   ]);
+  state.mutes = rows;
+  const draft = state.muteDraft;
   return alertTabs("mutes") + intro("管理当前平台的飞书告警屏蔽，支持按到期时间自动恢复通知。") +
     panel(
     "当前生效的飞书告警屏蔽（" + rows.length + " 条）",
-    `<form id="mute-form"><div class="fields">${field("host_id", "Zabbix Host ID")}${field("trigger_id", "触发器 ID")}${field(
+    `<form id="mute-form">${muteContext(draft, rows)}<div class="fields">${field("host_id", "Zabbix Host ID", draft?.host_id || "")}${field("trigger_id", "触发器 ID", draft?.trigger_id || "")}${field(
       "hours",
       "屏蔽时长",
       "1",
@@ -34,7 +55,7 @@ async function mutesPanel() {
         rows
           .map(
             (r) =>
-              `<tr><td>${E(r.host_id)}</td><td>${E(r.trigger_id)}</td><td>${E(r.created_at)}</td><td>${date(new Date(r.expires_at * 1000).toISOString())}</td><td>${btn("unmute", "提前解除", r.host_id + ":" + r.trigger_id, "small")}</td></tr>`,
+              `<tr><td>${E(r.host_id)}</td><td>${E(r.trigger_id)}</td><td>${E(r.created_at)}</td><td>${muteExpiry(r)}</td><td>${btn("unmute", "提前解除", r.host_id + ":" + r.trigger_id, "small")}</td></tr>`,
           )
           .join(""),
       ),
@@ -45,7 +66,7 @@ async function mutesPanel() {
     table(
       ["主机 ID", "触发器 ID", "设置时间", "到期时间（北京时间）", "状态"],
       expired.map(r =>
-        `<tr><td>${E(r.host_id)}</td><td>${E(r.trigger_id)}</td><td>${E(r.created_at)}</td><td>${date(new Date(r.expires_at * 1000).toISOString())}</td><td>已过期</td></tr>`
+        `<tr><td>${E(r.host_id)}</td><td>${E(r.trigger_id)}</td><td>${E(r.created_at)}</td><td>${muteExpiry(r)}</td><td>已过期</td></tr>`
       ).join(""),
     ),
     "只展示最近 100 条已到期的规则；不会继续屏蔽任何告警。",
@@ -158,20 +179,20 @@ const panel = (title, body, note = "", id = "") =>
   `<section class="panel" ${id ? `id="${E(id)}"` : ""}>${heading(title, note)}${body}</section>`;
 const table = (heads, rows) =>
   `<div class="table-wrap"><table><thead><tr>${heads.map((x) => `<th>${x}</th>`).join("")}</tr></thead><tbody>${rows || `<tr><td colspan="${heads.length}" class="empty">暂无记录</td></tr>`}</tbody></table></div>`;
-function toast(message) {
-  // Modal dialogs are in the top layer: a page-level toast would sit behind
-  // their backdrop, so show the message inside the active editor instead.
+// Feedback on an action; `type` is "info", "success" or "error" (errors stay
+// longer and are announced at once). While the member dialog is open the
+// message goes into its form, where a failed save is explained.
+function toast(message, type = "info") {
   if ($("#editor").open) {
     const feedback = $("#editor-feedback");
+    feedback.className = type === "error" ? "inline-error" : "notice" + (type === "success" ? " success" : "");
+    feedback.setAttribute("role", type === "error" ? "alert" : "status");
     feedback.textContent = message;
     feedback.hidden = false;
     feedback.scrollIntoView({ block: "nearest" });
     return;
   }
-  $("#toast").textContent = message;
-  $("#toast").hidden = false;
-  clearTimeout(state.toastTimer);
-  state.toastTimer = setTimeout(() => ($("#toast").hidden = true), 6000);
+  UIKit.notify(message, { type });
 }
 let fieldSeq = 0;
 async function api(path, method = "GET", body) {
@@ -274,7 +295,7 @@ async function alerts() {
   return alertTabs("events") + intro("平台已接收的告警与恢复记录。恢复状态以收到的 Zabbix 通知为准。") +
     panel("告警事件",
       `<form id="alert-filter" class="toolbar"><input name="q" aria-label="搜索告警" maxlength="160" placeholder="搜索主机、告警名称或事件 ID" value="${E(state.alertQuery)}"><select name="status" aria-label="告警状态">${[["all", "全部状态"], ["active", "未收到恢复"], ["recovered", "已恢复"]].map(([key, label]) => `<option value="${key}" ${key === state.alertStatus ? "selected" : ""}>${label}</option>`).join("")}</select><select name="severity" aria-label="告警级别"><option value="">全部级别</option>${severities.map((label, i) => `<option value="${i}" ${String(i) === state.alertSeverity ? "selected" : ""}>${label}</option>`).join("")}</select><button class="btn primary" type="submit">查询</button>${btn("reset-alert-filter", "重置", "", "subtle")}<span class="muted small">共 ${fmt(data.total)} 条</span></form>` +
-      table(["主机 / 告警", "级别", "当前状态", "通知 / 分析", "操作"], data.items.map(r => `<tr><td><span class="cell-title">${E(r.host_name || "未提供主机名")}</span><small class="event-title">${E(r.event_name)}</small><small>事件 ${E(r.event_id)} · ${date(r.received_at)}</small></td><td><span class="severity s${E(r.severity)}">${severities[r.severity] || "—"}</span></td><td>${badge(r.status)}${r.recovered_at ? `<small>${date(r.recovered_at)}</small>` : ""}</td><td><div class="actions">${badge(r.notify_status)}${badge(r.ai_status)}</div></td><td><div class="actions">${r.task_id ? btn("report", "查看分析", r.task_id, "small") : ""}${can("diagnostics.run") ? btn("analyze-event", "AI 分析", r.event_id, "small primary") : ""}</div></td></tr>`).join("")) + pagination("alert", "alertPage"));
+      table(["主机 / 告警", "级别", "当前状态", "通知 / 分析", "操作"], data.items.map(r => `<tr><td><span class="cell-title">${E(r.host_name || "未提供主机名")}</span><small class="event-title">${E(r.event_name)}</small><small>事件 ${E(r.event_id)} · ${date(r.received_at)}</small></td><td><span class="severity s${E(r.severity)}">${severities[r.severity] || "—"}</span></td><td>${badge(r.status)}${r.recovered_at ? `<small>${date(r.recovered_at)}</small>` : ""}</td><td><div class="actions">${badge(r.notify_status)}${badge(r.ai_status)}</div></td><td><div class="actions">${r.task_id ? btn("report", "查看分析", r.task_id, "small") : ""}${can("diagnostics.run") ? btn("analyze-event", "AI 分析", r.event_id, "small primary") : ""}${can("alerts.manage") && hasMuteIdentity(r) ? btn("mute-event", "屏蔽", r.event_id, "small") : ""}</div></td></tr>`).join("")) + pagination("alert", "alertPage"));
 }
 async function diagnostics() {
   const options = await api(P + "/diagnostic-options");
@@ -353,8 +374,58 @@ async function runProbe(form, data) {
     if (form.isConnected) show("诊断测试未执行：" + err.message, "error");
   }
 }
+const MCP_NAMES = {zabbix_mcp: "Zabbix MCP", ssh_mcp: "SSH MCP", logs: "日志 MCP"};
+// The log MCP has no live catalog here: its last connection check (the
+// overview's health record) holds the tools this token may run.
+function logMcpState(overview) {
+  if (overview.error) return {error: overview.error};
+  const record = (overview.health || []).find(row => row.provider === "logs");
+  let tools = [];
+  if (record?.status === "success") {
+    try { tools = JSON.parse(record.detail).authorized_tools; } catch {}
+  }
+  return {
+    configured: Boolean(overview.log_mcp_configured),
+    status: record?.status || "",
+    checked_at: record?.checked_at || "",
+    tools: Array.isArray(tools) ? tools : [],
+    reason: record && record.status !== "success" ? record.detail : "",
+  };
+}
+function logToolsSection(log) {
+  const tools = log.tools || [];
+  const [text, status] = log.error
+    ? ["无法读取日志 MCP 的连接状态：" + log.error, chip("状态未知")]
+    : !log.configured
+      ? ["未接入日志分析平台（地址和令牌留空）；诊断只使用 Zabbix 与 SSH。", chip("未配置")]
+      : !log.status
+        ? [can("settings.manage") ? "已配置，尚未检测。点击“检测 MCP 工具”或日志 MCP 表单中的“验证连接”，读取本令牌可用的工具。" : "已配置，尚未检测；管理员检测连接后，这里列出本令牌可用的工具。", chip("待验证", "pending")]
+        : log.status === "success"
+          ? [`检测于 ${date(log.checked_at)}，本令牌可用 ${tools.length} 个只读工具。`, chip("最近检测通过", "success")]
+          : [`检测于 ${date(log.checked_at)}：${log.reason || "未返回原因"}`, chip("最近检测失败", "failed")];
+  return `<div id="log-mcp-tools"><h4 class="subsection-heading">日志 MCP · 历史日志（${tools.length}）</h4>` +
+    `<div class="health-row"><div><strong>连接状态</strong><p>${E(text)}</p></div>${status}</div>` +
+    (tools.length ? `<div class="actions">${tools.map(name => `<span class="tag mono">${E(name)}</span>`).join("")}</div>` : "") +
+    (log.configured ? '<p class="muted small footnote">列出最近一次连接检测时本令牌可用的工具；可查询的日志类型与来源分组由日志分析平台「MCP 接入」中的令牌决定，平台只使用只读、不接受命令或 SQL 参数的 log_ 工具。</p>' : "") +
+    "</div>";
+}
+// After the log MCP form is saved: what “检测 MCP 工具” and the tools area
+// go by (the page read it before the save). A changed address or token
+// drops the last check, as the server does.
+function logMcpSaved(values, changed) {
+  const configured = Boolean(String(values.log_mcp_url || "").trim() && values.log_mcp_token);
+  const previous = state.logMcp || {};
+  if (configured === previous.configured && !previous.error && !changed.some(key => key.startsWith("log_mcp_"))) return;
+  state.logMcp = {configured, status: "", checked_at: "", tools: [], reason: ""};
+  const section = document.getElementById("log-mcp-tools");
+  if (section) section.outerHTML = logToolsSection(state.logMcp);
+}
 async function diagnosticTools(refresh = false) {
-  const data = await api(P + "/tools" + (refresh ? "?refresh=true" : ""));
+  const [data, overview] = await Promise.all([
+    api(P + "/tools" + (refresh ? "?refresh=true" : "")),
+    api(P + "/overview").catch(err => ({error: err.message})),
+  ]);
+  state.logMcp = logMcpState(overview);
   const zabbix = data.tools.filter(t => t.provider === "zabbix_mcp"), ssh = data.tools.filter(t => t.provider === "ssh_mcp");
   const checked = data.ssh_checked_at ? `目录读取于 ${date(data.ssh_checked_at)}${data.ssh_cached ? "（缓存，60 秒内复用）" : ""}` : "";
   const sshNotes = (ssh.length ? "" : `<div class="notice warn">SSH MCP 工具目录不可用：${E(data.ssh_mcp_error || "未返回可用工具")}</div>`) +
@@ -362,7 +433,7 @@ async function diagnosticTools(refresh = false) {
   return panel(
     "诊断工具",
     intro(
-      "注册表实时读取 SSH MCP 目录并按本平台令牌标注授权；Zabbix 工具受平台固定白名单约束。远端自称只读或动态发现都不能扩大授权。",
+      "注册表实时读取 SSH MCP 目录并按本平台令牌标注授权；Zabbix 工具受平台固定白名单约束；日志 MCP 按最近一次连接检测列出本令牌可用的工具。远端自称只读或动态发现都不能扩大授权。",
       btn("refresh-tools", "刷新目录") + (can("settings.manage") ? btn("discover", "检测 MCP 工具") : ""),
     ) +
       "<h3>工具注册表</h3>" +
@@ -379,6 +450,7 @@ async function diagnosticTools(refresh = false) {
           )
           .join(""),
       ) +
+      logToolsSection(state.logMcp) +
       (can("settings.manage") ? probeForm(ssh) : "") +
       "<h3 class=\"subsection-heading\">诊断类型</h3>" +
       table(
@@ -458,15 +530,17 @@ function modelInteractionsPanel(data) {
   const content = items.map((entry) => {
     const payload = entry.payload || {}, request = payload.request || {}, response = payload.response || {};
     const tokenText = `输入 ${fmt(entry.token_input)} / 输出 ${fmt(entry.token_output)} / 合计 ${fmt(entry.token_total)}`;
-    const preview = (title, value) => value ? `<details class="evidence"><summary>${E(title)} · ${fmt(value.original_chars)} 字符${value.truncated ? " · 已截断" : ""}</summary><pre>${E(value.text)}</pre></details>` : "";
+    // Stable keys keep each block open or closed across the polling refresh.
+    const key = "mi-" + (entry.id ?? "round-" + entry.round_number);
+    const preview = (part, title, value) => value ? `<details class="evidence" data-evidence="${E(key + "-" + part)}"><summary>${E(title)} · ${fmt(value.original_chars)} 字符${value.truncated ? " · 已截断" : ""}</summary><pre>${E(value.text)}</pre></details>` : "";
     const details = data.content_visible
-      ? preview("系统指令（脱敏预览）", request.instructions) +
-        preview("发送给模型的消息（脱敏预览）", request.input) +
-        preview("模型返回的正文（脱敏预览）", response.text) +
-        (response.items?.length ? `<details class="evidence"><summary>模型输出类型与工具调用</summary><pre>${E(JSON.stringify(response.items, null, 2))}</pre></details>` : "") +
+      ? preview("instructions", "系统指令（脱敏预览）", request.instructions) +
+        preview("input", "发送给模型的消息（脱敏预览）", request.input) +
+        preview("output", "模型返回的正文（脱敏预览）", response.text) +
+        (response.items?.length ? `<details class="evidence" data-evidence="${E(key + "-items")}"><summary>模型输出类型与工具调用</summary><pre>${E(JSON.stringify(response.items, null, 2))}</pre></details>` : "") +
         (payload.error ? `<p class="muted small">错误：${E(payload.error)}（${E(payload.error_class)}）</p>` : "")
       : '<p class="muted small">请求及响应内容需要 logs.read 权限才能展开，当前仅显示调用元数据。</p>';
-    return `<details class="evidence"><summary>第 ${E(entry.round_number)} 轮 · ${E(entry.model)} · ${E(entry.status === "completed" ? "完成" : "失败")} · ${(entry.duration_ms / 1000).toFixed(1)} 秒 · ${E(tokenText)}</summary><p class="muted small">请求时间：${date(entry.created_at)} · 可用工具：${E((request.tools || []).join(" / ") || "见任务授权")}</p>${details}</details>`;
+    return `<details class="evidence" data-evidence="${E(key)}"><summary>第 ${E(entry.round_number)} 轮 · ${E(entry.model)} · ${E(entry.status === "completed" ? "完成" : "失败")} · ${(entry.duration_ms / 1000).toFixed(1)} 秒 · ${E(tokenText)}</summary><p class="muted small">请求时间：${date(entry.created_at)} · 可用工具：${E((request.tools || []).join(" / ") || "见任务授权")}</p>${details}</details>`;
   }).join("");
   return panel("与大模型交互记录", content, introText);
 }
@@ -561,7 +635,7 @@ function skillsPanel(rows) {
   return panel(
     "本次提供给模型的 Skill",
     rows.filter(row => row.applied).map(line).join("") +
-      (skipped.length ? `<details class="evidence"><summary>本次不适用的 Skill · ${skipped.length} 个（未发送给模型，不消耗 Token）</summary>${skipped.map(line).join("")}</details>` : ""),
+      (skipped.length ? `<details class="evidence" data-evidence="skills-skipped"><summary>本次不适用的 Skill · ${skipped.length} 个（未发送给模型，不消耗 Token）</summary>${skipped.map(line).join("")}</details>` : ""),
     "任务创建时保存全部已启用 Skill 的快照；预采集判定设备类型和告警类型后，只把适用的 Skill 交给模型，查询步骤由这些 Skill 决定。",
   );
 }
@@ -647,6 +721,25 @@ function reportProgress(task) {
   const reasons = {QueueUnavailable: "诊断队列连接失败。请检查 Redis 和诊断 Worker，恢复后可重试此任务。", WorkerLost: "执行超过允许时间，Worker 可能已退出。请检查服务状态，已有证据仍可查看。", PermissionRevoked: "提交者的诊断权限已撤销，请联系管理员。", LocalSSHRemoved: "此任务使用已停用的旧版执行方式，请重新发起诊断。", MultipleTargets: "问题中包含多台主机，一次只诊断一台，请分别提问。", ModelTimeout: "AI 模型请求超时；已保留已有证据，可调整单次请求超时后重试。", ModelRateLimited: "模型接口受到限流；请检查部署容量、配额或稍后重试。", ModelConnectionError: "模型连接失败；请检查服务连通性。", ModelServiceError: "模型服务返回 5xx；请检查供应商状态。", ModelRequestError: "模型请求被拒绝；请检查部署名及请求参数。", DailyBudget: "已达每日自动分析 Token 上限（含进行中分析的预算），本次未执行。可在 系统配置 → 飞书配置 调整上限，或在告警卡片上手动发起分析。", QueueLost: "任务在队列中丢失（Worker 或 Redis 曾重启），未执行。请重新发起分析。", AlertRecovered: "告警在排队期间已恢复，自动分析未执行。需要时在告警卡片上手动发起分析。", QueueExpired: "自动分析排队超过上限（“复用同一触发器近期分析”的时长，设为 0 时按 2 小时）仍未开始，未执行。请检查分析 Worker 是否积压或中断，需要时在告警卡片上手动发起分析。"};
   const text = task.cancel_requested && active ? "已请求取消，正在停止后续采集。已开始的远端操作受其自身超时控制。" : active ? stageLabel(task.stage) : task.error_type ? reasons[task.error_type] || "分析未完成。请验证模型与 MCP 连接以及主机授权，再重试。" : task.status === "partial" ? "已保存可用证据；请查看诊断不足，补足信息后再判断。" : "分析已结束，可核验依据或下载报告。";
   return `<div class="report-progress ${active ? "is-active" : ""}"><span class="progress-mark ${E(task.status)}">${active ? '<span class="spinner"></span>' : task.status === "success" ? "✓" : "i"}</span><div><strong>${E(text)}</strong><p id="report-refresh-state">${active ? "每 5 秒检查进度，保留展开的证据与阅读位置。" : "历史监控与实时采集分别记录，AI 结论需要结合证据核验。"}</p></div>${task.error_type ? `<span class="mono">${E(task.error_type)}</span>` : ""}</div>`;
+}
+// Cancelling cannot be undone: the question names the task and what is lost.
+function cancelQuestion(task) {
+  const host = task.asset?.name || task.alert?.host_name;
+  const subject = [
+    host ? "主机：" + host : "",
+    PLAY[task.diagnostic_type] ? "诊断类型：" + PLAY[task.diagnostic_type] : "",
+    task.event_id ? "告警事件：" + task.event_id : "",
+  ].filter(Boolean).join(" · ");
+  const effect = task.status === "queued"
+    ? "任务仍在排队，取消后不再执行。"
+    : `当前阶段：${stageLabel(task.stage)}。取消后平台不再发起新的采集和模型请求，已开始的远端 SSH 操作受其自身超时限制；已取得的证据保留，但不会生成完整结论。`;
+  return {
+    title: `取消任务 ${String(task.task_id).slice(0, 12)}？`,
+    message: [subject, effect, "取消后不能恢复，只能重试；重试会创建新任务，并重新消耗分析预算。"].filter(Boolean).join("\n"),
+    confirmText: "取消任务",
+    cancelText: "继续执行",
+    danger: true,
+  };
 }
 function reportText() {
   const task = state.currentTask;
@@ -785,7 +878,7 @@ function formValues(form) {
 async function verifyAction(action, id, button) {
   const form = button.closest("form");
   const result = form?.querySelector("[data-verify-result]");
-  const show = (message, kind = "pending") => { if (result) { result.textContent = message; result.dataset.result = kind; } else toast(message); };
+  const show = (message, kind = "pending") => { if (result) { result.textContent = message; result.dataset.result = kind; } else toast(message, kind === "pending" ? "info" : kind); };
   const request = async (path, body) => {
     const checked = form ? OpsUI.fingerprint(form) : "";
     show("正在验证…");
@@ -900,6 +993,14 @@ async function auditPage() {
 }
 let generation = 0,
   poll;
+// The report's polling refresh re-renders it: collapsible blocks are reopened
+// by their data-evidence key, and a block without one keeps its default.
+function openReportBlocks(root = document) {
+  return [...root.querySelectorAll("details.evidence[open][data-evidence]")].map(el => el.dataset.evidence);
+}
+function restoreReportBlocks(keys, root = document) {
+  root.querySelectorAll("details.evidence[data-evidence]").forEach(el => { el.open = keys.includes(el.dataset.evidence); });
+}
 async function navigate(options = {}) {
   clearTimeout(poll);
   if (!options.quiet && !options.preserveDrafts && OpsUI.dirty() && !window.confirm("有配置尚未保存。离开此页将丢弃修改，是否继续？")) {
@@ -907,7 +1008,7 @@ async function navigate(options = {}) {
     return;
   }
   const drafts = options.preserveDrafts ? OpsUI.drafts() : [];
-  const openEvidence = options.quiet ? [...document.querySelectorAll("details.evidence[open]")].map(el => el.dataset.evidence) : [];
+  const openEvidence = options.quiet ? openReportBlocks() : [];
   const scrollY = window.scrollY;
   const current = ++generation;
   const parts = (location.hash.slice(1) || "overview").split("/");
@@ -954,9 +1055,10 @@ async function navigate(options = {}) {
     const section = page === "connections" && parts[1] === "tools" ? "connection-tools" : "";
     if (section) document.getElementById(section)?.scrollIntoView({ block: "start" });
     else if (options.quiet) {
-      document.querySelectorAll("details.evidence").forEach(el => { el.open = openEvidence.includes(el.dataset.evidence); });
+      restoreReportBlocks(openEvidence);
       window.scrollTo(0, scrollY);
     } else window.scrollTo(0, 0);
+    if (page === "alerts" && parts[1] === "mutes" && state.muteDraft) $('#mute-form select[name="hours"]')?.focus();
     if (page === "report" && ["running", "queued"].includes(state.currentTask?.status))
       scheduleReportPoll(parts[1], current);
     if (page === "settings" && state.configTab === "maintenance") runtimeStatus();
@@ -965,7 +1067,7 @@ async function navigate(options = {}) {
       $("#content").innerHTML =
         `<div class="notice error" role="alert">${E(err.message)}</div>`;
     else if (current === generation) {
-      toast("报告刷新失败，已保留当前内容。");
+      toast("报告刷新失败，已保留当前内容。", "error");
       scheduleReportPoll(parts[1], current);
     }
   }
@@ -1024,7 +1126,7 @@ document.addEventListener("click", async (event) => {
       input.type = input.type === "password" ? "text" : "password";
       b.textContent = input.type === "password" ? "显示" : "隐藏";
     }
-    else if (action === "copy-report") { await OpsUI.copy(reportText()); toast("报告已复制"); }
+    else if (action === "copy-report") { await OpsUI.copy(reportText()); toast("报告已复制", "success"); }
     else if (action === "download-report") {
       const url = URL.createObjectURL(new Blob([reportText()], {type: "text/markdown;charset=utf-8"}));
       const link = document.createElement("a"); link.href = url;
@@ -1046,7 +1148,7 @@ document.addEventListener("click", async (event) => {
       const link = document.createElement("a"); link.href = url;
       link.download = "诊断详细报告-" + taskId.slice(0, 12) + ".md";
       link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
-      toast("已生成详细报告，请妥善保管内部日志和诊断证据");
+      toast("已生成详细报告，请妥善保管内部日志和诊断证据", "success");
     }
     else if (action === "reset-alert-filter") {
       state.alertQuery = ""; state.alertSeverity = ""; state.alertStatus = "all"; state.alertPage = 1; await navigate();
@@ -1055,12 +1157,21 @@ document.addEventListener("click", async (event) => {
     else if (action === "scroll-section") document.getElementById(id)?.scrollIntoView({ block: "start" });
     else if (action === "go-history") go("history");
     else if (action === "go-alerts") go("alerts");
-    else if (action === "go-mutes" && can("alerts.manage")) go("alerts/mutes");
+    else if (action === "go-mutes" && can("alerts.manage")) { state.muteDraft = null; go("alerts/mutes"); }
     else if (action === "report") go("report/" + id);
+    else if (action === "mute-event") {
+      const row = state.alertRows?.find(row => row.event_id === id);
+      if (!row || !hasMuteIdentity(row)) throw new Error("该告警缺少 Zabbix Host ID 或触发器 ID，请在暂时屏蔽中手动填写");
+      state.muteDraft = {event_id: row.event_id, host_id: String(row.host_id), trigger_id: String(row.trigger_id), host_name: row.host_name || "", event_name: row.event_name || ""};
+      go("alerts/mutes");
+    }
+    else if (action === "clear-mute-draft") { state.muteDraft = null; await navigate(); }
     else if (action === "unmute") {
       const [host, trigger] = id.split(":");
-      await api("/api/v1/alert-mutes/" + host + "/" + trigger, "DELETE");
-      toast("屏蔽已解除");
+      const rule = (state.mutes || []).find(r => r.host_id === host && r.trigger_id === trigger);
+      if (!(await UIKit.confirm(unmuteQuestion(host, trigger, rule)))) return;
+      await api("/api/v1/alert-mutes/" + encodeURIComponent(host) + "/" + encodeURIComponent(trigger), "DELETE");
+      toast("屏蔽已解除", "success");
       await navigate();
     } else if (action === "new-member" || action === "edit-member")
       openMemberEditor(id);
@@ -1081,13 +1192,22 @@ document.addEventListener("click", async (event) => {
       state.selectedEventTitle = row ? row.host_name + " · " + row.event_name : "";
       go("diagnostics");
     } else if (action === "discover") {
-      const results = await Promise.all(["zabbix_mcp", "ssh_mcp"].map(provider => api(P + "/tools/discover?provider=" + provider, "POST")));
+      // The log MCP is optional: without a saved address and token it is not checked.
+      const logs = Boolean(state.logMcp?.configured);
+      const providers = Object.keys(MCP_NAMES).filter(provider => provider !== "logs" || logs);
+      const results = await Promise.all(providers.map(provider => api(P + "/tools/discover?provider=" + provider, "POST")));
       const names = list => list.slice(0, 8).join("、") + (list.length > 8 ? " 等" : "");
-      toast(results.map(r => `${r.provider}：${r.ok ? `连接成功，共 ${r.authorized_tools.length} 个授权工具${r.authorized_tools.length ? "：" + names(r.authorized_tools) : ""}` : "失败，" + r.detail}`).join("；"));
+      const lines = results.map(r => `${MCP_NAMES[r.provider] || r.provider}：${r.ok ? `连接成功，共 ${r.authorized_tools.length} 个授权工具${r.authorized_tools.length ? "：" + names(r.authorized_tools) : ""}` : "失败，" + r.detail}`);
+      toast([...lines, ...(logs ? [] : ["日志 MCP：未配置，未检测"])].join("；"), results.every(r => r.ok) ? "success" : "error");
+      const checked = results.find(r => r.provider === "logs"), section = document.getElementById("log-mcp-tools");
+      if (checked && section) {
+        state.logMcp = {configured: true, status: checked.ok ? "success" : "failed", checked_at: new Date().toISOString(), tools: checked.authorized_tools || [], reason: checked.ok ? "" : checked.detail};
+        section.outerHTML = logToolsSection(state.logMcp);
+      }
     } else if (action === "refresh-tools") {
       const html = await diagnosticTools(true);
       const section = document.getElementById("connection-tools");
-      if (section) { section.outerHTML = html; toast("已重新读取 SSH MCP 工具目录"); }
+      if (section) { section.outerHTML = html; toast("已重新读取 SSH MCP 工具目录", "success"); }
     }
     else if (action === "alert-prev" || action === "alert-next") {
       state.alertPage = Math.max(1, Math.min(state.alertPageCount, state.alertPage + (action === "alert-next" ? 1 : -1)));
@@ -1109,7 +1229,9 @@ document.addEventListener("click", async (event) => {
       state.includeLogs = !state.includeLogs;
       await navigate();
     } else if (action === "cancel-task") {
-      await api(P + `/tasks/${id}/cancel`, "POST");
+      const task = state.currentTask?.task_id === id ? state.currentTask : {task_id: id};
+      if (!(await UIKit.confirm(cancelQuestion(task)))) return;
+      await api(P + "/tasks/" + encodeURIComponent(id) + "/cancel", "POST");
       toast("已请求取消；平台停止后续调用，远端已开始的 SSH 受其自身超时限制。");
       await navigate();
     } else if (action === "retry-task") {
@@ -1118,7 +1240,7 @@ document.addEventListener("click", async (event) => {
     }
   } catch (err) {
     if (err.status === 503 && err.detail?.task_id) go("report/" + err.detail.task_id);
-    toast(err.message);
+    toast(err.message, "error");
   } finally {
     b.disabled = false;
   }
@@ -1182,20 +1304,23 @@ document.addEventListener("submit", async (event) => {
     if (form.id === "mute-form") {
       data.hours = Number(data.hours);
       await api("/api/v1/alert-mutes", "POST", data);
-      toast("已设置本平台飞书告警屏蔽");
+      state.muteDraft = null;
+      toast("已设置本平台飞书告警屏蔽", "success");
       await navigate();
     } else if (form.classList.contains("settings-form") || form.classList.contains("connection-form")) {
       const unlock = OpsUI.lock(form);
+      let saved;
       try {
-        await api("/api/v1/settings", "PUT", { values: data });
+        saved = await api("/api/v1/settings", "PUT", { values: data });
         form.querySelectorAll('.secret-control input').forEach(input => { if (input.value) input.value = "********"; input.type = "password"; });
         form.querySelectorAll('[data-action="toggle-secret"]').forEach(button => button.textContent = "显示");
       } finally { unlock(); }
+      if (form.dataset.provider === "logs") logMcpSaved(data, saved?.changed || []);
       OpsUI.saved(form);
       const result = form.querySelector("[data-verify-result]");
       result.dataset.result = "success";
       result.textContent = "配置已保存。连接参数有修改时，请重新验证连接。";
-      toast("配置已保存");
+      toast("配置已保存", "success");
     } else if (form.id === "ask-form") {
       if (!data.question.trim()) throw Error("请输入问题");
       const output = $("#ask-result");
@@ -1211,25 +1336,24 @@ document.addEventListener("submit", async (event) => {
       // The editor dialog: formValues() already read the member's enabled box.
       await api(P + "/members", "PUT", data);
       $("#editor").close();
-      toast("已保存");
+      toast("已保存", "success");
       await navigate({preserveDrafts: true});
     }
   } catch (err) {
     if (err.status === 503 && err.detail?.task_id) go("report/" + err.detail.task_id);
-    toast(err.message || "操作失败，请检查网络后重试");
+    toast(err.message || "操作失败，请检查网络后重试", "error");
   } finally {
     b.disabled = false;
   }
 });
 $("#close-editor").addEventListener("click", () => $("#editor").close());
-$("#toast").addEventListener("click", () => ($("#toast").hidden = true));
 $("#logout").addEventListener("click", async () => {
   try {
     if (OpsUI.dirty() && !window.confirm("有配置尚未保存，仍然退出登录？")) return;
     await api("/api/v1/auth/logout", "POST");
     location.reload();
   } catch (e) {
-    toast(e.message);
+    toast(e.message, "error");
   }
 });
 window.addEventListener("hashchange", navigate);

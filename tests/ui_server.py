@@ -31,6 +31,9 @@ with connection() as db:
             "host_name": "测试主机-" + str(index),
             "event_name": "CPU high",
         }
+        # Two alerts arrive without a trigger ID and so offer no 屏蔽 button.
+        if index % 16 != 15:
+            event["trigger_id"] = str(20000 + index % 4)
         db.execute(
             "INSERT INTO alert_events(event_id,event_value,host_name,event_name,severity,notify_status,event_json) VALUES (?,'1',?,?,?,?,?)",
             (
@@ -158,6 +161,38 @@ def progress_fixture():
         running["task_id"], "zabbix_mcp", "history_get", {"summary": "新增证据"}
     )
     tasks.stage(running["task_id"], "ai_reasoning")
+    return {"ok": True}
+
+
+@app.post("/__ui_model_round")
+def model_round_fixture():
+    """One more recorded model round on the running task, with previews."""
+    from app.model_interactions import _preview, _record
+
+    with connection() as db:
+        done = db.execute(
+            "SELECT COUNT(*) FROM model_interactions WHERE task_id=?",
+            (running["task_id"],),
+        ).fetchone()[0]
+    _record(
+        running["task_id"],
+        done + 1,
+        "ui-test-model",
+        "completed",
+        1800,
+        {"input": 1200, "output": 300, "total": 1500},
+        {
+            "request": {
+                "instructions": _preview("隔离界面测试的系统指令"),
+                "input": _preview([{"role": "user", "content": "进度刷新测试"}]),
+                "tools": ["history_get"],
+            },
+            "response": {
+                "text": _preview("隔离界面测试的模型回答"),
+                "items": [{"type": "message"}],
+            },
+        },
+    )
     return {"ok": True}
 
 

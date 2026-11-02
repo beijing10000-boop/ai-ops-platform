@@ -19,6 +19,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.datastructures import MutableHeaders
 from cryptography.fernet import Fernet
 from redis import Redis
 from rq import Queue, Worker
@@ -41,6 +42,52 @@ app.mount(
     StaticFiles(directory=Path(__file__).parent.parent / "web" / "assets"),
     name="assets",
 )
+
+# The console pages load scripts, styles and icons from /assets only, with no
+# inline script, event handler or style, and nothing may frame them: a service
+# on another port of the same host is "same-site" and could otherwise overlay
+# the signed-in console (OPS-FE-08).
+CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; base-uri 'none'; form-action 'self'; "
+    "frame-ancestors 'none'; object-src 'none'"
+)
+# FastAPI's API docs run inline scripts from a CDN; they only refuse framing.
+DOCS_PAGES = {
+    app.docs_url,
+    app.redoc_url,
+    app.swagger_ui_oauth2_redirect_url,
+} - {None}
+
+
+class SecurityHeaders:
+    """Adds the framing and content policy to every HTTP response (pure ASGI,
+    so streamed and file responses pass through unbuffered)."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        policy = (
+            "frame-ancestors 'none'"
+            if scope["path"] in DOCS_PAGES
+            else CONTENT_SECURITY_POLICY
+        )
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers.setdefault("Content-Security-Policy", policy)
+                headers.setdefault("X-Frame-Options", "DENY")
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
+app.add_middleware(SecurityHeaders)
+
 SENSITIVE = {
     "openai_api_key",
     "mcp_token",
