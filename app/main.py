@@ -118,8 +118,23 @@ def cipher():
     return Fernet(master_key_bytes())
 
 
+# The schema init_schema() sets up. Bump it with any change there (platform_db
+# migrations are versioned on their own): connection() sets up again, once,
+# every database whose user_version is older (never a newer one: a rollback).
+# 2: alert_events.reused_task_id.
+SCHEMA_VERSION = 2
+
+
 @contextmanager
 def connection():
+    """A database connection: WAL, foreign keys, a 20 s busy wait.
+
+    Reads take no write lock. A write takes it at its first statement (the
+    sqlite3 module's implicit transaction) and keeps it until the block ends,
+    which commits. The schema is set up only when the database is not at this
+    code's version (ensure_schema): normally once, by the first connection
+    after an upgrade.
+    """
     DATA_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     DATA_DIR.chmod(0o700)
     db = sqlite3.connect(DB, timeout=20)
@@ -127,76 +142,122 @@ def connection():
     try:
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("PRAGMA foreign_keys=ON")
-        db.execute("BEGIN IMMEDIATE")
-        db.execute(
-            "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, secret INTEGER NOT NULL)"
-        )
-        # One-time migration of the legacy admin allowlist. Runtime authorization
-        # only ever reads the Web-managed settings table.
-        legacy_admins = os.getenv("FEISHU_ADMIN_OPEN_IDS", "").strip()
-        migrated = db.execute(
-            "SELECT 1 FROM settings WHERE key='feishu_admin_migration_done'"
+        ensure_schema(db)
+        yield db
+        db.commit()
+    finally:
+        db.close()
+
+
+def schema_current(db):
+    """Whether the database needs no setting up: at this code's schema or a
+    newer one, by one read of its user_version and newest platform migration.
+    A newer one is what a rollback finds: the later release's additions stay
+    and this release's schema is part of it, so it is left as it is."""
+    from .platform_db import LATEST
+
+    try:
+        version, migration = db.execute(
+            "SELECT user_version,(SELECT MAX(version) FROM platform_migrations) "
+            "FROM pragma_user_version"
         ).fetchone()
-        if not migrated:
+    except sqlite3.OperationalError:  # not set up yet: no platform_migrations
+        return False
+    return version >= SCHEMA_VERSION and (migration or 0) >= LATEST
+
+
+def ensure_schema(db):
+    """Set the schema up once per version, safely across processes (web,
+    workers, the Feishu receiver): the first to find it outdated takes the
+    write lock (BEGIN IMMEDIATE), checks again and runs init_schema(); the
+    others wait for the lock and find it done. user_version is never
+    lowered."""
+    if schema_current(db):
+        return
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        if not schema_current(db):
+            init_schema(db)
+            if db.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
+                db.execute(f"PRAGMA user_version={int(SCHEMA_VERSION)}")
+        db.commit()
+    except BaseException:
+        db.rollback()
+        raise
+
+
+def init_schema(db):
+    """Create and migrate the platform's tables; idempotent. Runs inside
+    ensure_schema()'s transaction (until v1.5.0, on every connection)."""
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, secret INTEGER NOT NULL)"
+    )
+    # One-time migration of the legacy admin allowlist. Runtime authorization
+    # only ever reads the Web-managed settings table.
+    legacy_admins = os.getenv("FEISHU_ADMIN_OPEN_IDS", "").strip()
+    migrated = db.execute(
+        "SELECT 1 FROM settings WHERE key='feishu_admin_migration_done'"
+    ).fetchone()
+    if not migrated:
+        if (
+            legacy_admins
+            and not db.execute(
+                "SELECT 1 FROM settings WHERE key='feishu_admin_open_ids'"
+            ).fetchone()
+        ):
+            db.execute(
+                "INSERT INTO settings(key,value,secret) VALUES ('feishu_admin_open_ids',?,0)",
+                (legacy_admins,),
+            )
+        db.execute(
+            "INSERT INTO settings(key,value,secret) VALUES ('feishu_admin_migration_done','1',0)"
+        )
+
+    # Import legacy redirect configuration only once, then use Web settings.
+    redirect_migrated = db.execute(
+        "SELECT 1 FROM settings WHERE key='redirect_migration_done'"
+    ).fetchone()
+    if not redirect_migrated:
+        legacy_uri = os.getenv("FEISHU_LOGIN_REDIRECT_URI", "").strip()
+        legacy_host = os.getenv("WEB_PUBLIC_HOST", "").strip()
+        legacy_scheme = os.getenv("WEB_PROTOCOL", "").strip()
+        if legacy_uri:
+            parts = urlsplit(legacy_uri)
             if (
-                legacy_admins
+                parts.scheme in ("http", "https")
+                and parts.netloc
+                and parts.path == "/api/v1/auth/callback"
+                and not parts.query
+                and not parts.fragment
+                and not parts.username
+                and not parts.password
+            ):
+                legacy_host = legacy_host or parts.netloc
+                legacy_scheme = legacy_scheme or parts.scheme
+        for key, val in (
+            ("web_public_host", legacy_host),
+            ("web_protocol", legacy_scheme),
+        ):
+            if (
+                val
                 and not db.execute(
-                    "SELECT 1 FROM settings WHERE key='feishu_admin_open_ids'"
+                    "SELECT 1 FROM settings WHERE key=?", (key,)
                 ).fetchone()
             ):
                 db.execute(
-                    "INSERT INTO settings(key,value,secret) VALUES ('feishu_admin_open_ids',?,0)",
-                    (legacy_admins,),
+                    "INSERT INTO settings(key,value,secret) VALUES (?, ?, 0)",
+                    (key, val),
                 )
-            db.execute(
-                "INSERT INTO settings(key,value,secret) VALUES ('feishu_admin_migration_done','1',0)"
-            )
-
-        # Import legacy redirect configuration only once, then use Web settings.
-        redirect_migrated = db.execute(
-            "SELECT 1 FROM settings WHERE key='redirect_migration_done'"
-        ).fetchone()
-        if not redirect_migrated:
-            legacy_uri = os.getenv("FEISHU_LOGIN_REDIRECT_URI", "").strip()
-            legacy_host = os.getenv("WEB_PUBLIC_HOST", "").strip()
-            legacy_scheme = os.getenv("WEB_PROTOCOL", "").strip()
-            if legacy_uri:
-                parts = urlsplit(legacy_uri)
-                if (
-                    parts.scheme in ("http", "https")
-                    and parts.netloc
-                    and parts.path == "/api/v1/auth/callback"
-                    and not parts.query
-                    and not parts.fragment
-                    and not parts.username
-                    and not parts.password
-                ):
-                    legacy_host = legacy_host or parts.netloc
-                    legacy_scheme = legacy_scheme or parts.scheme
-            for key, val in (
-                ("web_public_host", legacy_host),
-                ("web_protocol", legacy_scheme),
-            ):
-                if (
-                    val
-                    and not db.execute(
-                        "SELECT 1 FROM settings WHERE key=?", (key,)
-                    ).fetchone()
-                ):
-                    db.execute(
-                        "INSERT INTO settings(key,value,secret) VALUES (?, ?, 0)",
-                        (key, val),
-                    )
-            db.execute(
-                "INSERT INTO settings(key,value,secret) VALUES ('redirect_migration_done','1',0)"
-            )
         db.execute(
-            "CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT, key TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+            "INSERT INTO settings(key,value,secret) VALUES ('redirect_migration_done','1',0)"
         )
-        db.execute(
-            """CREATE TABLE IF NOT EXISTS alert_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL, event_value TEXT NOT NULL, event_name TEXT, host_name TEXT, severity INTEGER, received_at TEXT DEFAULT CURRENT_TIMESTAMP, notify_status TEXT DEFAULT 'queued', ai_status TEXT DEFAULT 'not_required', UNIQUE(event_id,event_value))"""
-        )
-        db.execute("""CREATE TABLE IF NOT EXISTS ai_questions (
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT, key TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+    )
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS alert_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL, event_value TEXT NOT NULL, event_name TEXT, host_name TEXT, severity INTEGER, received_at TEXT DEFAULT CURRENT_TIMESTAMP, notify_status TEXT DEFAULT 'queued', ai_status TEXT DEFAULT 'not_required', UNIQUE(event_id,event_value))"""
+    )
+    db.execute("""CREATE TABLE IF NOT EXISTS ai_questions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source TEXT NOT NULL,
             request_id TEXT NOT NULL,
@@ -207,55 +268,60 @@ def connection():
             error_type TEXT,
             UNIQUE(source,request_id)
         )""")
-        columns = {row[1] for row in db.execute("PRAGMA table_info(alert_events)")}
-        if "event_json" not in columns:
-            db.execute("ALTER TABLE alert_events ADD COLUMN event_json TEXT")
-        for table in ("alert_events", "ai_questions"):
-            existing = {
-                row[1] for row in db.execute("PRAGMA table_info(" + table + ")")
-            }
-            for field in ("token_total", "token_input", "token_output"):
-                if field not in existing:
-                    db.execute(
-                        "ALTER TABLE " + table + " ADD COLUMN " + field + " INTEGER"
-                    )
-        db.execute("""CREATE TABLE IF NOT EXISTS ai_token_runs (
+    columns = {row[1] for row in db.execute("PRAGMA table_info(alert_events)")}
+    if "event_json" not in columns:
+        db.execute("ALTER TABLE alert_events ADD COLUMN event_json TEXT")
+    if "reused_task_id" not in columns:
+        # Schema 2: the analysis a later alert of the same trigger was told to
+        # wait for or stands on (worker.attach), which keeps it running.
+        db.execute("ALTER TABLE alert_events ADD COLUMN reused_task_id TEXT")
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS ix_alert_events_reused ON alert_events"
+        "(reused_task_id) WHERE reused_task_id IS NOT NULL"
+    )
+    for table in ("alert_events", "ai_questions"):
+        existing = {row[1] for row in db.execute("PRAGMA table_info(" + table + ")")}
+        for field in ("token_total", "token_input", "token_output"):
+            if field not in existing:
+                db.execute("ALTER TABLE " + table + " ADD COLUMN " + field + " INTEGER")
+    db.execute("""CREATE TABLE IF NOT EXISTS ai_token_runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             source TEXT NOT NULL, model TEXT NOT NULL, profile TEXT NOT NULL,
             token_input INTEGER, token_output INTEGER, token_total INTEGER,
             rounds INTEGER NOT NULL, tools INTEGER NOT NULL,
             result_chars INTEGER NOT NULL, details TEXT NOT NULL
         )""")
-        db.execute(
-            "CREATE INDEX IF NOT EXISTS ix_ai_token_created ON ai_token_runs(id DESC)"
-        )
-        db.execute(
-            "CREATE INDEX IF NOT EXISTS ix_ai_questions_created ON ai_questions(id DESC)"
-        )
-        db.execute(
-            "DELETE FROM settings WHERE key IN ('write_enabled','write_mcp_url','write_mcp_token','ai_approver_open_ids','min_severity','ai_prompt')"
-        )
-        db.execute(
-            "CREATE TABLE IF NOT EXISTS alert_message_links (event_id TEXT NOT NULL, chat_id TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY(event_id,chat_id))"
-        )
-        db.execute(
-            "CREATE TABLE IF NOT EXISTS alert_mutes (host_id TEXT NOT NULL,trigger_id TEXT NOT NULL,expires_at INTEGER NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(host_id,trigger_id))"
-        )
-        from .platform_db import migrate
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS ix_ai_token_created ON ai_token_runs(id DESC)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS ix_ai_questions_created ON ai_questions(id DESC)"
+    )
+    db.execute(
+        "DELETE FROM settings WHERE key IN ('write_enabled','write_mcp_url','write_mcp_token','ai_approver_open_ids','min_severity','ai_prompt')"
+    )
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS alert_message_links (event_id TEXT NOT NULL, chat_id TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY(event_id,chat_id))"
+    )
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS alert_mutes (host_id TEXT NOT NULL,trigger_id TEXT NOT NULL,expires_at INTEGER NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(host_id,trigger_id))"
+    )
+    from .platform_db import migrate
 
-        migrate(db)
-        db.commit()
-        yield db
-        db.commit()
-    finally:
-        db.close()
+    migrate(db)
 
 
 def read_setting(key):
     with connection() as db:
-        row = db.execute(
-            "SELECT value, secret FROM settings WHERE key=?", (key,)
-        ).fetchone()
+        return setting_value(db, key)
+
+
+def setting_value(db, key):
+    """A setting read through a connection already open (decrypted), or its
+    default: read_setting() for callers that need several reads at once."""
+    row = db.execute(
+        "SELECT value, secret FROM settings WHERE key=?", (key,)
+    ).fetchone()
     if not row:
         return DEFAULTS.get(key, "")
     return cipher().decrypt(row[0].encode()).decode() if row[1] else row[0]
@@ -298,7 +364,7 @@ def require_admin(request: Request):
         permission = "diagnostics.run"
     elif path.startswith("/api/v1/alert-mutes"):
         permission = "alerts.manage"
-    enforce(identity["open_id"], permission)
+    enforce(identity, permission)
     return identity
 
 
@@ -523,7 +589,7 @@ def settings_snapshot():
 
 def validate_settings_update(body, identity):
     if set(body.values) & {"feishu_admin_open_ids", "disabled_tools"}:
-        enforce(identity["open_id"], "*")
+        enforce(identity, "*")
     invalid = set(body.values) - ALLOWED
     if invalid:
         raise HTTPException(

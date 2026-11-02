@@ -16,6 +16,7 @@ from .conversation_context import (
     mark_pending,
     is_pending,
     clear_pending,
+    take_queued_card,
 )
 from .feishu_client import reply_card, update_card
 from .orchestrator import queues
@@ -64,35 +65,50 @@ def unfinished_text(report, answer, keep_swap=False):
 
 
 async def execute(
-    chat_id, question, message_id, sender_open_id=None, parent_id=None, root_id=None
+    chat_id,
+    question,
+    message_id,
+    sender_open_id=None,
+    parent_id=None,
+    root_id=None,
+    queued_card=None,
 ):
-    """Only the directly replied-to message determines the chain and depth."""
+    """Only the directly replied-to message determines the chain and depth.
+
+    `queued_card`: the "AI 排队中" reply the receiver sent while the question
+    waited (feishu_bot.acknowledge, handed over by process_question); the
+    first card this answers with replaces it, so the question keeps one card.
+    """
+
+    async def respond(title, text, template):
+        if queued_card:
+            try:
+                await update_card(queued_card, title, text, template)
+                return queued_card
+            except Exception:
+                log.exception(
+                    "FEISHU_QUEUED_CARD_UPDATE_FAILED message_id=%s", message_id
+                )
+        return await reply_card(message_id, title, text, template)
+
     if sender_open_id:
         from .security.rbac import permits
 
         if not permits(sender_open_id, "diagnostics.run"):
-            await reply_card(
-                message_id,
-                "无诊断权限",
-                "当前账号没有诊断权限，请联系平台管理员。",
-                "orange",
+            await respond(
+                "无诊断权限", "当前账号没有诊断权限，请联系平台管理员。", "orange"
             )
             record_ai_question("feishu", message_id, question, "rejected")
             return
     stored = recall(chat_id, parent_id)
     if is_pending(chat_id, parent_id):
-        await reply_card(
-            message_id, "AI 分析中", "正在分析中，请勿重复提交。", "orange"
-        )
+        await respond("AI 分析中", "正在分析中，请勿重复提交。", "orange")
         record_ai_question("feishu", message_id, question, "rejected")
         log.info("FEISHU_CONTEXT_PENDING message_id=%s", message_id)
         return
     if stored and len(stored.get("turns", [])) >= MAX_DEPTH:
-        await reply_card(
-            message_id,
-            "关联消息超过5个",
-            "关联消息超过5个，不支持分析，请更换方式。",
-            "orange",
+        await respond(
+            "关联消息超过5个", "关联消息超过5个，不支持分析，请更换方式。", "orange"
         )
         record_ai_question("feishu", message_id, question, "rejected")
         log.info("FEISHU_CONTEXT_LIMIT message_id=%s", message_id)
@@ -139,12 +155,12 @@ async def execute(
     try:
         from .worker import lark_safe
 
-        progress_id = await reply_card(
-            message_id,
+        progress_id = await respond(
             "AI 分析中",
             "**问题：** "
             + lark_safe(question[:180])
             + "\n\n⏳ 正在查询后台MCP服务并进行分析……",
+            "blue",
         )
         mark_pending(chat_id, progress_id, "qa")
         log.info("FEISHU_PROGRESS_SENT message_id=%s", message_id)
@@ -247,8 +263,24 @@ async def execute(
 def process_question(
     chat_id, question, message_id, sender_open_id=None, parent_id=None, root_id=None
 ):
+    # The receiver's "AI 排队中" card, if it is out. Taking the question also
+    # keeps a card still on its way from being handed over: the receiver
+    # then turns it into "AI 分析已开始", so no card stays "排队中".
+    try:
+        queued_card = take_queued_card(message_id)
+    except Exception:
+        log.exception("FEISHU_QUEUED_CARD_TAKE_FAILED message_id=%s", message_id)
+        queued_card = None
     return asyncio.run(
-        execute(chat_id, question, message_id, sender_open_id, parent_id, root_id)
+        execute(
+            chat_id,
+            question,
+            message_id,
+            sender_open_id,
+            parent_id,
+            root_id,
+            queued_card,
+        )
     )
 
 
