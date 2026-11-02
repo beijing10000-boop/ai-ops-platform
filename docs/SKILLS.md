@@ -9,7 +9,7 @@ Skill 是**唯一的 AI 诊断策略来源**：数据源选择、工具顺序、
   | Skill | 适用范围（`devices` / `types`） | 内容 |
   | --- | --- | --- |
   | platform-base | 所有任务 | 四阶段诊断流程、证据深度、按设备类型选择数据源、报告分级 |
-  | platform-logs | 所有任务（只使用日志 MCP） | 日志证据：按告警 IP 定位日志来源、告警前后 30 分钟概览，网络设备 / Nginx / Java 专题与基线对比；没有日志证据时不发给模型 |
+  | platform-logs | 所有任务（只使用日志 MCP） | 日志证据：依次按告警主机的 IP 与主机名定位日志来源、告警前后 30 分钟概览，网络设备 / Nginx / Java 专题与基线对比；没有日志证据时不发给模型 |
   | platform-linux | 设备：Linux、未识别 | CPU / 内存 / 磁盘 / I/O / 网络 / 系统 / 不可达告警的 Zabbix + SSH 取证 |
   | platform-windows | 设备：Windows | 只用 Zabbix 性能计数器、服务与可用性监控项 |
   | platform-network | 设备：网络设备 | SNMP 接口状态、错误与丢弃、带宽、CPU / 内存、ICMP、重启 |
@@ -19,10 +19,12 @@ Skill 是**唯一的 AI 诊断策略来源**：数据源选择、工具顺序、
   | platform-syslog | 类型：logs、system、memory、io、unreachable；设备：Linux | journald / /var/log 的 OOM、I/O、链路、内核、登录失败 |
 
   任务创建时保存所有已启用 Skill 的快照；预采集判定设备类型（Zabbix 标签、资产 OS、关联模板、主机组、接口类型，SSH 解析结果可修正）与告警类型（告警文本 + 触发器监控项 key）后，平台只把适用的 Skill 交给模型，且只发送 SKILL.md 正文：元数据（description、prefetch、types、devices）由平台用于选择 Skill 与预采集，不发给模型。报告页的“本次提供给模型的 Skill”只列出这些 Skill，不适用的折叠在“本次不适用的 Skill”中（未发送给模型，不消耗 Token）；详细报告同样逐个标注。
+
+  平台 Skill 在第一次读取 Skill 时（创建诊断任务或打开“Skill 管理”）按**模板版本**刷新：SKILL.md 末尾的 `<!-- platform-template-version: N -->` 记录版本（不发给模型），只有程序自带的版本比库中保存的更高时才替换，替换时版本号（revision）加 1。不同版本的容器同时运行（滚动升级、只热补丁了一个容器）时，较旧的容器不会把较新的平台 Skill 改回去；v1.5.0 及更早保存的副本没有版本，升级后刷新一次（这些旧版本的容器不认版本，与它们混跑或回滚到它们时仍按内容是否相同覆盖）。在都带版本的版本之间回滚或混跑时，库中较新的平台 Skill 保留：当前版本能解析的照常使用；用了当前版本不认识的元数据（如较新版本才有的诊断类型）的不改写，当前进程改用程序自带的模板，日志记一次 `PLATFORM_SKILL_NEWER_UNREADABLE`。无法解密、缺少 SKILL.md，或版本不高于程序自带版本却无法解析的副本，才在库中换回程序自带的版本。模板改了内容却没提高版本时两份都不覆盖，日志记一次 `PLATFORM_SKILL_VERSION_UNCHANGED`。修改平台模板时必须提高它的版本号（`tests/test_audit_p2_diagnosis.py` 的 `TEMPLATE_LOCK` 会提醒）。
 - **自定义 Skill** 导入时选择与基础 Skill 的关系：
   - **补充**（推荐）：与基础 Skill 一起加载，只写本环境特有的规则；平台升级时基础规则自动更新，不再需要手工合并模板。
   - **替代**：该场景不再加载基础 Skill，自定义 Skill 需自行维护全部规则。v1.0 之前导入的 Skill 升级后默认为“替代”，行为与升级前完全一致。
-- 设备类与告警类平台 Skill 是基础 Skill 的延伸：停用 platform-base（或它不服务某个场景）时，其余平台 Skill 在该场景也不加载。某个场景没有任何已启用的 Skill（例如停用了基础 Skill 且没有自定义 Skill）时，该场景的诊断任务会直接失败并提示启用。因此在“Skill 管理”中停用 platform-base，或做出会让某个场景没有可用 Skill 的修改（停用、取消适用场景）时，页面会先写明后果并要求确认；直接调用 API 时须带 `"confirm": true`（删除 Skill 时在地址后加 `?confirm=true`），否则返回 409，`detail.scopes` 列出受影响的场景（`qa` / `web` / `alert`）。
+- 设备类与告警类平台 Skill 是基础 Skill 的延伸：停用 platform-base（或它不服务某个场景）时，其余平台 Skill 在该场景也不加载。某个场景没有任何已启用的 Skill（例如停用了基础 Skill 且没有自定义 Skill）时，该场景的诊断任务会直接失败并提示启用；该场景启用的 Skill 都未通过当前版本的校验时，失败原因列出这些 Skill 的名称与处理方法。校验未通过的 Skill 不算该场景的可用 Skill。因此在“Skill 管理”中停用 platform-base，或做出会让某个场景没有可用 Skill 的修改（停用、取消适用场景）时，页面会先写明后果并要求确认；直接调用 API 时须带 `"confirm": true`（删除 Skill 时在地址后加 `?confirm=true`），否则返回 409，`detail.scopes` 列出受影响的场景（`qa` / `web` / `alert`）。
 - 日志 MCP 只由 platform-logs 开放（安装时它的后台服务只勾选 `logs`，其余平台 Skill 不含 `logs`）：停用 platform-logs 即关闭日志证据。“替代”模式的自定义 Skill 需要日志证据时，自行勾选 `logs` 并写明用法。
 
 ## 使用步骤
@@ -79,16 +81,19 @@ prefetch:
 平台的执行顺序：
 
 1. **阶段 A（Zabbix）**：有 Host ID 时并行执行 `host_get`（判定设备类型）、按告警触发器 ID 的 `item_get` 与近 24 小时 `event_get`。触发器监控项 key 会校正告警类型（例如文本像 CPU、key 是 `nginx.*`），也会推导 systemd 服务名（`systemd.unit.info["xxx.service",...]`）。
-2. **阶段 B**：按设备类型与校正后的类型合并适用 Skill 的规则；并行执行 zabbix_items 的 `item_get`、同一对象的相关监控项（触发器 key 里的网口索引、文件系统、磁盘名）、SSH 资产解析（只对 Linux 或未识别设备；Windows / 网络设备不连接 SSH），以及有 logs 规则时的日志来源定位：用任务的 IP、告警的 `{HOST.IP}` 或 Zabbix 主机主接口 IP 调 `log_resolve_target`（任何设备类型都做）。
+2. **阶段 B**：按设备类型与校正后的类型合并适用 Skill 的规则；并行执行 zabbix_items 的 `item_get`、同一对象的相关监控项（触发器 key 里的网口索引、文件系统、磁盘名）、SSH 资产解析（只对 Linux 或未识别设备；Windows / 网络设备不连接 SSH），以及有 logs 规则时的日志来源定位（任何设备类型都做）：依次用任务的 IP、告警的 `{HOST.IP}`、Zabbix 主机的各接口 IP（主接口在前，共最多 3 个）调 `log_resolve_target`，某个 IP 近 7 天没有日志就试下一个，都没有时再按 Zabbix 主机名（`host`）查询。找到来源的身份写入 `evidence.log_target` 与 `capabilities.logs`（`identity` 为 `ip` 或 `hostname`，`tried` 列出之前没有日志的身份），不是第一个 IP 时报告“能力说明”写明按哪个身份定位。同一身份对应多台主机时视为歧义，不读取、不合并，停止该来源并写入能力说明（`status=unavailable`、`error_code=ambiguous`）：按 IP 查到多个不同的主机名（NAT、syslog 中转），按主机名查到的发送方 IP 不全是该 Zabbix 主机的接口，或日志平台（v0.2.0 起）对主机名的结果标记 `ambiguous`。不算歧义的：主机名写成发送方 IP 的日志行（日志平台对没有主机名的消息以发送方 IP 作主机名，与该 IP 的其他行是同一台设备）、同一台主机的完整域名与短名或大小写不同的名称、按 IP 只匹配到一个经中转发送并以该 IP 自称的设备（`relayed`），以及按主机名查到的发送方 IP 都是该主机的接口。
 3. **阶段 C**：SSH 诊断、历史与日志工具并行。日志工具的 `target` 取定位到的来源，时间取告警时刻前后 30 分钟（`around` + `minutes`；Web 诊断没有告警时间时取诊断窗口到现在）；来源近 7 天没有对应类型日志的专题工具（如没有 Nginx 访问日志时的 `log_nginx_summary`）跳过并写入 `coverage.skipped`。可以组合的固定诊断用 `ssh_collect` 在同一 SSH 会话执行；带时间窗口的日志类工具自动使用告警前后 15 分钟（since / until）；需要服务名的工具在推导不出服务名时跳过并写入 `coverage.skipped`；`busy` / `timeout` 自动重试一次。history 依次取触发器监控项、同一对象的相关监控项、再按声明顺序匹配（`*` 为通配，`[`、`,` 按原文匹配），最多 8 项：history_get 取告警时间前后各 30 分钟（超过 1000 行自动翻页），trend_get 取近 7 天小时趋势，最多 5 个监控项（一页 1000 行放得下的数量），跳过 `system.cpu.num`、`system.uptime`、`system.boottime` 等常量项与只增不减的计数。发给模型的是统计值、告警前后分段（alert_split）与样本。
 
 - zabbix_items 只在任务有 Zabbix Host ID 时执行；写 `"*"` 表示不按 key 过滤、取该主机的监控项（最多 60 个，含最近采集时间），不可达类告警据此在 signals 里得到 `collection_freshness`（同一监控项只计一次，从未采集到数据的监控项不计）。
 - 预采集计入采集次数，但模型始终保留 `follow_up_calls` 次补查（AI 配置 → 分析预算；保底次数不超过配置的采集次数）。预采集已解析的 SSH 目标、已取得的证据被模型再次请求时直接复用，不再调用。
+- 预采集最多用任务总时间（分析预算的“总时间”）的一半：到时仍未返回的 Zabbix 与日志调用不再等待，写入 `coverage.skipped`（“预采集超过时间上限”）与 `budget.limits_hit`，已取得的证据照常进入首条消息，模型用剩余时间分析与补查。SSH 诊断工具的参数结构有 `timeout_seconds` 时，预采集要求服务在这个上限前约 10 秒返回已完成的部分；没有时服务端无法被告知停止，平台等它结束（受 SSH MCP 单工具超时限制），结果照常交给模型，`limits_hit` 注明“SSH 诊断不能中途停止，已等到结果”。上限截断的数据源若之后也没有被模型用到，“能力说明”写“不可用：预采集超过时间上限……”（`status=unavailable`、`error_code=timeout`，如“日志 MCP 连接未完成”“未到 SSH 实时诊断阶段”），不写“已授权但本次未调用”；网络设备等非 Linux 主机的 SSH 照常为“不适用”。会话在列出工具前被截断时不保留，模型补查时重新连接。
 - SSH 解析失败、设备不适用、SSH MCP 未启用或连接失败时，不视为诊断缺口，而是写入 `capabilities` 与报告“诊断范围 → 能力说明”；令牌未授权的工具写入 `capabilities.unauthorized_tools`。
-- 日志证据同理：未配置日志 MCP（`capabilities.logs.status=disabled`）、连接失败或令牌被拒（`unreachable`）、来源定位失败（`unavailable`）、该 IP 近 7 天没有日志进入日志平台（`not_onboarded`）都只写入能力说明，任务不因此变为“部分完成”；这些情况下模型拿不到日志工具，只使用日志 MCP 的 Skill（platform-logs）也不发给模型。日志令牌未授权的工具不在目录中出现，写入 `capabilities.unauthorized_log_tools`。
+- 日志证据同理：未配置日志 MCP（`capabilities.logs.status=disabled`）、连接失败或令牌被拒（`unreachable`）、来源定位失败或同一身份对应多台主机（`unavailable`，后者 `error_code=ambiguous`）、各个 IP 与主机名近 7 天都没有日志进入日志平台（`not_onboarded`，原因列出试过的身份）都只写入能力说明，任务不因此变为“部分完成”；这些情况下模型拿不到日志工具，只使用日志 MCP 的 Skill（platform-logs）也不发给模型。日志令牌未授权的工具不在目录中出现，写入 `capabilities.unauthorized_log_tools`。
 - 主机本身不具备的采集能力（SSH MCP 以 `CAPABILITY_MISSING` 加退出码 69 标明，例如内核未启用 PSI、未安装 Nginx、诊断账号无 journal 权限）同样不算诊断缺口：写入 `coverage.unavailable` 与 `capabilities.host_limits`，报告“能力说明”列出“主机不支持的采集项”。超时、截断、其他退出码与没有返回的步骤仍记入 `coverage.failed`，任务为“部分完成”。
 
 名称用 1–64 位小写字母、数字、连字符，platform-base 由平台保留。可创建多个 Skill，同一场景按优先级从高到低提供给模型；各 Skill 应说明自己的适用范围，减少冲突。启停、修改适用范围或正文都会产生新版本；在 Web 中修改说明或正文时，元数据中的 prefetch、types、devices 原样保留，只启停或调整场景、优先级时 SKILL.md 不变。修改参考资料时重新导入 ZIP。
+
+已保存的 Skill 在当前版本校验不通过（升级收紧了元数据校验）或无法解密（加密密钥已更换）时，不影响其它 Skill：新任务不加载它（日志 `SKILL_SKIPPED_INVALID`），“Skill 管理”列表显示“校验未通过”与原因，接口返回的该行带 `invalid`。它可以导出与删除，修正办法是勾选“更新同名 Skill”重新导入；网页上的编辑与启停返回 409。它也不算所在场景的可用 Skill：停用基础 Skill 等修改让某个场景只剩它时同样需要确认，删除它不需要；场景因此没有任何 Skill 加载时，任务失败（NoSkillEnabled）的原因列出它的名称。告警分析时 Skill 无法加载（例如本场景启用的正文合计超过 128 KB），告警的 AI 状态记为失败，并留下一条 `SkillSnapshotFailed` 的失败任务写明原因，告警中心的“查看分析”可以看到；Web 诊断直接返回 422 与原因。
 
 ## 平台如何执行
 
@@ -103,10 +108,16 @@ prefetch:
 ## 证据编号与引用核对
 
 - 每条 MCP 工具结果（目录列表除外）带证据编号 `evidence_id`（E1、E2…），按采集先后编号；模型重复请求同一调用时（同一轮或跨轮）只执行一次并沿用原编号。任务详情的“证据与工具执行记录”在每条证据前显示编号与调用参数。
-- 告警分析的 JSON 输出含 `evidence` 数组（每项 `{"id": "E2", "quote": "原样摘录的数值或原文"}`）与 `findings`（`confirmed` 已确认事实、`probable` 高可信推断、`hypotheses` 待验证假设，每项写 statement 与证据编号或验证方法）；问答与 Web 诊断在正文中写（E2）。
-- 平台用代码核对引用：编号必须存在且对应成功的采集结果；quote 中的每个数字都要在对应证据的测量值里找到（按 quote 自身的小数位比较，如 12% 可对应 12.4；itemid、clock、pid 等标识字段不参与比对），没有数字时按至少 4 个字符的原文包含判断。signals 的派生数值（与基线的倍数、每核负载、监控项与事件计数等）并入该信号 `evidence_id` 对应证据的可比数值，引用信号时 quote 写其 `value` 中的数值即可通过核对。quote 按证据原样摘录，换算过单位的数值核不上。核不上的引用会被剔除并列在报告中；没有有效引用的“已确认事实”自动降为推断。
-- 依据可信度由核对结果决定，不由模型自评：至少 2 条有效引用且覆盖两类数据源（或 3 条以上覆盖不同查询）为“高”，有有效引用为“中”，没有为“低”。告警结论的有效引用少于 2 条或有被降级的事实时，平台会先要求模型补证一次。报告末尾的“证据核对”一节列出有效引用、被剔除的引用和三类陈述。
+- 告警分析的 JSON 输出含 `evidence` 数组（每项 `{"id": "E2", "quote": "原样摘录的数值或原文"}`，数值前写出它的监控项 key 或字段名）与 `findings`（`confirmed` 已确认事实、`probable` 高可信推断、`hypotheses` 待验证假设，每项写 statement 与证据编号或验证方法）；问答与 Web 诊断在正文中写（E2）。
+- 平台用代码核对引用：编号必须存在且对应成功的采集结果，quote 还要按下面的规则在该证据（及由它派生的 signals）中核对得上：
+  - **日期与时刻**（如 `2026-10-29 19:55:21`、`19:12`、`10月29日`）必须出现在证据里，按规范化的形式比较：Zabbix 的 Unix 秒（clock、lastclock）与带时区的时间戳折算成北京时间。它们的数字不当作数值比对，写错的时刻（证据是 19:12，quote 写 19:55）会被剔除。
+  - 含**有效数值**（10 及以上，或带小数）的 quote：其中每个数值都要在证据的测量值里找到（按 quote 自身的小数位比较，如 12% 可对应 12.4、8 GiB 可对应 7.62），小于 10 的整数也要找到，只是它们不能单独撑起一条引用。itemid、clock、pid 等标识字段不参与比对、不能证明结论；写在测量值旁边的 pid（如 `java PID 4242 CPU 380.5%`）只要证据里有也算找到。
+  - **只有小于 10 的整数**的 quote：每个数值都要写出它所属的监控项 key 或字段名（数值前或后），平台找到证据中对应的对象再比较它的值，例如 `agent.ping 0`、`system.cpu.num 8`（item_get 行的 lastvalue）、`"D": 2`、`changes 2`（signals 的 value）、`重启 3 次`、`CPU 核数 4`、`丢包率 0%`、`总内存 8 GiB`（常用中文名称对应字段名）。名称指向的字段值不同就剔除（证据 D=2 时“D 状态 6 个”不通过）；没有名称的小数值（单独的 `4`、`0`，或只有 `lastvalue` 这类通用列名）核对不了。
+  - **没有数值**的 quote 按原文包含判断，且必须对上证据里的某个值，只有字段名或 status、success 这类通用字样的（如 `status: success`）不算引用。
+- signals 的派生数值（与基线的倍数、每核负载、监控项与事件计数等）并入该信号 `evidence_id` 对应证据的可比数值，日期与时刻同样可以引用；引用信号时 quote 写其 `value` 中的字段名与数值。quote 按证据原样摘录，换算过单位的数值核不上。核不上的引用会被剔除并在报告中写明原因（找不到数值或原文、没有该日期或时刻、小数值没有写名称、只有通用字样、只有编号类字段）；没有有效引用的“已确认事实”自动降为推断。
+- 依据可信度由核对结果决定，不由模型自评：至少 2 条有效引用且覆盖两类数据源（或 3 条以上覆盖不同查询），其中至少一条核对过数值，为“高”；有有效引用为“中”（只核对了原文或时刻的引用最高为“中”，`citations.confidence_note` 说明原因）；没有为“低”。只有核对过 quote 的引用能评为“高”：回答没有 `evidence` 原文摘录（问答与 Web 诊断的纯文本回答、告警 JSON 缺少 `evidence` 数组，或 JSON 残缺、只能逐个字段恢复）时，平台只核对编号存在且采集成功，可信度最高为“中”，`citations.confidence_note` 与“证据核对”写明原因。告警结论的有效引用少于 2 条或有被降级的事实时，平台会先要求模型补证一次。报告末尾的“证据核对”一节列出有效引用、被剔除的引用和三类陈述。
+- 分析轮的模型请求超时、连接失败、被限流或服务端出错（已重试一次）时，若任务剩余时间至少 25 秒且不少于已完成的最长一轮，平台改发总结轮，依据已取得的证据给出结论，任务记为“部分完成”并在“诊断不足”写明；时间不够或请求被拒绝（如 400）时，报告只列出已执行的工具与采集状态。
 - 报告中的“诊断范围（平台生成）”列出目标、设备类型与诊断路径、采集时间、模型实际使用的 Zabbix 历史查询窗口、各数据源成功与失败的证据条数，以及不可用的能力与原因。模型正文不需要复述这些内容，也不必逐条罗列证据数值，只写结论、关键依据（注明编号）、建议和尚未证实的方向；告警的 `action` 为数组，由平台编号。自定义 Skill 若仍要求“写明目标和时间范围”，可以删去这一条。
-- 预采集结果之外，平台会附带 `evidence.signals`：SSH MCP 返回的 warning/critical 发现；Zabbix 最新值中的负载 / CPU 背离、内存与文件系统利用率超过 90%；告警窗口均值与 7 天基线的对比（alert_vs_baseline：达到 1.5 倍以上为突增，0.9–1.1 倍为接近基线；drop_vs_baseline：不到 0.67 倍，对空闲率、可用内存、剩余空间这类越低越差的指标意味着恶化）；告警前后各 30 分钟均值的对比（rise_at_alert 升高、drop_at_alert 下降、elevated_before_alert 前后相差不超过 10%）；ICMP、agent、端口与服务检查、接口状态等状态类监控项的变化时刻与次数（state_change，不再按均值或倍数比较；uptime 这类只增不减的计数不参与对比）；不可达类告警的监控项采集新鲜度（collection_freshness）；触发器近 24 小时反复触发（recurrence）；日志概览中错误数达到上一等长窗口 2 倍且不少于 10 条（error_surge）、出现窗口内首次出现的错误模板（new_error_templates）。每条都带来源证据编号，引用时 quote 写信号 `value` 中的数值。
+- 预采集结果之外，平台会附带 `evidence.signals`：SSH MCP 返回的 warning/critical 发现；Zabbix 最新值中的负载 / CPU 背离、内存与文件系统利用率超过 90%；告警窗口均值与 7 天基线的对比（alert_vs_baseline：达到 1.5 倍以上为突增，0.9–1.1 倍为接近基线；drop_vs_baseline：不到 0.67 倍，对空闲率、可用内存、剩余空间这类越低越差的指标意味着恶化）；告警前后各 30 分钟均值的对比（rise_at_alert 升高、drop_at_alert 下降、elevated_before_alert 前后相差不超过 10%）；ICMP、agent、端口与服务检查、接口状态等状态类监控项的变化时刻与次数（state_change，不再按均值或倍数比较；uptime 这类只增不减的计数不参与对比）；不可达类告警的监控项采集新鲜度（collection_freshness）；触发器近 24 小时反复触发（recurrence）；日志概览中错误数达到上一等长窗口 2 倍且不少于 10 条（error_surge）、出现窗口内首次出现的错误模板（new_error_templates）。每条都带来源证据编号，引用时 quote 写信号 `value` 中的字段名与数值。
 
 报告显示创建时保存的 Skill 名称、版本、SHA256、目标 SSH 资产 ID、预算及来源证据。更新/停用/删除 Skill 不会更改已创建任务；重试创建新任务，加载当前启用版本。正文与包文件加密存储；加载版本保存在加密任务快照。日志原文继续受 logs.read 控制。AI 执行存在模型判断差异，以报告的实际工具执行记录核验；工具缺失或证据不足应如实说明，不能将失败解释为正常。

@@ -276,18 +276,18 @@ def test_attaching_signals_ignores_unknown_ids_and_text():
         [
             {"evidence_id": "E9", "value": {"count": 3}},
             {"evidence_id": None, "value": 1},
-            {"evidence_id": "E1", "value": {"key": "vm.memory.size[2]", "items": 7}},
+            {"evidence_id": "E1", "value": {"key": "vm.memory.size[20]", "items": 17}},
             "not a signal",
         ],
     )
-    assert index["E1"]["signals"] == [{"key": "vm.memory.size[2]", "items": 7}]
+    assert index["E1"]["signals"] == [{"key": "vm.memory.size[20]", "items": 17}]
     assert "E9" not in index
     # Strings of a signal value (keys, times, templates) ground nothing.
     answer = json.dumps(
-        {"evidence": [{"id": "E1", "quote": "7 个"}, {"id": "E1", "quote": "2"}]}
+        {"evidence": [{"id": "E1", "quote": "17 个"}, {"id": "E1", "quote": "20"}]}
     )
     result = evidence_check.check(answer, index)
-    assert [item["quote"] for item in result["valid"]] == ["7 个"]
+    assert [item["quote"] for item in result["valid"]] == ["17 个"]
 
 
 # --- OPS-SKILL-03: collection freshness ----------------------------------------------

@@ -250,6 +250,10 @@ class SkillMCP:
         return self.tools[provider]
 
     async def _open(self, provider):
+        """Connect and list the provider's tools. The session is registered
+        only with its tools: cancelled in between (prefetch's time cap), the
+        next catalog() opens a new one instead of finding a session without
+        tools ("MCP 工具发现失败") for the rest of the task."""
         async with asyncio.timeout(min(20, max(0.1, self.deadline - time.monotonic()))):
             if provider == "ssh_mcp":
                 adapter = await self.stack.enter_async_context(
@@ -264,7 +268,6 @@ class SkillMCP:
                 session = await self.stack.enter_async_context(
                     zabbix.connect(self.read_setting)
                 )
-            self.sessions[provider] = session
             key = _cache_key(
                 provider,
                 [
@@ -285,6 +288,7 @@ class SkillMCP:
                     self.hidden_ssh_tools = set(cached["hidden"])
                 elif provider == "logs":
                     self.hidden_log_tools = set(cached["hidden"])
+                self.sessions[provider] = session
                 return
             tools, cursor, seen = {}, None, set()
             for _ in range(20):
@@ -325,6 +329,7 @@ class SkillMCP:
                 if provider == "logs"
                 else set(),
             }
+            self.sessions[provider] = session
 
     async def authorized(self, session, tools):
         """Hide diagnostics this token may not run, so the model never plans them.
@@ -411,6 +416,18 @@ class SkillMCP:
             }
             allowed &= granted
         return allowed
+
+    def stoppable(self, provider, name):
+        """Whether the client may stop waiting for a call: a Zabbix or log
+        query, an SSH lookup (resolve, list), or an SSH diagnostic whose tool
+        takes `timeout_seconds` (asked to answer before the caller's moment,
+        call()'s `answer_by`). Any other SSH diagnostic keeps running on the
+        host however the client gives up on it."""
+        if provider != "ssh_mcp" or name in SSH_META:
+            return True
+        tool = (self.tools.get(provider) or {}).get(name)
+        schema = getattr(tool, "inputSchema", None) or {}
+        return isinstance((schema.get("properties") or {}).get("timeout_seconds"), dict)
 
     def unauthorized_tools(self):
         return sorted(self.hidden_ssh_tools)
@@ -537,7 +554,10 @@ class SkillMCP:
             else device_type,
         }
 
-    async def call(self, provider, name, arguments, *, rows=None):
+    async def call(self, provider, name, arguments, *, rows=None, answer_by=None):
+        """One validated tool call. `answer_by`: an earlier moment than the
+        task deadline by which the caller needs the answer (prefetch's time
+        cap); a service that takes a time budget is asked to answer before it."""
         self.check(provider)
         tools = await self.catalog(provider)
         if (
@@ -630,7 +650,12 @@ class SkillMCP:
                 # finished inside it, before this call's own timeout ends,
                 # instead of losing the slow host's partial evidence. A
                 # budget the model gives gets the same cap.
-                seconds = min(timeout, self.deadline - time.monotonic()) - 10
+                limit = (
+                    self.deadline
+                    if answer_by is None
+                    else min(self.deadline, answer_by)
+                )
+                seconds = min(timeout, limit - time.monotonic()) - 10
                 if asked is not None:
                     seconds = min(asked, seconds)
                 low, high = bounds(budget)

@@ -5,9 +5,15 @@ const SKILL_SCOPES = [["qa", "飞书问答"], ["web", "Web 诊断"], ["alert", "
 
 // Scenarios in which a new task would load no Skill, as the server selects
 // them: no enabled custom Skill and platform-base off there (the other
-// platform Skills extend the base and are not loaded without it).
+// platform Skills extend the base and are not loaded without it). A Skill
+// that fails validation (`invalid`) is never loaded.
 function uncoveredScopes(items) {
-  return SKILL_SCOPES.filter(([scope]) => !items.some(row => row.enabled && row.scopes.includes(scope) && (!row.managed || row.name === "platform-base"))).map(([, label]) => label);
+  return SKILL_SCOPES.filter(([scope]) => !items.some(row => row.enabled && !row.invalid && row.scopes.includes(scope) && (!row.managed || row.name === "platform-base"))).map(([, label]) => label);
+}
+
+// A stored Skill this version no longer accepts: why, and how to fix it.
+function invalidNotice(row) {
+  return row.invalid ? `<div class="notice error" role="status">此 Skill 未通过当前版本的校验，新任务不会加载它：${E(row.invalid)}。请导入修正后的版本（勾选“更新同名 Skill”）或删除。</div>` : "";
 }
 
 // What saving `values` (enabled, scopes) for `row` would cost, shown before
@@ -71,13 +77,13 @@ async function skillsPage(id) {
   const uncovered = uncoveredScopes(data.items);
   let html = intro("Skill 是诊断规则的唯一来源，决定数据源、工具、查询顺序与报告要求；各任务保存所用 Skill 版本。平台基础 Skill（platform-base）随版本自动更新，本环境的规则写在“补充”模式的 Skill 中。", `<a class="btn" href="${P}/skills/template">下载补充 Skill 示例</a>`);
   if (uncovered.length) html += `<div class="notice error" role="status">以下场景没有可用的诊断 Skill：${E(uncovered.join("、"))}。这些场景的诊断任务会直接失败，请启用平台基础 Skill 或导入并启用 Skill。</div>`;
-  html += panel("已加载的 Skill", table(["名称与说明", "状态 / 版本", "适用场景", "操作"], data.items.map(row => `<tr><td><strong>${E(row.name)}</strong> ${skillKind(row)}<p class="muted small">${E(row.description)}</p><span class="muted small">优先级 ${row.priority} · ${row.providers.map(E).join(" / ")}</span></td><td>${row.enabled ? chip("已启用", "success") : chip("已停用")}<small>v${row.revision}</small></td><td>${row.scopes.map(scope => ({qa: "飞书问答", web: "Web 诊断", alert: "告警分析"})[scope]).join(" / ")}</td><td><div class="actions">${btn("skill-open", manage ? "查看 / 编辑" : "查看", row.id, "small")}<a class="btn small" href="${P}/skills/${row.id}/export">导出</a>${manage ? btn("skill-verify", "验证工具", row.id, "small") + btn("skill-toggle", row.enabled ? "停用" : "启用", row.id, "small") : ""}</div></td></tr>`).join("")), "同一场景可启用多个 Skill，按优先级从高到低加载。启用了“替代”模式的 Skill 时，该场景不再加载平台基础 Skill。工具权限仍由后台服务与平台校验。") + '<p id="skill-status" role="status" class="notice" hidden></p>';
+  html += panel("已加载的 Skill", table(["名称与说明", "状态 / 版本", "适用场景", "操作"], data.items.map(row => `<tr><td><strong>${E(row.name)}</strong> ${skillKind(row)}<p class="muted small">${E(row.description)}</p>${row.invalid ? `<p class="small">校验未通过：${E(row.invalid)}</p>` : ""}<span class="muted small">优先级 ${row.priority} · ${row.providers.map(E).join(" / ")}</span></td><td>${row.invalid ? chip("校验未通过", "failed") : row.enabled ? chip("已启用", "success") : chip("已停用")}<small>v${row.revision}</small></td><td>${row.scopes.map(scope => ({qa: "飞书问答", web: "Web 诊断", alert: "告警分析"})[scope]).join(" / ")}</td><td><div class="actions">${btn("skill-open", manage ? "查看 / 编辑" : "查看", row.id, "small")}<a class="btn small" href="${P}/skills/${row.id}/export">导出</a>${manage ? btn("skill-verify", "验证工具", row.id, "small") + btn("skill-toggle", row.enabled ? "停用" : "启用", row.id, "small") : ""}</div></td></tr>`).join("")), "同一场景可启用多个 Skill，按优先级从高到低加载。启用了“替代”模式的 Skill 时，该场景不再加载平台基础 Skill。工具权限仍由后台服务与平台校验。") + '<p id="skill-status" role="status" class="notice" hidden></p>';
   if (id) {
     const row = await api(P + "/skills/" + encodeURIComponent(id));
     const edit = row.managed
       ? `<form id="skill-edit" data-id="${E(row.id)}" data-managed="true"><p class="muted small">平台维护：正文随平台版本自动更新，只能调整启用状态、适用场景与优先级。参考资料：${row.resources.map(E).join("、") || "无"}。</p><pre class="skill-preview">${E(row.instructions)}</pre>${skillChoices(row)}<p class="muted small mono">SHA256 ${E(row.digest)}</p><div class="form-actions"><button class="btn primary" type="submit">保存设置</button></div><p data-verify-result role="status"></p></form>`
       : `<form id="skill-edit" data-id="${E(row.id)}">${field("description", "适用说明", row.description, "textarea")}${field("instructions", "查询指引（Markdown）", row.instructions, "textarea")}<p class="muted small">参考资料：${row.resources.map(E).join("、") || "无"}。修改参考资料可重新导入 ZIP，并选择更新同名 Skill。</p>${skillChoices(row)}<p class="muted small mono">SHA256 ${E(row.digest)}</p><div class="form-actions">${btn("skill-delete", "删除", row.id, "danger")}${btn("skill-check-edit", "验证格式")}<button class="btn primary" type="submit">保存 Skill</button></div><p data-verify-result role="status"></p></form>`;
-    html += panel(E(row.name) + " · v" + row.revision, manage ? edit : `<p>${E(row.description)}</p><pre class="skill-preview">${E(row.instructions)}</pre>`);
+    html += panel(E(row.name) + " · v" + row.revision, invalidNotice(row) + (manage ? edit : `<p>${E(row.description)}</p><pre class="skill-preview">${E(row.instructions)}</pre>`));
   }
   if (manage) html += panel("导入 Skill", `<form id="skill-import"><div class="field"><label for="skill-package">Skill 文件</label><input id="skill-package" name="package" type="file" accept=".md,.zip" required><div class="help">上传 SKILL.md 或包含 SKILL.md、references 文本资料的 ZIP，最大 1 MB。名称 platform-base 由平台保留。</div></div>${skillChoices()}<label class="check"><input type="checkbox" name="replace_existing">更新同名 Skill（保留记录 ID，生成新版本）</label><div class="form-actions">${btn("skill-check-import", "验证并预览")}<button class="btn primary" type="submit">导入 Skill</button></div><p data-verify-result role="status"></p><details id="skill-preview" hidden><summary>预览查询指引</summary><pre class="skill-preview"></pre></details></form>`, "导入后选择启用才会参与新任务；正在运行的任务继续使用创建时的版本。可先下载补充 Skill 示例，按环境修改后上传。");
   return html;

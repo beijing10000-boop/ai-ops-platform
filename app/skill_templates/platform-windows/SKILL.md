@@ -50,3 +50,5 @@ Windows 主机没有 SSH 实时证据：所有结论来自 Zabbix 监控项的�
 - 网卡流量对比接口速率；errors / dropped 是累计计数，用历史差值判断告警时段是否增长。
 - 服务告警看 `service.info[服务名,state]` 的历史（0 为运行），以及启动类型是否为自动；有 `eventlog[...]` 监控项时引用其中的错误事件。
 - agent 不可用：结合 `agent.ping`、`signals.collection_freshness` 与 ICMP 监控项区分整机宕机、网络中断与 agent 服务停止；`system.uptime` 回落说明发生过重启。
+
+<!-- platform-template-version: 1 -->

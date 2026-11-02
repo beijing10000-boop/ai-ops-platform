@@ -87,3 +87,5 @@ prefetch:
 
 - 不可达 / agent 不可用：预采集已有可用性监控项历史（何时由 1 变 0）、近 24 小时事件和该主机全部监控项的最近采集时间，`signals` 的 `collection_freshness` 已算好仍在更新的监控项数。全部停止更新按整机不可达或采集链路中断处理，部分仍在更新更可能是 agent 服务本身；SSH 仍能连通时用 `ssh_diagnose_system`（uptime 判断是否重启）与 `ssh_diagnose_service_detail`（zabbix-agent 单元）确认。没有 ICMP 监控项时写明无法区分整机宕机与 agent 停止。
 - 重启类告警以 uptime、`ssh_diagnose_syslog` 的 boot 信息与内核日志判断是计划重启、崩溃还是断电。
+
+<!-- platform-template-version: 1 -->

@@ -35,6 +35,12 @@ class QueueUnavailable(RuntimeError):
     pass
 
 
+# error_type of an alert analysis that failed before it started because the
+# enabled Skills could not be loaded (their bodies over the 128 KB limit, or
+# reading them failed).
+SNAPSHOT_FAILED = "SkillSnapshotFailed"
+
+
 def recover_stalled(db):
     # Long configured budgets must not be mistaken for lost workers after ten minutes.
     rows = db.execute(
@@ -210,7 +216,26 @@ def create(
     task_id = uuid.uuid4().hex
     trace_id = uuid.uuid4().hex
     limits = profile_limits(profile, read_setting)
-    skills = snapshot(request, source)
+    try:
+        skills = snapshot(request, source)
+    except Exception as exc:
+        if source == "alert" and event_id:
+            # An alert analysis that cannot load its Skills must not just not
+            # happen: the failed task says why where the alert links to.
+            unstarted(
+                task_id,
+                trace_id,
+                {**request, "limits": limits, "skills": []},
+                snapshot_failure(exc),
+                kind=kind,
+                source=source,
+                actor=actor,
+                event_id=event_id,
+                asset_id=asset_id,
+                diagnostic_type=diagnostic_type,
+                profile=profile,
+            )
+        raise
     duplicate_id = None
     with connection() as db:
         # Every task keeps its exact Skill versions, stored once per content.
@@ -248,6 +273,71 @@ def create(
     if duplicate_id:
         return get(duplicate_id), False
     return get(task_id), True
+
+
+def snapshot_failure(exc):
+    """Why the enabled Skills could not be loaded, in words an administrator
+    can act on: the platform's own message, else only the error class."""
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, dict):
+        detail = detail.get("message")
+    if isinstance(detail, str) and detail.strip():
+        return detail.strip()[:300]
+    if isinstance(exc, ValueError) and str(exc).strip():
+        return str(exc).strip()[:300]
+    return "读取 Skill 时出错（" + type(exc).__name__ + "）"
+
+
+def unstarted(task_id, trace_id, request, reason, **fields):
+    """A failed task for an alert analysis whose Skills could not be loaded:
+    the alert's AI status reads failed and its report says why. A task that
+    cannot be stored either (the database itself failing) is only logged."""
+    from ..main import connection
+
+    message = (
+        "AI 分析未执行：加载诊断 Skill 失败（"
+        + reason
+        + "）。请在 Skill 管理中处理后，在告警卡片上点「🤖 AI分析」重新分析。"
+    )
+    try:
+        with connection() as db:
+            db.execute(
+                "INSERT INTO diagnostic_tasks(task_id,trace_id,kind,source,actor,event_id,"
+                "asset_id,diagnostic_type,profile,request,status,stage,report,error_type,"
+                "completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,'failed','failed',?,?,"
+                "CURRENT_TIMESTAMP)",
+                (
+                    task_id,
+                    trace_id,
+                    fields["kind"],
+                    fields["source"],
+                    fields["actor"],
+                    fields["event_id"],
+                    fields["asset_id"],
+                    fields["diagnostic_type"],
+                    fields["profile"],
+                    encode(request),
+                    encode(
+                        {
+                            "answer": message,
+                            "message": message,
+                            "limitations": [message],
+                        }
+                    ),
+                    SNAPSHOT_FAILED,
+                ),
+            )
+    except Exception:
+        log.exception(
+            "SKILL_SNAPSHOT_FAILURE_NOT_RECORDED event_id=%s", fields["event_id"]
+        )
+        return
+    log.warning(
+        "SKILL_SNAPSHOT_FAILED event_id=%s task_id=%s reason=%s",
+        fields["event_id"],
+        task_id,
+        reason,
+    )
 
 
 def get(task_id, private=False):

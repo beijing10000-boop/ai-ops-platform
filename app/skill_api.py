@@ -109,9 +109,21 @@ def import_skill(body: ImportSkill, who=Depends(require("settings.manage"))):
     return public(row)
 
 
+def broken(row):
+    """409 for a stored Skill this version does not accept: it is not loaded,
+    and only replacing it with a corrected import or deleting it fixes that."""
+    return HTTPException(
+        409,
+        f"Skill {row['name']} 未通过当前版本的校验（{row['invalid']}），新任务不会加载它；"
+        "请导入修正后的版本（勾选“更新同名 Skill”）或删除",
+    )
+
+
 @router.get("/{ident}/export")
 def export_skill(ident: str, who=Depends(require("tools.read"))):
     row = skills.get(ident)
+    if not row["files"]:
+        raise broken(row)
     return Response(
         skills.export(row["files"]),
         media_type="application/zip",
@@ -127,6 +139,8 @@ def detail(ident: str, who=Depends(require("tools.read"))):
 @router.put("/{ident}")
 def update(ident: str, body: UpdateSkill, who=Depends(require("settings.manage"))):
     row = skills.get(ident)
+    if row.get("invalid"):
+        raise broken(row)
     values = {**row, **body.model_dump(exclude_none=True)}
     if row["managed"]:
         if {"description", "instructions", "mode"} & body.model_fields_set:

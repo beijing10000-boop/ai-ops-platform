@@ -13,6 +13,12 @@ from .orchestrator import tasks
 NO_SKILL = (
     "本场景没有启用的诊断 Skill（平台基础 Skill 也已停用），请在 Skill 管理中启用后重试"
 )
+# Every Skill enabled for the scope fails this release's validation.
+NO_VALID_SKILL = (
+    "本场景启用的诊断 Skill 未通过当前版本的校验，没有加载（{names}），"
+    "平台基础 Skill 在本场景也未启用：请在 Skill 管理中导入修正后的版本"
+    "（勾选“更新同名 Skill”）或启用其它 Skill 后重试"
+)
 
 
 def compact_result(value, max_chars):
@@ -186,9 +192,15 @@ async def run(
     task_id = task["task_id"]
     tasks.start(task_id)
     if not task["request"].get("skills"):
+        from .skill_store import unloaded
+
+        invalid = unloaded(task["request"], task["source"])
+        message = (
+            NO_VALID_SKILL.format(names="、".join(invalid[:5])) if invalid else NO_SKILL
+        )
         tasks.finish(
             task_id,
-            {"answer": NO_SKILL, "limitations": [NO_SKILL]},
+            {"answer": message, "limitations": [message]},
             status="failed",
             error_type="NoSkillEnabled",
         )
@@ -201,7 +213,7 @@ async def run(
             "trace_id": task["trace_id"],
             "profile": task["profile"],
         }
-        return (NO_SKILL, usage) if return_usage else NO_SKILL
+        return (message, usage) if return_usage else message
     from .skill_runtime import run as run_with_skills
 
     return await run_with_skills(
