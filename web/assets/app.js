@@ -718,7 +718,7 @@ function reportAnswer(task) {
 }
 function reportProgress(task) {
   const active = ["queued", "running"].includes(task.status);
-  const reasons = {QueueUnavailable: "诊断队列连接失败。请检查 Redis 和诊断 Worker，恢复后可重试此任务。", WorkerLost: "执行超过允许时间，Worker 可能已退出。请检查服务状态，已有证据仍可查看。", PermissionRevoked: "提交者的诊断权限已撤销，请联系管理员。", LocalSSHRemoved: "此任务使用已停用的旧版执行方式，请重新发起诊断。", MultipleTargets: "问题中包含多台主机，一次只诊断一台，请分别提问。", ModelTimeout: "AI 模型请求超时；已保留已有证据，可调整单次请求超时后重试。", ModelRateLimited: "模型接口受到限流；请检查部署容量、配额或稍后重试。", ModelConnectionError: "模型连接失败；请检查服务连通性。", ModelServiceError: "模型服务返回 5xx；请检查供应商状态。", ModelRequestError: "模型请求被拒绝；请检查部署名及请求参数。", DailyBudget: "已达每日自动分析 Token 上限（含进行中分析的预算），本次未执行。可在 系统配置 → 飞书配置 调整上限，或在告警卡片上手动发起分析。", QueueLost: "任务在队列中丢失（Worker 或 Redis 曾重启），未执行。请重新发起分析。"};
+  const reasons = {QueueUnavailable: "诊断队列连接失败。请检查 Redis 和诊断 Worker，恢复后可重试此任务。", WorkerLost: "执行超过允许时间，Worker 可能已退出。请检查服务状态，已有证据仍可查看。", PermissionRevoked: "提交者的诊断权限已撤销，请联系管理员。", LocalSSHRemoved: "此任务使用已停用的旧版执行方式，请重新发起诊断。", MultipleTargets: "问题中包含多台主机，一次只诊断一台，请分别提问。", ModelTimeout: "AI 模型请求超时；已保留已有证据，可调整单次请求超时后重试。", ModelRateLimited: "模型接口受到限流；请检查部署容量、配额或稍后重试。", ModelConnectionError: "模型连接失败；请检查服务连通性。", ModelServiceError: "模型服务返回 5xx；请检查供应商状态。", ModelRequestError: "模型请求被拒绝；请检查部署名及请求参数。", DailyBudget: "已达每日自动分析 Token 上限（含进行中分析的预算），本次未执行。可在 系统配置 → 飞书配置 调整上限，或在告警卡片上手动发起分析。", QueueLost: "任务在队列中丢失（Worker 或 Redis 曾重启），未执行。请重新发起分析。", AlertRecovered: "告警在排队期间已恢复，自动分析未执行。需要时在告警卡片上手动发起分析。", QueueExpired: "自动分析排队超过上限（“复用同一触发器近期分析”的时长，设为 0 时按 2 小时）仍未开始，未执行。请检查分析 Worker 是否积压或中断，需要时在告警卡片上手动发起分析。"};
   const text = task.cancel_requested && active ? "已请求取消，正在停止后续采集。已开始的远端操作受其自身超时控制。" : active ? stageLabel(task.stage) : task.error_type ? reasons[task.error_type] || "分析未完成。请验证模型与 MCP 连接以及主机授权，再重试。" : task.status === "partial" ? "已保存可用证据；请查看诊断不足，补足信息后再判断。" : "分析已结束，可核验依据或下载报告。";
   return `<div class="report-progress ${active ? "is-active" : ""}"><span class="progress-mark ${E(task.status)}">${active ? '<span class="spinner"></span>' : task.status === "success" ? "✓" : "i"}</span><div><strong>${E(text)}</strong><p id="report-refresh-state">${active ? "每 5 秒检查进度，保留展开的证据与阅读位置。" : "历史监控与实时采集分别记录，AI 结论需要结合证据核验。"}</p></div>${task.error_type ? `<span class="mono">${E(task.error_type)}</span>` : ""}</div>`;
 }
@@ -752,7 +752,7 @@ const configHelp = {
   zabbix_webhook_secret: "验证 Zabbix 推送告警的身份，需与 Zabbix 告警媒介中的密钥一致。",
   ai_request_timeout_seconds: "默认 90 秒，受任务总时限及留给总结的时间共同约束。仅影响新任务。",
   ai_thinking: "只对混合思考模型有效（如百炼上的 DeepSeek V4.1、Qwen3，默认开启思考）。关闭后每轮通常快一半以上、输出 Token 大幅减少；改后点“验证模型连接”确认网关接受该参数。仅影响新任务。",
-  ai_alert_reuse_hours: "同一主机、同一触发器在此时间内已完成 AI 分析时，新告警不再自动分析，原告警卡片附上该次报告链接和 24 小时告警次数。手动点击“AI分析”不受影响。",
+  ai_alert_reuse_hours: "同一主机、同一触发器在此时间内已完成 AI 分析，或已有分析在排队、执行时，新告警不再自动分析，原告警卡片附上该次报告链接和 24 小时告警次数。排队超过此时长（设为 0 时按 2 小时）仍未开始的自动分析不再执行。手动点击“AI分析”不受影响。",
   ai_daily_token_limit: "只统计自动告警分析（北京时间自然日）。达到上限后新告警只发送通知并在卡片注明，手动分析不受限制。",
   ai_quick_severity_max: "达到自动分析门槛、但级别不高于所选值的告警，使用快速分析模式的预算。",
   ai_quick_host_groups: "告警所属主机组包含任一关键字（如 测试环境）时，自动分析使用快速分析模式。",

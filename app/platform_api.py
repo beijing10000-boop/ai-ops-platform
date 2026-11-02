@@ -362,7 +362,7 @@ def task_detail(
         else None
     )
     if include_logs:
-        enforce(who["open_id"], "logs.read")
+        enforce(who, "logs.read")
     task["evidence"] = tasks.evidence_page(task_id, include_logs=include_logs)
     audit(who["open_id"], "report_read", task_id, task["trace_id"])
     return task
@@ -378,7 +378,7 @@ def model_interactions(
     if not task:
         raise HTTPException(404, "任务不存在")
     if include_content:
-        enforce(who["open_id"], "logs.read")
+        enforce(who, "logs.read")
         audit(who["open_id"], "model_interactions_content_read", task_id)
     return {
         "task_id": task_id,
@@ -394,7 +394,7 @@ def download_detailed_report(
     who=Depends(require("reports.read")),
 ):
     """Download all stored evidence and model previews, only for logs.read users."""
-    enforce(who["open_id"], "logs.read")
+    enforce(who, "logs.read")
     task = tasks.get(task_id, private=True)
     if task is None:
         raise HTTPException(404, "任务不存在")
@@ -922,7 +922,7 @@ async def _probe(body, who, deadline):
         )
         if sensitive:
             # Log-type results are shown in full only to users who may read logs.
-            enforce(who["open_id"], "logs.read")
+            enforce(who, "logs.read")
         resolved = await bridge.call(
             "ssh_mcp", "ssh_resolve_host", {"zabbix_hostid": body.zabbix_hostid}
         )

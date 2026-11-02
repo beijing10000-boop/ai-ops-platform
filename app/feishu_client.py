@@ -1,16 +1,35 @@
 """Feishu tenant app message and interactive card operations."""
 
+import hashlib
 import json
+import threading
+import time
 import httpx
 from .main import read_setting
-from .feishu_cards import MessageID, message_ids, split_card
+from .feishu_cards import CardBody, MessageID, message_ids, split_card
 
 ROOT = "https://open.feishu.cn/open-apis"
+# A cached tenant token is renewed this long before Feishu says it expires.
+TOKEN_MARGIN = 300
+_token = {}
+_token_lock = threading.Lock()
 
 
 def make_card(title, text, template="blue", link=None):
     """Render the line carrying token consumption as a separated muted footer,
-    not body copy; ``link`` adds a 查看完整诊断报告 button under the body."""
+    not body copy; ``link`` adds a 查看完整诊断报告 button under the body.
+
+    A CardBody (the "AI 分析结果" body, worker.analysis_body) brings its own
+    elements, button and footer included, and is sent as it is."""
+    if isinstance(text, CardBody):
+        return {
+            "config": {"wide_screen_mode": True, "update_multi": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": title},
+                "template": template,
+            },
+            "elements": list(text.elements),
+        }
     body = str(text)
     token_line = None
     separator = "\n\n---\n"
@@ -55,9 +74,23 @@ def make_card(title, text, template="blue", link=None):
     }
 
 
+def refused_token(response):
+    """Feishu turned the request's token down (HTTP 401, or an error code of
+    its authentication family, 999916xx)."""
+    if response.status_code == 401:
+        return True
+    try:
+        code = int(response.json().get("code") or 0)
+    except Exception:
+        return False
+    return code // 100 == 999916
+
+
 async def request(client, method, url, token=None, **kwargs):
     headers = {"Authorization": "Bearer " + token} if token else {}
     response = await client.request(method, url, headers=headers, **kwargs)
+    if token and refused_token(response):
+        forget_token(token)
     response.raise_for_status()
     data = response.json()
     if data.get("code", 0) != 0:
@@ -68,17 +101,45 @@ async def request(client, method, url, token=None, **kwargs):
     return data
 
 
+def forget_token(token=None):
+    """Drop the cached tenant token (only if it is `token`, when given)."""
+    with _token_lock:
+        if token is None or _token.get("value") == token:
+            _token.clear()
+
+
 async def get_token(client):
+    """The app's tenant_access_token, reused until TOKEN_MARGIN seconds before
+    the expiry Feishu gives with it (2 hours; Feishu itself hands out the
+    same token until its last 30 minutes). Every alert card, reply and card
+    update used to fetch one first. Another App ID or Secret fetches anew;
+    so does the next call after Feishu refuses the token (request())."""
+    app_id = read_setting("lark_app_id")
+    secret = read_setting("lark_app_secret")
+    key = (app_id, hashlib.sha256(secret.encode()).hexdigest())
+    with _token_lock:
+        cached = dict(_token)
+    if cached.get("key") == key and cached["until"] > time.monotonic():
+        return cached["value"]
     data = await request(
         client,
         "POST",
         ROOT + "/auth/v3/tenant_access_token/internal",
-        json={
-            "app_id": read_setting("lark_app_id"),
-            "app_secret": read_setting("lark_app_secret"),
-        },
+        json={"app_id": app_id, "app_secret": secret},
     )
-    return data["tenant_access_token"]
+    token = data["tenant_access_token"]
+    try:
+        lifetime = int(data.get("expire") or 0)
+    except (TypeError, ValueError):
+        lifetime = 0
+    # Kept only for as long as Feishu says it lasts.
+    if lifetime > TOKEN_MARGIN:
+        with _token_lock:
+            _token.clear()
+            _token.update(
+                key=key, value=token, until=time.monotonic() + lifetime - TOKEN_MARGIN
+            )
+    return token
 
 
 async def send_rendered_card(client, token, card, *, chat_id=None, reply_to=None):
