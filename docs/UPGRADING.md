@@ -1,5 +1,69 @@
 # 升级说明
 
+## v1.5.0 → v1.6.0
+
+有一次数据库迁移（幂等，升级后自动执行），没有新增或改名的配置项，`docker-compose.yml` 没有改动；`requirements.txt` 把 rq、openai 限定在 2.x 并显式声明 tzdata，不升级任何已有依赖。9 个平台维护的 Skill 在升级后第一次创建诊断任务或打开“Skill 管理”时各刷新一次（版本号加 1；管理员停用的仍保持停用），其中 platform-logs 正文有更新。变化明细见 CHANGELOG 的 1.6.0 一节。
+
+### 1. 升级顺序
+
+先升级 SSH MCP（v0.10.0）与日志分析平台（v0.3.0），再升级本平台。平台 CI 的联合测试对 SSH MCP v0.9.0 与 v0.10.0 都已通过。
+
+### 2. 备份
+
+回滚不需要恢复备份（见下文“回滚”），但升级前照常备份数据卷 `appdata`（数据库与主密钥）和 `redisdata`。先在“分析历史”确认没有“等待执行”或“执行中”的任务（分析 Worker 有 6 分钟停止宽限期，进行中的分析会先完成），备份命令与 v1.4.5 → v1.5.0 相同。
+
+### 3. 升级平台
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://服务器IP:8088/healthz
+```
+
+healthz 应返回 version 1.6.0。主页静态资源地址改为 `?v=1.6.0`：控制台去掉了旧的提示元素，浏览器若沿用缓存的旧脚本会报错，刷新页面即加载新脚本。
+
+### 4. 数据库与配置
+
+- **数据库迁移**：`alert_events` 增加可空列 `reused_task_id` 与部分索引 `ix_alert_events_reused`，数据库文件头的 `user_version` 记为 2。由升级后的第一个连接执行一次（Web、各 Worker 与飞书接收器同时启动时只有一个进程执行），此后每次连接只读版本号。
+- **飞书接收器与 qa-worker 一起升级**：`--profile feishu up -d --build` 会同时重建两者。“AI 排队中”卡片由新接收器发出、由新 qa-worker 接手；只升级其一时问题照常回答，但卡片会停在“AI 排队中”。
+- **引用核对变严**：quote 只有小于 10 的整数时要写明监控项 key 或字段名（如 `agent.ping 0`）；日期与时刻按北京时间核对；只有 `status: success` 一类字样的引用不算；“高”至少要有一条核对过数值的引用。升级初期报告中被剔除的引用与“要求补充证据”的轮次可能增多。
+- **预采集时间上限**：最多用任务总时间的一半（快速 / 标准 / 深度默认 45 / 90 / 150 秒），到时未返回的 Zabbix 与日志预采集项列为跳过；服务端不能中途停止的 SSH 诊断等它结束。
+- **日志来源**：依次按任务 IP、告警 IP、Zabbix 接口 IP 与主机名定位；同一身份对应多台主机时不读取，“能力说明”写明歧义。
+- **控制台不能被嵌入**：所有响应带 `X-Frame-Options: DENY` 与内容安全策略，用 iframe 嵌入控制台的页面会被拒绝。
+
+### 5. 接口行为变化
+
+- `/api/v1/platform/alerts` 的每条记录新增 `host_id`、`trigger_id`。
+- 诊断任务新增错误类型：`AlertRecovered`、`QueueExpired`（排队的自动分析未执行，任务为“已取消”），`SkillSnapshotFailed`（Skill 加载失败，任务为“失败”）。
+- 报告的 `capabilities.logs` 新增 `identity`、`tried`，来源有歧义时为 `status=unavailable`、`error_code=ambiguous`；证据核对的有效引用新增 `basis`（number / text / moment），可信度被限制时有 `confidence_note`。
+- 校验不通过或无法解密的 Skill 在列表中带 `invalid`（原因），在 Web 上修改它返回 409。
+
+### 6. 验收
+
+- `docker compose --profile feishu ps` 中各服务运行、web 为 healthy；healthz 为 1.6.0，主页资源为 `?v=1.6.0`。
+- `docker compose exec -T web python -c "import sqlite3; print(sqlite3.connect('/app/data/app.sqlite3').execute('PRAGMA user_version').fetchone())"` 输出 `(2,)`。
+- “Skill 管理”：9 个平台 Skill 版本号各加 1，页面顶部没有“没有可用的诊断 Skill”的提示。
+- 对一条测试告警点“🤖 AI分析”，打开报告核对“证据核对”“能力说明”“分析预算”，飞书卡片没有证据编号。
+
+### 回滚
+
+不需要恢复备份。先确认没有“等待执行”或“执行中”的任务，然后切回 v1.5.0（`f8f6d25`）重建：
+
+```bash
+cd /data/ai-ops-platform
+git switch --detach f8f6d25
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://服务器IP:8088/healthz
+```
+
+- `reused_task_id` 列与 `user_version` 留在数据库中，v1.5.0 按列名读取 `alert_events`，不看 `user_version`。
+- v1.5.0 不认模板版本，回滚后第一次读取 Skill 时把 9 个平台 Skill 换回自己的模板（版本号再加 1）。
+- 错误类型为 `AlertRecovered`、`QueueExpired`、`SkillSnapshotFailed` 的任务在 v1.5.0 的报告页显示通用的“分析未完成……”提示。
+- 回滚时停在“AI 排队中”的飞书问答卡片不再更新，问题照常回答。
+
 ## v1.4.5 → v1.5.0
 
 没有数据库迁移，没有新增或改名的配置项；`docker-compose.yml` 有改动（三个分析 Worker 的停止宽限期），快速档的默认采集次数由 8 改为 10。平台维护的 Skill platform-base、platform-java、platform-service 正文有更新，升级后第一次创建诊断任务或打开“Skill 管理”时自动刷新（版本号加 1；管理员停用的仍保持停用）。变化明细见 CHANGELOG 的 1.5.0 一节。
@@ -37,7 +101,7 @@ docker compose --profile feishu up -d --build --remove-orphans --wait --wait-tim
 curl -fsS http://服务器IP:8088/healthz
 ```
 
-未启用飞书接收器时去掉 `--profile feishu`；不要执行 `down -v`。部署目录里改过 `docker-compose.yml` 的，`git pull` 会因本次改动提示冲突，先把本地修改移到 `docker-compose.override.yml` 再拉取。healthz 应返回 `"ok": true`，version 为发布时的版本号（预计 1.5.0）。主页静态资源地址改为 `?v=1.5.0`，刷新页面即可。
+未启用飞书接收器时去掉 `--profile feishu`；不要执行 `down -v`。部署目录里改过 `docker-compose.yml` 的，`git pull` 会因本次改动提示冲突，先把本地修改移到 `docker-compose.override.yml` 再拉取。healthz 应返回 `"ok": true`，version 为 1.5.0。主页静态资源地址改为 `?v=1.5.0`，刷新页面即可。
 
 ### 4. 数据库与配置
 
