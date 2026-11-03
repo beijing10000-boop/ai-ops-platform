@@ -266,7 +266,7 @@ curl -fsS http://服务器IP:8088/healthz
 
    healthz 应返回 version 1.4.0。静态资源地址改为 `?v=1.4.0`，刷新页面即可看到“连接管理”中的日志 MCP 表单；“Skill 管理”中多了 platform-logs（优先级 52，后台服务 logs）。
 
-2. 日志分析平台完成初始化后，在它的“MCP 接入”页签发一个给本平台用的令牌（`logmcp_` 开头，只显示一次）。工具建议勾选 `log_overview`、`log_compare`、`log_error_spikes`、`log_network_events`、`log_nginx_summary`、`log_java_exceptions`、`log_os_events`、`log_patterns`、`log_search`、`log_context`；目录、来源与定位三个基础工具始终可用。可按需限定日志类型与来源分组。
+2. 日志分析平台完成初始化后，在它的“MCP 接入”页签发一个给本平台用的令牌（`logmcp_` 开头，只显示一次）。工具建议勾选 `log_overview`、`log_compare`、`log_error_spikes`、`log_network_events`、`log_nginx_summary`（同时授权 v0.8 起的 `log_nginx_report`）、`log_java_exceptions`、`log_os_events`、`log_patterns`、`log_search`、`log_context`；目录、来源与定位三个基础工具始终可用。可按需限定日志类型与来源分组。
 3. 本平台“连接管理 → 日志 MCP”：地址填 `http://日志平台IP:7077/mcp`，粘贴令牌，点“验证连接”应显示“连接成功，N 个授权工具”，再点“保存连接”。之后在日志平台修改令牌授权时，点本平台“诊断工具”的“刷新目录”或重新验证连接。
 4. 验收：
    - 对一台日志已接入日志平台的主机或网络设备的告警点“AI 分析”：证据里有预采集的 `log_resolve_target` 与 `log_overview`（网络设备还有 `log_network_events`），报告“证据来源与能力”中日志 MCP 为“已使用”，诊断路径含“日志”；日志平台的审计里有本平台令牌的调用记录。

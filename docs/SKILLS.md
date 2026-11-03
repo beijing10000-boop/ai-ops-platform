@@ -13,7 +13,7 @@ Skill 是**唯一的 AI 诊断策略来源**：数据源选择、工具顺序、
   | platform-linux | 设备：Linux、未识别 | CPU / 内存 / 磁盘 / I/O / 网络 / 系统 / 不可达告警的 Zabbix + SSH 取证 |
   | platform-windows | 设备：Windows | 只用 Zabbix 性能计数器、服务与可用性监控项 |
   | platform-network | 设备：网络设备 | SNMP 接口状态、错误与丢弃、带宽、CPU / 内存、ICMP、重启 |
-  | platform-nginx | 类型：nginx | 访问日志与错误日志、502 / 504 / 499、上游定位 |
+  | platform-nginx | 类型：nginx | 日志平台 Nginx 专项报告（规则化结论与基线）、访问与错误日志、502 / 504 / 499、5xx 来源、上游定位 |
   | platform-java | 类型：java、memory；设备：Linux、未识别 | Java 进程、启动参数、堆与 cgroup 限制、GC、重启 |
   | platform-service | 类型：service、logs、system；设备：Linux、未识别 | systemd 状态、退出原因、重启记录、端口与进程映射 |
   | platform-syslog | 类型：logs、system、memory、io、unreachable；设备：Linux | journald / /var/log 的 OOM、I/O、链路、内核、登录失败 |
@@ -82,7 +82,7 @@ prefetch:
 
 1. **阶段 A（Zabbix）**：有 Host ID 时并行执行 `host_get`（判定设备类型）、按告警触发器 ID 的 `item_get` 与近 24 小时 `event_get`。触发器监控项 key 会校正告警类型（例如文本像 CPU、key 是 `nginx.*`），也会推导 systemd 服务名（`systemd.unit.info["xxx.service",...]`）。
 2. **阶段 B**：按设备类型与校正后的类型合并适用 Skill 的规则；并行执行 zabbix_items 的 `item_get`、同一对象的相关监控项（触发器 key 里的网口索引、文件系统、磁盘名）、SSH 资产解析（只对 Linux 或未识别设备；Windows / 网络设备不连接 SSH），以及有 logs 规则时的日志来源定位（任何设备类型都做）：依次用任务的 IP、告警的 `{HOST.IP}`、Zabbix 主机的各接口 IP（主接口在前，共最多 3 个）调 `log_resolve_target`，某个 IP 近 7 天没有日志就试下一个，都没有时再按 Zabbix 主机名（`host`）查询。找到来源的身份写入 `evidence.log_target` 与 `capabilities.logs`（`identity` 为 `ip` 或 `hostname`，`tried` 列出之前没有日志的身份），不是第一个 IP 时报告“能力说明”写明按哪个身份定位。同一身份对应多台主机时视为歧义，不读取、不合并，停止该来源并写入能力说明（`status=unavailable`、`error_code=ambiguous`）：按 IP 查到多个不同的主机名（NAT、syslog 中转），按主机名查到的发送方 IP 不全是该 Zabbix 主机的接口，或日志平台（v0.2.0 起）对主机名的结果标记 `ambiguous`。不算歧义的：主机名写成发送方 IP 的日志行（日志平台对没有主机名的消息以发送方 IP 作主机名，与该 IP 的其他行是同一台设备）、同一台主机的完整域名与短名或大小写不同的名称、按 IP 只匹配到一个经中转发送并以该 IP 自称的设备（`relayed`），以及按主机名查到的发送方 IP 都是该主机的接口。
-3. **阶段 C**：SSH 诊断、历史与日志工具并行。日志工具的 `target` 取定位到的来源，时间取告警时刻前后 30 分钟（`around` + `minutes`；Web 诊断没有告警时间时取诊断窗口到现在）；来源近 7 天没有对应类型日志的专题工具（如没有 Nginx 访问日志时的 `log_nginx_summary`）跳过并写入 `coverage.skipped`。可以组合的固定诊断用 `ssh_collect` 在同一 SSH 会话执行；带时间窗口的日志类工具自动使用告警前后 15 分钟（since / until）；需要服务名的工具在推导不出服务名时跳过并写入 `coverage.skipped`；`busy` / `timeout` 自动重试一次。history 依次取触发器监控项、同一对象的相关监控项、再按声明顺序匹配（`*` 为通配，`[`、`,` 按原文匹配），最多 8 项：history_get 取告警时间前后各 30 分钟（超过 1000 行自动翻页），trend_get 取近 7 天小时趋势，最多 5 个监控项（一页 1000 行放得下的数量），跳过 `system.cpu.num`、`system.uptime`、`system.boottime` 等常量项与只增不减的计数。发给模型的是统计值、告警前后分段（alert_split）与样本。
+3. **阶段 C**：SSH 诊断、历史与日志工具并行。日志工具的 `target` 取定位到的来源，时间取告警时刻前后 30 分钟（`around` + `minutes`；Web 诊断没有告警时间时取诊断窗口到现在）；来源近 7 天没有对应类型日志的专题工具（如没有 Nginx 访问日志时的 `log_nginx_report`）跳过并写入 `coverage.skipped`；日志平台没有 `log_nginx_report`（v0.8 之前）时改取 `log_nginx_summary`。可以组合的固定诊断用 `ssh_collect` 在同一 SSH 会话执行；带时间窗口的日志类工具自动使用告警前后 15 分钟（since / until）；需要服务名的工具在推导不出服务名时跳过并写入 `coverage.skipped`；`busy` / `timeout` 自动重试一次。history 依次取触发器监控项、同一对象的相关监控项、再按声明顺序匹配（`*` 为通配，`[`、`,` 按原文匹配），最多 8 项：history_get 取告警时间前后各 30 分钟（超过 1000 行自动翻页），trend_get 取近 7 天小时趋势，最多 5 个监控项（一页 1000 行放得下的数量），跳过 `system.cpu.num`、`system.uptime`、`system.boottime` 等常量项与只增不减的计数。发给模型的是统计值、告警前后分段（alert_split）与样本。
 
 - zabbix_items 只在任务有 Zabbix Host ID 时执行；写 `"*"` 表示不按 key 过滤、取该主机的监控项（最多 60 个，含最近采集时间），不可达类告警据此在 signals 里得到 `collection_freshness`（同一监控项只计一次，从未采集到数据的监控项不计）。
 - 预采集计入采集次数，但模型始终保留 `follow_up_calls` 次补查（AI 配置 → 分析预算；保底次数不超过配置的采集次数）。预采集已解析的 SSH 目标、已取得的证据被模型再次请求时直接复用，不再调用。

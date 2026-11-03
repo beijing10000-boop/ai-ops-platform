@@ -586,8 +586,8 @@ TEMPLATE_LOCK = {
         "14b5c28feb0a4e9d74975eb7307b586b63abc82fb352f708c20a087dc1117260",
     ),
     "platform-logs": (
-        2,
-        "19c30e10262b9ad1f01693dd8a01fe8f5fcc624f79421814bf55910c542b6117",
+        3,
+        "3942bbb5d21d90c84d63ae2b19921248902a3d6509f8a3ebb2469cfaceb144e2",
     ),
     "platform-linux": (
         1,
@@ -610,8 +610,8 @@ TEMPLATE_LOCK = {
         "525578ff9584b3ec741d3a69425952d007f715e28da80081f658b8c93816681c",
     ),
     "platform-nginx": (
-        1,
-        "5c6711265e57e0328cfa56f18a14ed8bffdc3076cd60368a8b285cbed8151202",
+        2,
+        "6470b9bb56a27ca718eed6c6b5efb299e7934340e34782d60b708d63feb4750f",
     ),
     "platform-java": (
         1,

@@ -198,6 +198,8 @@ LOG_TOOLS = {
         "list_tool_catalog list_sources resolve_target overview histogram facets "
         "patterns compare error_spikes nginx_summary java_exceptions "
         "network_events os_events search context trace"
+        # log analysis platform v0.8
+        " nginx_report"
     ).split()
 }
 

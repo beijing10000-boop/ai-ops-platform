@@ -129,9 +129,13 @@ HOST_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,127}")
 LOG_TOPICS = {
     "log_network_events": ("network", "网络设备"),
     "log_nginx_summary": ("nginx_access", "Nginx 访问"),
+    "log_nginx_report": ("nginx_access", "Nginx 访问"),
     "log_java_exceptions": ("java", "Java"),
     "log_os_events": ("os", "操作系统"),
 }
+# A planned log tool the log MCP does not offer (an older version) and the one
+# that reads the same logs in its place.
+LOG_FALLBACK = {"log_nginx_report": "log_nginx_summary"}
 
 
 @asynccontextmanager
@@ -1720,6 +1724,11 @@ async def run(
         a log type the source has not sent in 7 days is skipped, not run empty."""
         jobs = []
         for tool in planned:
+            # Capability discovery: an older log MCP's tool for the same logs.
+            if tool not in log_tools and LOG_FALLBACK.get(tool) in log_tools:
+                tool = LOG_FALLBACK[tool]
+                if tool in planned:
+                    continue
             if tool not in log_tools:
                 coverage["skipped"].append(
                     {"tool": tool, "reason": "日志 MCP 未提供或令牌未授权"}
