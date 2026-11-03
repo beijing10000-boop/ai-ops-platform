@@ -175,3 +175,33 @@ def test_no_divergence_signal_when_the_cpu_is_actually_busy():
     # Missing core count: no ratio, no signal, no error.
     partial = {"records": [{"key_": "system.cpu.util", "lastvalue": "5"}]}
     assert derive_signals([("zabbix_mcp", "item_get", partial, "E1")]) == []
+
+
+def test_ids_the_conclusion_text_cites_must_exist_and_have_succeeded():
+    index = {**INDEX, "E3": {**INDEX["E2"], "failed": True}}
+    reply = json.dumps(
+        {
+            "cause": "负载 6.25，CPU 忙碌 12%（E1）；CPU 98%（E7）",
+            "analysis": "核数 4（E2），另见 E3",
+            "findings": {
+                "confirmed": [{"statement": "内存 99%（E9）", "evidence": ["E9"]}]
+            },
+            "evidence": [
+                {"id": "E1", "quote": "load_1 6.25"},
+                {"id": "E2", "quote": "system.cpu.num 4"},
+            ],
+        },
+        ensure_ascii=False,
+    )
+    result = evidence_check.check(reply, index)
+    flagged = [(i["id"], i.get("where"), i["reason"]) for i in result["invalid"]]
+    assert flagged == [
+        ("E7", "正文", evidence_check.MISSING),
+        ("E3", "正文", evidence_check.FAILED),
+        ("E9", "正文", evidence_check.MISSING),
+    ]
+    # Two valid quotes no longer outweigh three bad citations.
+    assert result["confidence"] != "高"
+    # The confirmed fact citing nothing valid is demoted, as before.
+    assert result["facts"]["counts"]["demoted"] == 1
+    assert "E7（结论正文引用，证据编号不存在）" in evidence_check.render(result)

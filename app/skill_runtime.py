@@ -111,7 +111,10 @@ CONSTANT_KEYS = re.compile(
 NON_LINUX = {"windows", "network", "vmware", "other"}
 # SSH states, set while resolving the task's own target, in which the model is
 # not offered SSH tools.
-SSH_CLOSED = {"unavailable", "not_ready", "not_applicable", "disabled"}
+SSH_CLOSED = {"unavailable", "not_ready", "not_applicable", "disabled", "unreachable"}
+# Zabbix MCP states in which its tools are not offered: not configured, or
+# its session could not be opened (each later call would fail the same way).
+ZABBIX_CLOSED = {"disabled", "unreachable"}
 # Log evidence states in which the model gets neither log tools nor a Skill
 # that only uses them: no log MCP configured, unreachable, or the target sends
 # no logs. Each is a capability note, never an evidence gap.
@@ -849,8 +852,14 @@ async def run(
 
     def ssh_closed():
         """The task's own target was checked against SSH MCP and cannot be
-        served (not registered, not ready, not Linux, SSH MCP disabled)."""
+        served (not registered, not ready, not Linux, SSH MCP disabled or
+        its session could not be opened)."""
         return bool(target) and capabilities["ssh_mcp"].get("status") in SSH_CLOSED
+
+    def zabbix_closed():
+        """Zabbix MCP is not configured, or its session could not be opened
+        (the bridge keeps that failure for the task)."""
+        return (capabilities.get("zabbix_mcp") or {}).get("status") in ZABBIX_CLOSED
 
     def logs_closed():
         """No log evidence for this task: log MCP not configured or not
@@ -867,6 +876,11 @@ async def run(
             # Refused before any call: the reason is already in 能力说明.
             coverage["skipped"].append(
                 {"tool": str(label), "reason": "目标主机的 SSH 实时诊断不可用，未调用"}
+            )
+            return
+        if outcome.get("zabbix_closed"):
+            coverage["skipped"].append(
+                {"tool": str(label), "reason": "Zabbix MCP 不可用，未调用"}
             )
             return
         if outcome.get("logs_closed"):
@@ -2045,6 +2059,18 @@ async def run(
                 },
                 None,
             )
+        if provider == "zabbix_mcp" and zabbix_closed():
+            reason = str(capabilities["zabbix_mcp"].get("reason") or "")[:120]
+            return (
+                args,
+                {
+                    "error": "Zabbix MCP 不可用"
+                    + (f"（{reason}）" if reason else "")
+                    + "，请依据其它数据源分析",
+                    "zabbix_closed": True,
+                },
+                None,
+            )
         signature = json.dumps([call.name, args], sort_keys=True)
         if call.name == "list_mcp_tools":
             wanted = (
@@ -2332,6 +2358,7 @@ async def run(
                     for provider, shut in (
                         ("ssh_mcp", ssh_closed()),
                         ("logs", logs_closed()),
+                        ("zabbix_mcp", zabbix_closed()),
                     )
                     if shut
                 }

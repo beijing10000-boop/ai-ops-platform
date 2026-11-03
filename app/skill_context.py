@@ -103,6 +103,37 @@ ROW_CHARS = 160
 LOG_SERIES = {"trend", "buckets", "timeline"}
 # (items per list, characters per string), tried in order until the view fits.
 LOG_STEPS = ((20, 400), (10, 240), (5, 160), (3, 120), (1, 80))
+# Per log tool, what a diagnosis needs least: these top-level sections are
+# left out first (in this order) before any list is cut, so the conclusions,
+# totals and the fixed breakdowns reach the model whole.
+LOG_DROP = {
+    "log_nginx_summary": (
+        "referers",
+        "largest_routes",
+        "heaviest_routes",
+        "request_size",
+        "keepalive",
+        "protocols",
+        "clients",
+        "trend",
+        "slow_routes",
+        "sites",
+    ),
+    "log_nginx_report": (
+        "user_agents",
+        "timeline",
+        "references",
+        "impact",
+        "slow_requests",
+        "sites",
+        "servers",
+        "upstreams",
+        "error_log",
+        "changes",
+    ),
+}
+# Short fixed lists (one row per stage, origin or rule) kept whole.
+LOG_WHOLE = {"timing", "s5xx_origins", "health", "overview", "baseline", "totals"}
 
 
 def _positive(value):
@@ -394,19 +425,59 @@ def _log_cut(value, keep, chars):
     return value
 
 
-def log_view(outcome, max_chars):
+def log_view(outcome, max_chars, tool=""):
     """Log replies keep whole entries: shorter lists and sample lines rather
-    than a JSON document cut in the middle, which could not be cited."""
-    if _fits(outcome, max_chars):
+    than a JSON document cut in the middle, which could not be cited.
+
+    The tool's least needed sections go first (LOG_DROP), then every list
+    but the fixed ones (LOG_WHOLE) is cut; what still does not fit loses
+    its remaining sections from the end."""
+    if _fits(outcome, max_chars) or not isinstance(outcome, dict):
         return outcome
-    # The note counts against the limit too (a view that only fits without
-    # it would be cut in the middle after all).
-    note = "列表与日志原文已按模型视图上限截短；完整证据在任务记录中"
+    # The tool's answer is `data` of the call outcome (else the outcome).
+    wrapped = isinstance(outcome.get("data"), dict)
+    view = dict(outcome["data"] if wrapped else outcome)
+    dropped = []
+
+    def noted(data, cut):
+        """The view with what it leaves out named (`omitted_sections`).
+        The note counts against the limit too (a view that only fits
+        without it would be cut in the middle after all)."""
+        note = (
+            "列表与日志原文已按模型视图上限截短；完整证据在任务记录中"
+            if cut
+            else "部分次要内容已按模型视图上限省略；完整证据在任务记录中"
+        )
+        data = {**data, **({"omitted_sections": list(dropped)} if dropped else {})}
+        if wrapped:
+            return {**outcome, "data": data, "view_note": note}
+        return {**data, "view_note": note}
+
+    for key in LOG_DROP.get(tool, ()):
+        if key in view:
+            view.pop(key)
+            dropped.append(key)
+            if _fits(noted(view, False), max_chars):
+                return noted(view, False)
     for keep, chars in LOG_STEPS:
-        view = {**_log_cut(outcome, keep, chars), "view_note": note}
-        if _fits(view, max_chars):
+        shorter = {}
+        for key, item in view.items():
+            if key in LOG_WHOLE:
+                shorter[key] = item
+            else:  # the list itself and its `<key>_omitted` count
+                shorter.update(_log_cut({key: item}, keep, chars))
+        if _fits(noted(shorter, True), max_chars):
+            return noted(shorter, True)
+    # Still too long: the last sections go, the conclusions stay.
+    for key in reversed(list(view)):
+        if key in LOG_WHOLE or key in ("status", "window", "findings", "health"):
+            continue
+        shorter.pop(key, None)
+        shorter.pop(key + "_omitted", None)
+        dropped.append(key)
+        if _fits(noted(shorter, True), max_chars):
             break
-    return view
+    return noted(shorter, True)
 
 
 def _numbers(records, fields):
@@ -541,7 +612,7 @@ def model_view(provider, tool, outcome, max_chars=None, event_clock=None):
     if provider == "ssh_mcp":
         return ssh_view(outcome, max_chars)
     if provider == "logs":
-        return log_view(outcome, max_chars)
+        return log_view(outcome, max_chars, tool)
     if (
         provider != "zabbix_mcp"
         or not isinstance(outcome, dict)

@@ -547,13 +547,17 @@ def test_target_not_sending_logs_is_a_capability_note_not_a_gap(logs):
     # No log tools and no log Skill for the model.
     assert "platform-logs" not in sent["applied_skills"]
     tools = create.call_args_list[0].kwargs["tools"]
-    assert "logs" not in tools[1]["parameters"]["properties"]["provider"]["enum"]
+    enums = [
+        tool["parameters"]["properties"]["provider"]["enum"]
+        for tool in tools
+        if "provider" in tool["parameters"]["properties"]
+    ]
+    assert all("logs" not in enum for enum in enums)
     report = task["report"]
     assert task["status"] == "success" and report["limitations"] == []
-    assert {
-        "tool": "log_search",
-        "reason": "本任务的日志证据不可用，未调用",
-    } in report["coverage"]["skipped"]
+    # The model's call is refused before it is made: a note, not a gap.
+    skipped = [item["tool"] for item in report["coverage"]["skipped"]]
+    assert "log_search" in skipped
     assert "日志 MCP目标未接入：198.51.100.40 最近 7 天没有" in report["answer"]
     assert "日志 MCP目标未接入" in report["chat_scope"]
 

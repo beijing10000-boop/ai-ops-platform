@@ -900,6 +900,22 @@ def _check_facts(parsed, valid_ids):
     }
 
 
+def _text_ids(parsed):
+    """Evidence ids the answer's prose cites: its cause, analysis and actions,
+    and its findings' statements, in order."""
+    parts = []
+    for key in ANSWER_FIELDS:
+        value = parsed.get(key)
+        parts.extend(value if isinstance(value, list) else [value])
+    findings = parsed.get("findings")
+    if isinstance(findings, dict):
+        for group in findings.values():
+            for item in group if isinstance(group, list) else []:
+                parts.append(item.get("statement") if isinstance(item, dict) else item)
+    text = "\n".join(str(part) for part in parts if part)
+    return list(dict.fromkeys("E" + m.group(1) for m in CITED_ID.finditer(text)))
+
+
 UNCHECKED = {
     "salvaged": "回答的 JSON 不完整，只恢复出部分字段，没有可核对的原文摘录",
     "structured": "回答没有 evidence 原文摘录",
@@ -949,6 +965,22 @@ def check(answer, index):
                     )
                     continue
             invalid.append({"id": ident, "quote": quote, "reason": reason})
+        # The conclusion's own text cites ids too ("（E7）"): one that does not
+        # exist, or whose collection failed, is a bad citation like a quote's.
+        quoted = {item["id"] for item in valid} | {item["id"] for item in invalid}
+        for ident in _text_ids(parsed):
+            source = index.get(ident)
+            if ident in quoted or (source and not _failed(source)):
+                continue
+            quoted.add(ident)
+            invalid.append(
+                {
+                    "id": ident,
+                    "quote": "",
+                    "reason": MISSING if not source else FAILED,
+                    "where": "正文",
+                }
+            )
         result = {
             "method": "quote",
             "valid": valid,
@@ -1201,7 +1233,8 @@ def render(result):
     if result["invalid"]:
         lines.append("未通过核对、已剔除的引用：")
         lines.extend(
-            f"- {item['id']}{('：“' + item['quote'] + '”') if item['quote'] else ''}（{item['reason']}）"
+            f"- {item['id']}{('：“' + item['quote'] + '”') if item['quote'] else ''}"
+            f"（{'结论正文引用，' if item.get('where') else ''}{item['reason']}）"
             for item in result["invalid"]
         )
     facts = result.get("facts")
