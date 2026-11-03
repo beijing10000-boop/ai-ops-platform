@@ -1,5 +1,47 @@
 # 升级说明
 
+## v1.6.0 → v1.7.0
+
+没有数据库迁移，没有新增或改名的配置项，`docker-compose.yml` 与依赖都没有改动。平台维护的 Skill 中 platform-logs（第 3 版）与 platform-nginx（第 2 版）正文有更新，在升级后第一次创建诊断任务或打开“Skill 管理”时刷新（版本号加 1；管理员停用的仍保持停用）。变化明细见 CHANGELOG 的 1.7.0 一节。
+
+### 1. 升级顺序
+
+先升级日志分析平台（v0.8.0，提供 `log_nginx_report`）与 SSH MCP（v0.10.1），再升级本平台。日志平台较旧、没有 `log_nginx_report` 时，Nginx 告警的预采集自动改取 `log_nginx_summary`，不算诊断缺口；日志平台的令牌不需要重新授权（`log_nginx_report` 随 `log_nginx_summary` 一起授权）。
+
+### 2. 备份
+
+回滚不需要恢复备份，但升级前照常备份数据卷 `appdata`（数据库与主密钥）和 `redisdata`。先在“分析历史”确认没有“等待执行”或“执行中”的任务，备份命令与 v1.4.5 → v1.5.0 相同。
+
+### 3. 升级平台
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://服务器IP:8088/healthz
+```
+
+healthz 应返回 version 1.7.0。控制台静态资源没有变化。
+
+### 4. 行为变化
+
+- **日志证据的模型视图**：日志工具结果超过模型视图上限时，先按工具省略次要部分，耗时拆分、5xx 来源、总量、结论与基线保持完整，视图中的 `omitted_sections` 写明省略了什么。
+- **引用核对**：结论正文（`cause`、`analysis`、`action`、findings）引用的证据编号不存在或对应的采集失败时，列为无效引用（“结论正文引用”），可信度相应降低。
+- **告警分类**：中文紧挨英文（“CPU使用率过高”“nginx为啥502”）按 ASCII 单词边界识别；`proc.num[nginx]` 归为 Nginx。此前归为“资源瓶颈”的问答与 Web 诊断，现在会加载对应的 Skill 与预采集。
+- **MCP 连接失败**：SSH MCP 或 Zabbix MCP 的会话打不开时，本任务不再向模型提供其工具，记入“覆盖说明”，任务不会因此变为“部分完成”。
+
+### 5. 回滚
+
+```bash
+cd /data/ai-ops-platform
+git switch --detach 194f023
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+```
+
+无数据库变化。回滚后托管 Skill 在下一次任务或打开“Skill 管理”时按 v1.6.0 的模板版本刷新回去。
+
 ## v1.5.0 → v1.6.0
 
 有一次数据库迁移（幂等，升级后自动执行），没有新增或改名的配置项，`docker-compose.yml` 没有改动；`requirements.txt` 把 rq、openai 限定在 2.x 并显式声明 tzdata，不升级任何已有依赖。9 个平台维护的 Skill 在升级后第一次创建诊断任务或打开“Skill 管理”时各刷新一次（版本号加 1；管理员停用的仍保持停用），其中 platform-logs 正文有更新。变化明细见 CHANGELOG 的 1.6.0 一节。
