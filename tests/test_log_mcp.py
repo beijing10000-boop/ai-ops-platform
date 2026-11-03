@@ -70,6 +70,7 @@ SERVER_TOOLS = [
     tool("log_overview", {**WINDOW, "service": {"type": "string"}}),
     tool("log_compare", {**WINDOW, "query": {"type": "string"}, "baseline": {}}),
     tool("log_nginx_summary", {**WINDOW, "path_prefix": {"type": "string"}}),
+    tool("log_nginx_report", {**WINDOW, "baseline": {"type": "string"}}),
     tool("log_java_exceptions", {**WINDOW, "service": {"type": "string"}}),
     tool("log_network_events", {**WINDOW, "timeline": {"type": "integer"}}),
     tool("log_search", {**WINDOW, "query": {"type": "string"}, "limit": {}}),
@@ -90,6 +91,7 @@ ALLOWED = {
     "log_overview",
     "log_compare",
     "log_nginx_summary",
+    "log_nginx_report",
     "log_java_exceptions",
     "log_network_events",
     "log_search",
@@ -413,7 +415,7 @@ def test_alert_prefetch_finds_the_log_source_then_reads_the_alert_window(logs):
     window = {"target": "198.51.100.40", "around": str(CLOCK), "minutes": 30}
     assert sorted(calls[2:], key=lambda c: c[0]) == [
         ("log_compare", window),
-        ("log_nginx_summary", window),
+        ("log_nginx_report", window),
         ("log_overview", window),
     ]
     assert logs.connects == [TOKEN]
@@ -425,7 +427,7 @@ def test_alert_prefetch_finds_the_log_source_then_reads_the_alert_window(logs):
         "source_types": ["nginx_access", "os"],
     }
     prefetched = {p["tool"]: p["result"] for p in evidence["prefetched"]}
-    assert set(prefetched) == {"log_overview", "log_nginx_summary", "log_compare"}
+    assert set(prefetched) == {"log_overview", "log_nginx_report", "log_compare"}
     # The JSON text block arrives as structured data with an evidence id.
     assert prefetched["log_overview"]["data"]["errors"] == 42
     assert all(result["evidence_id"] for result in prefetched.values())
@@ -827,6 +829,27 @@ def test_prefetch_rules_take_log_tools_and_device_limits():
             skills.parse_document(skill_with(rule))
 
 
+def test_an_older_log_platform_gives_the_nginx_topic_instead_of_the_report(logs):
+    # Capability discovery: a log MCP without log_nginx_report (before v0.8)
+    # or a token without it still gets the Nginx topic it has.
+    logs.session.granted = [
+        "log_overview",
+        "log_compare",
+        "log_nginx_summary",
+        "log_search",
+    ]
+    task, sent, _ = analyze(nginx_alert("880470"))
+    names = [name for name, _ in logs.session.calls]
+    assert "log_nginx_summary" in names and "log_nginx_report" not in names
+    prefetched = {p["tool"] for p in sent["evidence"]["prefetched"]}
+    assert {"log_overview", "log_nginx_summary", "log_compare"} <= prefetched
+    assert task["status"] == "success" and task["report"]["limitations"] == []
+    assert not any(
+        item["tool"] == "log_nginx_report"
+        for item in task["report"]["coverage"]["skipped"]
+    )
+
+
 def test_platform_logs_skill_opens_only_the_log_mcp_and_plans_the_topics():
     package = skills.managed_package("platform-logs")
     rows = [package]
@@ -839,7 +862,7 @@ def test_platform_logs_skill_opens_only_the_log_mcp_and_plans_the_topics():
     ]
     assert skills.prefetch_plan(rows, "web", "nginx", "linux")["logs"] == [
         "log_overview",
-        "log_nginx_summary",
+        "log_nginx_report",
         "log_compare",
     ]
     assert skills.prefetch_plan(rows, "qa", "nginx", "linux")["logs"] == []
