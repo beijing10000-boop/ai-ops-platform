@@ -106,17 +106,26 @@ RULES = (
 )
 
 
+# ASCII word boundaries: a Chinese character next to the word is a boundary
+# ("CPU使用率", "nginx为啥502"); with Unicode \w it would not be one.
+COMPILED = tuple((kind, re.compile(pattern, re.ASCII)) for kind, pattern in RULES)
+
+
 def classify(text):
     lower = str(text).lower()
-    for kind, pattern in RULES:
-        if re.search(pattern, lower):
+    for kind, pattern in COMPILED:
+        if pattern.search(lower):
             return kind
     return "bottleneck"
 
 
 # Trigger item keys say what the alert measures better than its free text does.
 KEY_RULES = (
-    ("nginx", r"^(nginx|web\.page|net\.tcp\.service\[http)"),
+    # A process count of nginx is an Nginx alert before a generic service one.
+    (
+        "nginx",
+        r"^(nginx|web\.page|net\.tcp\.service\[http)|^proc\.num\[[^\]]*(nginx|openresty)",
+    ),
     ("java", r"^jmx\[|java"),
     (
         "unreachable",
