@@ -1,5 +1,45 @@
 # 升级说明
 
+## v1.7.0 → v1.7.1
+
+没有数据库迁移，没有新增或改名的配置项，`docker-compose.yml` 与依赖都没有改动。平台维护的 Skill 中 platform-logs 更新到第 4 版（模板版本 3 → 4），在升级后第一次创建诊断任务或打开“Skill 管理”时刷新（版本号加 1；管理员停用的仍保持停用）。控制台静态资源有一处变化（报告的“证据来源与能力”面板），`?v=` 已改为 1.7.1。变化明细见 CHANGELOG 的 1.7.1 一节。
+
+### 1. 升级顺序
+
+先升级日志分析平台到 v0.10.1（`log_resolve_target` 对网站域名返回 `nginx_site` 与记录它的服务器），再升级本平台。日志平台较旧时本平台照常工作：模型按 Skill 直接用 `log_nginx_report` 的 `host_header` 查站点，只是把域名交给 `log_resolve_target` 时得不到服务器列表。日志平台的令牌不需要重新授权。
+
+### 2. 备份
+
+回滚不需要恢复备份，但升级前照常备份数据卷 `appdata`（数据库与主密钥）和 `redisdata`。先在“分析历史”确认没有“等待执行”或“执行中”的任务，备份命令与 v1.4.5 → v1.5.0 相同。
+
+### 3. 升级平台
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://服务器IP:8088/healthz
+```
+
+healthz 应返回 version 1.7.1。
+
+### 4. 行为变化
+
+- **问答问网站（域名）**：日志类、Nginx 类问答的首条消息带上 `log_resolve_target` 与 `log_nginx_report` 的参数结构（只是参数结构，不预采集数据，每次约增加一千多个输入 Token）；模型按 platform-logs 第 4 版直接用 `log_nginx_report` 的 `host_header` 查站点，不再因为“域名不是日志来源”就回答“日志平台中没有该站点的数据”。
+- **能力说明**：某个 MCP 只调用了定位或列出目标的工具、没有取得数据时写“只做了目标定位（解析主机或日志来源），没有取得数据”（`status=located`），不再写“已授权但本次未调用”；诊断路径与“已使用”的判断不变。
+
+### 5. 回滚
+
+```bash
+cd /data/ai-ops-platform
+git switch --detach 5d273c4
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+```
+
+无数据库变化。数据库里已刷新为第 4 版的 platform-logs 在 v1.7.0 上保留（平台 Skill 只会被更高版本的模板替换，v1.7.0 能读取第 4 版的内容），问答仍会带上两个日志工具的参数结构，这在 v1.7.0 上同样可用、无害。已完成任务里的 `located` 状态在 v1.7.0 的报告面板上原样显示为 `located`。
+
 ## v1.6.0 → v1.7.0
 
 没有数据库迁移，没有新增或改名的配置项，`docker-compose.yml` 与依赖都没有改动。平台维护的 Skill 中 platform-logs（第 3 版）与 platform-nginx（第 2 版）正文有更新，在升级后第一次创建诊断任务或打开“Skill 管理”时刷新（版本号加 1；管理员停用的仍保持停用）。变化明细见 CHANGELOG 的 1.7.0 一节。
