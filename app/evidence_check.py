@@ -1040,6 +1040,7 @@ STATUS_LABELS = {
     "used": "已使用",
     "available": "可用",
     "unused": "已授权但本次未调用",
+    "located": "只做了目标定位（解析主机或日志来源），没有取得数据",
     "not_applicable": "不适用",
     "unavailable": "不可用",
     "not_ready": "主机未就绪",

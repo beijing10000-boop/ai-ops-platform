@@ -70,7 +70,15 @@ SERVER_TOOLS = [
     tool("log_overview", {**WINDOW, "service": {"type": "string"}}),
     tool("log_compare", {**WINDOW, "query": {"type": "string"}, "baseline": {}}),
     tool("log_nginx_summary", {**WINDOW, "path_prefix": {"type": "string"}}),
-    tool("log_nginx_report", {**WINDOW, "baseline": {"type": "string"}}),
+    tool(
+        "log_nginx_report",
+        {
+            **WINDOW,
+            "host_header": {"type": "string", "default": ""},
+            "path_prefix": {"type": "string", "default": ""},
+            "baseline": {"type": "string"},
+        },
+    ),
     tool("log_java_exceptions", {**WINDOW, "service": {"type": "string"}}),
     tool("log_network_events", {**WINDOW, "timeline": {"type": "integer"}}),
     tool("log_search", {**WINDOW, "query": {"type": "string"}, "limit": {}}),
@@ -869,6 +877,98 @@ def test_platform_logs_skill_opens_only_the_log_mcp_and_plans_the_topics():
     installed = {row["name"]: row for row in skills.rows()}
     assert installed["platform-logs"]["providers"] == ["logs"]
     assert "logs" not in installed["platform-base"]["providers"]
+
+
+def ask(question, *replies):
+    """Run a chat question (no alert); the model gives `replies`, then a short
+    conclusion."""
+    final = response(text="erp.example.com 最近 30 分钟请求正常")
+    create = AsyncMock(side_effect=[*replies, *[final] * 4])
+    _, usage = asyncio.run(
+        mcp_runtime.run(
+            "使用中文回答用户问题",
+            question,
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            return_usage=True,
+        )
+    )
+    sent = json.loads(create.call_args_list[0].kwargs["input"][0]["content"])
+    return tasks.get(usage["task_id"]), sent
+
+
+SITE_QUESTION = "通过日志分析平台查看 erp.example.com 现在的使用情况"
+
+
+def test_log_questions_get_the_site_tools_schemas_up_front(logs):
+    """A question about a web site used to reach the model without any log
+    tool schema: it guessed log_resolve_target, spent a round fetching its
+    schema and never found log_nginx_report's host_header."""
+    task, sent = ask(SITE_QUESTION)
+    assert task["diagnostic_type"] in ("logs", "nginx")
+    assert "platform-logs" in sent["applied_skills"]
+    preloaded = {
+        (item["provider"], item["name"]) for item in sent["preloaded_tool_schemas"]
+    }
+    assert {("logs", "log_resolve_target"), ("logs", "log_nginx_report")} <= preloaded
+    # Schemas only: nothing is collected before the model asks.
+    assert [name for name, _ in logs.session.calls] == ["log_list_tool_catalog"]
+    for kind in ("logs", "nginx"):
+        plan = skills.prefetch_plan(
+            [skills.managed_package("platform-logs")], "qa", kind, None
+        )
+        assert plan["schemas"] == ["log_resolve_target", "log_nginx_report"]
+        assert plan["logs"] == []
+    # Other questions do not carry them.
+    plan = skills.prefetch_plan(
+        [skills.managed_package("platform-logs")], "qa", "cpu", "linux"
+    )
+    assert plan["schemas"] == []
+
+
+def test_platform_logs_skill_says_a_domain_is_a_site_not_a_log_source():
+    body = skills.managed_package("platform-logs")["instructions"]
+    assert "问的是网站或域名" in body and "`host_header` 填该域名" in body
+    assert "nginx_site" in body and "不能据此断定站点没有日志" in body
+
+
+def test_only_finding_the_log_source_is_reported_as_a_lookup_not_unused(logs):
+    """The model's two log_resolve_target calls were reported as "日志 MCP
+    已授权但本次未调用"."""
+    logs.session.found = False
+    lookup = Call(
+        "call_mcp_tool",
+        {
+            "provider": "logs",
+            "name": "log_resolve_target",
+            "arguments": {"hostname": "erp.example.com"},
+        },
+    )
+    task, _ = ask(SITE_QUESTION, response(lookup))
+    assert ("log_resolve_target", {"hostname": "erp.example.com"}) in (
+        logs.session.calls
+    )
+    report = task["report"]
+    assert report["capabilities"]["logs"] == {"status": "located"}
+    assert report["capabilities"]["diagnostic_path"] == "none"
+    for text in (report["answer"], report["chat_scope"]):
+        assert "日志 MCP只做了目标定位" in text
+        assert "日志 MCP已授权但本次未调用" not in text
+
+
+def test_reading_the_site_report_counts_as_using_the_logs(logs):
+    read = Call(
+        "call_mcp_tool",
+        {
+            "provider": "logs",
+            "name": "log_nginx_report",
+            "arguments": {"host_header": "erp.example.com", "start": "now-30m"},
+        },
+    )
+    task, _ = ask(SITE_QUESTION, response(read))
+    assert any(name == "log_nginx_report" for name, _ in logs.session.calls)
+    report = task["report"]
+    assert report["capabilities"]["logs"]["status"] == "used"
+    assert report["capabilities"]["diagnostic_path"] == "logs-only"
 
 
 def test_log_view_keeps_whole_entries_within_the_model_limit():

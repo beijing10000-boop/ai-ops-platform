@@ -586,8 +586,8 @@ TEMPLATE_LOCK = {
         "14b5c28feb0a4e9d74975eb7307b586b63abc82fb352f708c20a087dc1117260",
     ),
     "platform-logs": (
-        3,
-        "3942bbb5d21d90c84d63ae2b19921248902a3d6509f8a3ebb2469cfaceb144e2",
+        4,
+        "490d5c83b84469181b81855c61d2da24d113c2ad29d029f9bb93c0c6c3b11040",
     ),
     "platform-linux": (
         1,

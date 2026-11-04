@@ -9,7 +9,7 @@ Skill 是**唯一的 AI 诊断策略来源**：数据源选择、工具顺序、
   | Skill | 适用范围（`devices` / `types`） | 内容 |
   | --- | --- | --- |
   | platform-base | 所有任务 | 四阶段诊断流程、证据深度、按设备类型选择数据源、报告分级 |
-  | platform-logs | 所有任务（只使用日志 MCP） | 日志证据：依次按告警主机的 IP 与主机名定位日志来源、告警前后 30 分钟概览，网络设备 / Nginx / Java 专题与基线对比；没有日志证据时不发给模型 |
+  | platform-logs | 所有任务（只使用日志 MCP） | 日志证据：依次按告警主机的 IP 与主机名定位日志来源、告警前后 30 分钟概览，网络设备 / Nginx / Java 专题与基线对比；问答问网站（域名）时按 Nginx 站点（`log_nginx_report` 的 `host_header`）查询，日志类、Nginx 类问答预先带上 `log_resolve_target` 与 `log_nginx_report` 的参数结构；没有日志证据时不发给模型 |
   | platform-linux | 设备：Linux、未识别 | CPU / 内存 / 磁盘 / I/O / 网络 / 系统 / 不可达告警的 Zabbix + SSH 取证 |
   | platform-windows | 设备：Windows | 只用 Zabbix 性能计数器、服务与可用性监控项 |
   | platform-network | 设备：网络设备 | SNMP 接口状态、错误与丢弃、带宽、CPU / 内存、ICMP、重启 |
@@ -88,6 +88,7 @@ prefetch:
 - 预采集计入采集次数，但模型始终保留 `follow_up_calls` 次补查（AI 配置 → 分析预算；保底次数不超过配置的采集次数）。预采集已解析的 SSH 目标、已取得的证据被模型再次请求时直接复用，不再调用。
 - 预采集最多用任务总时间（分析预算的“总时间”）的一半：到时仍未返回的 Zabbix 与日志调用不再等待，写入 `coverage.skipped`（“预采集超过时间上限”）与 `budget.limits_hit`，已取得的证据照常进入首条消息，模型用剩余时间分析与补查。SSH 诊断工具的参数结构有 `timeout_seconds` 时，预采集要求服务在这个上限前约 10 秒返回已完成的部分；没有时服务端无法被告知停止，平台等它结束（受 SSH MCP 单工具超时限制），结果照常交给模型，`limits_hit` 注明“SSH 诊断不能中途停止，已等到结果”。上限截断的数据源若之后也没有被模型用到，“能力说明”写“不可用：预采集超过时间上限……”（`status=unavailable`、`error_code=timeout`，如“日志 MCP 连接未完成”“未到 SSH 实时诊断阶段”），不写“已授权但本次未调用”；网络设备等非 Linux 主机的 SSH 照常为“不适用”。会话在列出工具前被截断时不保留，模型补查时重新连接。
 - SSH 解析失败、设备不适用、SSH MCP 未启用或连接失败时，不视为诊断缺口，而是写入 `capabilities` 与报告“诊断范围 → 能力说明”；令牌未授权的工具写入 `capabilities.unauthorized_tools`。
+- 某个 MCP 只调用了定位或列出目标的工具（`ssh_resolve_target`、`ssh_list_hosts`、`log_resolve_target`、`log_list_sources` 等），没有取得数据时，不算“已使用”，`capabilities.<来源>.status` 为 `located`，“能力说明”写“只做了目标定位（解析主机或日志来源），没有取得数据”；完全没有调用时为 `unused`（“已授权但本次未调用”）。
 - 日志证据同理：未配置日志 MCP（`capabilities.logs.status=disabled`）、连接失败或令牌被拒（`unreachable`）、来源定位失败或同一身份对应多台主机（`unavailable`，后者 `error_code=ambiguous`）、各个 IP 与主机名近 7 天都没有日志进入日志平台（`not_onboarded`，原因列出试过的身份）都只写入能力说明，任务不因此变为“部分完成”；这些情况下模型拿不到日志工具，只使用日志 MCP 的 Skill（platform-logs）也不发给模型。日志令牌未授权的工具不在目录中出现，写入 `capabilities.unauthorized_log_tools`。
 - 主机本身不具备的采集能力（SSH MCP 以 `CAPABILITY_MISSING` 加退出码 69 标明，例如内核未启用 PSI、未安装 Nginx、诊断账号无 journal 权限）同样不算诊断缺口：写入 `coverage.unavailable` 与 `capabilities.host_limits`，报告“能力说明”列出“主机不支持的采集项”。超时、截断、其他退出码与没有返回的步骤仍记入 `coverage.failed`，任务为“部分完成”。
 
