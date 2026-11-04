@@ -758,6 +758,87 @@ def feishu_text(text, keep_swap=False):
     return lark_safe(text if keep_swap else without_swap_notes(text))
 
 
+# lark_md (card v1) shows **bold**, lists and links, but not "#" headings,
+# inline code, code fences or tables: their marks show as typed.
+MD_HEADING = re.compile(
+    r"^ {0,3}(?:#{1,6}(?:\s+|$)|#{2,6}(?=[^#\s]))(.*?)(?:\s+#+)?\s*$"
+)
+MD_FENCE = re.compile(r"^ {0,3}(\x60{3,}|~{3,})")
+INLINE_CODE = re.compile(r"(\x60+)(.+?)\1(?!\x60)")
+CELL_BAR = re.compile(r"(?<!\\)\|")
+
+
+def _inline(text):
+    """Inline code as plain text; a stray backtick goes too."""
+    return INLINE_CODE.sub(lambda code: code[2].strip(), text).replace("\x60", "")
+
+
+def _table_rule(line):
+    """A table's header separator ("|---|:--:|")."""
+    marks = line.replace(" ", "").replace("\t", "")
+    return "|" in marks and "-" in marks and set(marks) <= set("|-:")
+
+
+def _cells(line):
+    row = line.strip()
+    row = row[1:] if row.startswith("|") else row
+    row = row[:-1] if row.endswith("|") and not row.endswith("\\|") else row
+    return [_inline(cell.strip().replace("\\|", "|")) for cell in CELL_BAR.split(row)]
+
+
+def lark_markdown(text):
+    """Markdown lark_md cannot show, as what it can: a "#" heading becomes a
+    line of bold (bold inside it is not doubled), inline code and code fences
+    lose their backticks and keep what they hold, a table becomes one line
+    per row. Lists, **bold** and links stay as they are.
+
+    For text already through feishu_text(): the bold it adds is the
+    platform's own markup, as lark_safe() expects."""
+    lines = str(text or "").replace("\r\n", "\n").split("\n")
+    out, fence, table = [], None, False
+    for n, line in enumerate(lines):
+        mark = MD_FENCE.match(line)
+        if fence:
+            if mark and mark[1][0] == fence[0] and len(mark[1]) >= len(fence):
+                fence = None
+            else:
+                out.append(line)
+            continue
+        if mark:
+            fence, table = mark[1], False
+            continue
+        following = lines[n + 1] if n + 1 < len(lines) else ""
+        if "|" in line and not _table_rule(line) and _table_rule(following):
+            # The header row: "**列 · 列**"; its separator row is dropped.
+            names = [cell.replace("**", "") or "-" for cell in _cells(line)]
+            out.append("**" + " · ".join(names) + "**")
+            table = True
+            continue
+        if _table_rule(line):
+            continue
+        row = line.strip()
+        if (table and "|" in row) or (row.startswith("|") and row.count("|") > 1):
+            out.append("- " + " · ".join(cell or "-" for cell in _cells(line)))
+            table = True
+            continue
+        table = False
+        heading = MD_HEADING.match(line)
+        if heading:
+            title = _inline(heading[1]).replace("**", "").strip()
+            if title:
+                out.append("**" + title + "**")
+            continue
+        out.append(_inline(line))
+    return "\n".join(out)
+
+
+def chat_text(text, keep_swap=False):
+    """feishu_text() for a chat reply, which shows the answer's own layout:
+    with its headings, code and tables in a form lark_md shows. Alert cards
+    keep card_text(), one paragraph of the conclusion."""
+    return lark_markdown(feishu_text(text, keep_swap))
+
+
 def source_line(info):
     """Which data sources the conclusion rests on, and which were unavailable."""
     caps = info.get("_capabilities") or {}

@@ -29,17 +29,18 @@ def reply_text(report, answer, keep_swap=False):
 
     Ids only mean something next to the Web report's evidence list; that page,
     linked from the reply, keeps them and the citation check (as alert cards do).
-    Both parts read as feishu_text() shows model and tool text; `keep_swap`
-    when the question was about Swap.
+    Both parts read as chat_text() shows model and tool text (headings, code and
+    tables as lark_md can show them); `keep_swap` when the question was about
+    Swap.
     """
     from .mcp_runtime import readable_report_answer
-    from .worker import feishu_text
+    from .worker import chat_text
 
     return "\n\n".join(
         part
         for part in (
-            feishu_text(readable_report_answer(answer), keep_swap),
-            feishu_text(report.get("chat_scope") or "", keep_swap),
+            chat_text(readable_report_answer(answer), keep_swap),
+            chat_text(report.get("chat_scope") or "", keep_swap),
         )
         if part
     )
@@ -51,16 +52,16 @@ def unfinished_text(report, answer, keep_swap=False):
     Its answer lists the tools that ran and points to the Web report "below";
     in a chat that reads as a dead end, and the report link follows anyway.
     """
-    from .worker import QA_RETRY, feishu_text, plain_answer_parts
+    from .worker import QA_RETRY, chat_text, plain_answer_parts
 
     reason, steps = plain_answer_parts(answer, QA_RETRY)
     lines = [
-        feishu_text(reason, keep_swap) or "分析未完成，没有形成结论。",
+        chat_text(reason, keep_swap) or "分析未完成，没有形成结论。",
         "",
         "**处理建议**",
     ]
-    lines += [f"{n}. {feishu_text(step, keep_swap)}" for n, step in enumerate(steps, 1)]
-    scope = feishu_text(report.get("chat_scope") or "", keep_swap)
+    lines += [f"{n}. {chat_text(step, keep_swap)}" for n, step in enumerate(steps, 1)]
+    scope = chat_text(report.get("chat_scope") or "", keep_swap)
     return "\n".join(lines) + ("\n\n" + scope if scope else "")
 
 
@@ -177,7 +178,7 @@ async def execute(
             actor=sender_open_id or "feishu",
             **({"event": verified_event} if verified_event else {}),
         )
-        from .worker import UNFINISHED, asks_about_swap, feishu_text, report_url
+        from .worker import UNFINISHED, asks_about_swap, chat_text, report_url
         from .orchestrator import tasks
 
         task = tasks.get(usage.get("task_id")) if usage.get("task_id") else None
@@ -197,7 +198,7 @@ async def execute(
             display_result = reply_text(report, result, keep_swap)
         # Tool errors are quoted in the limitations: they read as the answer does.
         limitations = [
-            feishu_text(item, keep_swap) for item in report.get("limitations") or []
+            chat_text(item, keep_swap) for item in report.get("limitations") or []
         ]
         limitations = [item for item in limitations if item]
         if limitations:
