@@ -616,6 +616,7 @@ const CAPABILITY_STATES = {
   used: ["已使用", "success"],
   available: ["可用", ""],
   unused: ["已授权（本次未调用）", ""],
+  located: ["只做了目标定位（未取得数据）", ""],
   unavailable: ["不可用", "partial"],
   disabled: ["未启用", ""],
   unreachable: ["连接失败", "failed"],

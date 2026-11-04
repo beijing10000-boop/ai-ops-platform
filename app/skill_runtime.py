@@ -770,6 +770,8 @@ async def run(
         "unavailable": [],
     }
     used = {"zabbix_mcp": False, "ssh_mcp": False, "logs": False}
+    # Only target lookups or listings ran on that MCP (no data from it).
+    located = {"zabbix_mcp": False, "ssh_mcp": False, "logs": False}
     rounds_limit, extensions_left = limits["rounds"], limits["extension_rounds"]
 
     def check():
@@ -822,12 +824,15 @@ async def run(
         if ident is None:
             return None
         # Finding the SSH asset or the log source (or listing them) is not
-        # evidence from that source yet: the report must not claim it was used.
-        if not failed(outcome) and not (
-            (provider == "logs" and native in log_mcp.META)
-            or (provider == "ssh_mcp" and native in SSH_META)
-        ):
-            used[provider] = True
+        # evidence from that source yet: the report must not claim it was
+        # used, nor that it was never called (`located`).
+        if not failed(outcome):
+            if (provider == "logs" and native in log_mcp.META) or (
+                provider == "ssh_mcp" and native in SSH_META
+            ):
+                located[provider] = True
+            else:
+                used[provider] = True
         # Only explicit, successful Zabbix windows are reported as queried ranges.
         span = (
             (arguments.get("time_from"), arguments.get("time_till"))
@@ -1924,7 +1929,7 @@ async def run(
                     "reason": cut[provider],
                 }
             elif state.get("status") == "available":
-                state["status"] = "unused"
+                state["status"] = "located" if located[provider] else "unused"
         metadata = bridge.target_metadata if bridge else {}
         if capabilities["device_type"] == "unknown" and metadata.get("device_type"):
             capabilities["device_type"] = metadata["device_type"]
