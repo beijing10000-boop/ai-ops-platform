@@ -1,5 +1,44 @@
 # 升级说明
 
+## v1.7.1 → v1.7.2
+
+没有数据库迁移，没有新增或改名的配置项，`docker-compose.yml`、依赖、平台维护的 Skill 与控制台静态资源都没有改动。变化明细见 CHANGELOG 的 1.7.2 一节。
+
+### 1. 升级顺序
+
+只升级本平台；日志分析平台与 SSH MCP 不需要变化。
+
+### 2. 备份
+
+回滚不需要恢复备份，但升级前照常备份数据卷 `appdata`（数据库与主密钥）和 `redisdata`。先在“分析历史”确认没有“等待执行”或“执行中”的任务，备份命令与 v1.4.5 → v1.5.0 相同。
+
+### 3. 升级平台
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://服务器IP:8088/healthz
+```
+
+healthz 应返回 version 1.7.2。
+
+### 4. 行为变化
+
+- **飞书问答回复**：回复正文、平台生成的诊断范围与“诊断不足与待核验”发到飞书前，把 lark_md 显示不了的 Markdown 转成它能显示的形式：`#` 标题变成单独一行的粗体，行内代码与代码块去掉反引号和围栏、保留内容，表格每行变成一行。告警卡片与 Web 报告不变。
+
+### 5. 回滚
+
+```bash
+cd /data/ai-ops-platform
+git switch --detach f959ef2
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+```
+
+无数据库变化。
+
 ## v1.7.0 → v1.7.1
 
 没有数据库迁移，没有新增或改名的配置项，`docker-compose.yml` 与依赖都没有改动。平台维护的 Skill 中 platform-logs 更新到第 4 版（模板版本 3 → 4），在升级后第一次创建诊断任务或打开“Skill 管理”时刷新（版本号加 1；管理员停用的仍保持停用）。控制台静态资源有一处变化（报告的“证据来源与能力”面板），`?v=` 已改为 1.7.1。变化明细见 CHANGELOG 的 1.7.1 一节。
