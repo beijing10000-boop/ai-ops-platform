@@ -42,6 +42,7 @@ from .skill_context import (
 from .skill_store import applies, prefetch_plan, scope_of, skill_body, summary
 from .model_interactions import traced_response
 from .security.redact import redact, redact_data
+from .alert_history import context as alert_context
 from .integrations import log_mcp
 from .integrations.ssh_mcp import IntegrationError
 from .integrations.zabbix import infer_device
@@ -121,6 +122,31 @@ ZABBIX_CLOSED = {"disabled", "unreachable"}
 LOGS_CLOSED = {"disabled", "unreachable", "unavailable", "not_onboarded"}
 # Prefetched log tools read the alert moment ±30 minutes.
 LOG_MINUTES = 30
+# The alert trigger as prefetch reads it: what it tests and its own notes.
+TRIGGER_FIELDS = [
+    "triggerid",
+    "description",
+    "expression",
+    "recovery_expression",
+    "comments",
+    "opdata",
+    "priority",
+    "value",
+    "lastchange",
+    "state",
+    "error",
+]
+# How the trigger's own items are collected: check type, update interval,
+# enabled, master item (dependent items stop with it).
+TRIGGER_ITEM_FIELDS = ["type", "delay", "status", "master_itemid"]
+# The trigger's events over this many days (recurrence, durations).
+EVENT_DAYS = 7
+# Roots SSH MCP scans directory usage under (its validate_directory_root):
+# a disk alert on another mount gets no directory prefetch rather than a
+# refused call.
+DIRECTORY_ROOT = re.compile(
+    r"/|/(?:data|var|opt|home|root|tmp|usr)(?:/[A-Za-z0-9._-]+){0,6}"
+)
 # The target's log source is looked up by up to this many of its IPs, then by
 # its Zabbix host name (technical names: letters, digits, space, . _ -).
 LOG_IPS = 3
@@ -273,16 +299,23 @@ def catalog_maximum(entry, name):
     return None
 
 
-def fill_arguments(schema, base, *, clock, now, service=None, entry=None):
+def fill_arguments(schema, base, *, clock, now, service=None, entry=None, root=None):
     """Arguments the platform can supply for a prefetched tool, or None.
 
     Window tools get the alert moment ±15 min; `service` comes from the task;
-    any other required parameter means the tool cannot be pre-collected.
-    `entry`: the tool's SSH MCP catalog entry, for limits its schema omits.
+    a directory scan's `root` is the alert's mount point (`root`), and without
+    one it is not pre-collected (its default directory may not be the one the
+    alert is about); any other required parameter means the tool cannot be
+    pre-collected. `entry`: the tool's SSH MCP catalog entry, for limits its
+    schema omits.
     """
     props = (schema or {}).get("properties") or {}
     required = set((schema or {}).get("required") or [])
     args = dict(base)
+    if "root" in props:
+        if not root:
+            return None
+        args["root"] = root
     if "since" in props and "until" in props and clock:
         args["since"] = clock - LOG_WINDOW
         args["until"] = min(now, clock + LOG_WINDOW)
@@ -511,6 +544,23 @@ UNIT_KEY = re.compile(
 )
 
 
+FS_KEY = re.compile(r'^vfs\.fs\.[A-Za-z.]*\[\s*"?([^",\]]+)"?')
+
+
+def mount_point(keys):
+    """The Linux mount a filesystem trigger watches (vfs.fs.size[/data,pused],
+    vfs.fs.dependent.size[/,pused]) when SSH MCP may scan it, else None."""
+    mounts = {
+        match.group(1).strip()
+        for match in (FS_KEY.match(str(key or "")) for key in keys)
+        if match
+    }
+    if len(mounts) != 1:
+        return None
+    mount = mounts.pop()
+    return mount if DIRECTORY_ROOT.fullmatch(mount) else None
+
+
 def service_from_keys(keys):
     """The systemd unit an alert's trigger watches, when its item key names one."""
     for key in keys:
@@ -696,6 +746,8 @@ async def run(
     scope = scope_of(request, task["source"])
     diagnostic_type = task["diagnostic_type"]
     service = request.get("service") or None
+    # The mount point a disk alert is about, for its directory scan (prefetch).
+    directory_root = None
     opening = {
         **({} if alert_only else {"question": question}),
         "context": context,
@@ -707,6 +759,12 @@ async def run(
         "current_timestamp": now,
         "budget": limits,
     }
+    if alert_only and clock:
+        # Linked alerts and earlier analyses of the same trigger, from the
+        # platform's own records (not citable evidence).
+        history = alert_context(event, clock)
+        if history:
+            opening["alert_history"] = history
     conversation = []
     totals, telemetry = {"input": 0, "output": 0, "total": 0}, []
     cached_tokens = 0
@@ -911,6 +969,24 @@ async def run(
                 "error": "批量采集中以下步骤未成功：" + "、".join(broken),
                 "data": {**outcome["data"], "status": "partial"},
             }
+        data = outcome.get("data") if isinstance(outcome.get("data"), dict) else {}
+        if (
+            str(label) == "ssh_diagnose_directory_usage"
+            and outcome.get("status") == "partial"
+            and (data.get("timed_out") or data.get("exit_code") == 124)
+        ):
+            # du stopped at SSH MCP's 8-second cap: the subdirectories it
+            # finished are listed, the rest of the scan is a stated limit of
+            # this evidence, not a failed collection.
+            coverage.setdefault("limited", []).append(
+                {
+                    "tool": str(label),
+                    "reason": "目录扫描达到 SSH MCP 的 8 秒上限，排行只包含已扫完的子目录",
+                }
+            )
+            if str(label) not in coverage["collected"]:
+                coverage["collected"].append(str(label))
+            return
         lacking = host_limits(outcome)
         if lacking:
             # A prerequisite the host lacks: reported under 能力说明, not as
@@ -1167,7 +1243,7 @@ async def run(
         the 7-day baseline. Results go to `found` as they come, so what was
         collected stays when the time cap stops it (finish_prefetch()).
         """
-        nonlocal diagnostic_type, service
+        nonlocal diagnostic_type, service, directory_root
         room = limits["calls"] - limits["follow_up_calls"]
         trigger = str(event.get("trigger_id") or "")
         fields = [
@@ -1178,6 +1254,9 @@ async def run(
             "units",
             "lastvalue",
             "lastclock",
+            # 1 = not supported, with the error that stopped it.
+            "state",
+            "error",
         ]
         stage = []
         zabbix_tools = {}
@@ -1204,9 +1283,32 @@ async def run(
                         },
                     )
                 )
+            # The trigger's definition describes the alert, like the host
+            # record: not charged to prefetch's share, so a tight budget
+            # still keeps its alert-window history.
+            definition = []
+            if trigger.isdigit() and "trigger_get" in zabbix_tools:
+                # What the trigger tests (nodata(), max(), a count of failed
+                # checks...) and its own notes: the model no longer guesses
+                # from the title what "超过10分钟" or "for 5m" measures.
+                definition.append(
+                    (
+                        "zabbix_mcp",
+                        "trigger_get",
+                        {
+                            "triggerids": [trigger],
+                            "output": TRIGGER_FIELDS,
+                            "expandExpression": True,
+                            "expandDescription": True,
+                            "expandComment": True,
+                        },
+                    )
+                )
             if trigger.isdigit() and "item_get" in zabbix_tools:
                 # The items behind the alert's own trigger, whatever the template
-                # or device type; Skill key lists only add to them.
+                # or device type; Skill key lists only add to them. With how
+                # they are collected (type, interval, state and the error that
+                # stopped them) and what their raw values mean (value map).
                 jobs.append(
                     (
                         "zabbix_mcp",
@@ -1214,13 +1316,15 @@ async def run(
                         {
                             "hostids": [target[1]],
                             "triggerids": [trigger],
-                            "output": fields,
+                            "output": fields + TRIGGER_ITEM_FIELDS,
+                            "selectValueMap": ["name", "mappings"],
                             "limit": 20,
                         },
                     )
                 )
             if trigger.isdigit() and "event_get" in zabbix_tools:
-                # Whether this trigger has been flapping over the last day.
+                # How often this trigger fired over the last week, how long
+                # each lasted and whether it recovered by itself (recurrence).
                 jobs.append(
                     (
                         "zabbix_mcp",
@@ -1230,19 +1334,28 @@ async def run(
                             "objectids": [trigger],
                             "source": 0,
                             "object": 0,
-                            "time_from": now - 86400,
+                            "time_from": now - EVENT_DAYS * 86400,
                             "time_till": now,
-                            "output": ["eventid", "clock", "value", "name"],
+                            "output": [
+                                "eventid",
+                                "clock",
+                                "value",
+                                "name",
+                                "r_eventid",
+                            ],
                             "sortfield": "clock",
                             "sortorder": "DESC",
-                            "limit": 50,
+                            "limit": 100,
                         },
                     )
                 )
-            coverage["planned"].extend(job[1] for job in jobs)
+            coverage["planned"].extend(job[1] for job in definition + jobs)
             if zabbix_tools:
                 capabilities["zabbix_mcp"] = {"status": "available"}
-            stage = await collect(jobs, room)
+            described, stage = await asyncio.gather(
+                collect(definition, room, charged=True), collect(jobs, room)
+            )
+            stage = described + stage
             # Device type from the verified host record, never from alert text.
             for native, _, outcome in stage:
                 if native == "host_get" and not failed(outcome):
@@ -1265,6 +1378,8 @@ async def run(
                 )
                 diagnostic_type = corrected
             service = service or service_from_keys(trigger_keys)
+            if diagnostic_type == "disk":
+                directory_root = mount_point(trigger_keys)
         elif "zabbix_mcp" in providers and target and target[0] == "ip":
             capabilities["zabbix_mcp"] = {
                 "status": "available",
@@ -1685,7 +1800,9 @@ async def run(
             )
         if prefetched:
             found["prefetched"] = prefetched
-        signals = derive_signals(collected, clock, diagnostic_type)
+        signals = derive_signals(
+            collected, clock, diagnostic_type, event_id=event.get("event_id")
+        )
         if signals:
             found["signals"] = signals
             # A signal's derived numbers (ratios, per-core load) become citable
@@ -1842,10 +1959,16 @@ async def run(
             now=now,
             service=service,
             entry=bridge.ssh_entry(tool),
+            root=directory_root,
         )
         if args is None:
             coverage["skipped"].append(
-                {"tool": tool, "reason": "需要平台无法推导的参数（如服务名）"}
+                {
+                    "tool": tool,
+                    "reason": "告警的挂载点不在 SSH MCP 可扫描的目录范围内"
+                    if "root" in ((schema or {}).get("properties") or {})
+                    else "需要平台无法推导的参数（如服务名）",
+                }
             )
             return
         if first:

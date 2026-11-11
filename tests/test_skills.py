@@ -1938,14 +1938,25 @@ def test_alert_prefetch_collects_alert_window_history_and_weekly_trend(monkeypat
         "trend_get",
     ]
     queries = [(name, args["extra_params"]) for name, args in log]
-    # The trigger anchors the first stage: its items and its last day of events.
+    # The trigger anchors the first stage: its items (with how they are
+    # collected and their value map) and its last week of events.
     [by_trigger] = [
         q for name, q in queries if name == "item_get" and "triggerids" in q
     ]
     assert by_trigger["triggerids"] == ["81883"] and by_trigger["hostids"] == ["10913"]
+    [output] = [
+        args["output"]
+        for name, args in log
+        if name == "item_get" and "triggerids" in args["extra_params"]
+    ]
+    output = output.split(",") if isinstance(output, str) else output
+    assert {"delay", "state", "error", "type"} <= set(output)
+    assert by_trigger["selectValueMap"] == ["name", "mappings"]
     [events] = [q for name, q in queries if name == "event_get"]
-    assert events["objectids"] == ["81883"] and events["limit"] == 50
-    assert events["time_till"] - events["time_from"] == 86400
+    assert events["objectids"] == ["81883"] and events["limit"] == 100
+    assert events["time_till"] - events["time_from"] == 7 * 86400
+    [event_output] = [args["output"] for name, args in log if name == "event_get"]
+    assert "r_eventid" in event_output
     # Alert time anchors the window, so a manual analysis hours later still
     # looks at the alert, not at "now".
     clock = int(

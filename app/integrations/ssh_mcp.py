@@ -191,6 +191,14 @@ async def configured(read_setting, *, timeout=None):
         yield adapter
 
 
+# The MCP services run uvicorn, which closes an idle keep-alive connection
+# after 5 seconds; httpx keeps idle ones for 5 seconds too. A tool call sent
+# just as the server closes the connection it reuses fails with ReadError,
+# and the broken session ended a whole analysis (a model round of ~5 s between
+# two calls). Idle connections are dropped well before the server's limit.
+KEEPALIVE_SECONDS = 2.0
+
+
 def client_factory(headers=None, timeout=None, auth=None):
     return httpx.AsyncClient(
         headers=headers,
@@ -198,4 +206,9 @@ def client_factory(headers=None, timeout=None, auth=None):
         auth=auth,
         follow_redirects=False,
         trust_env=False,
+        limits=httpx.Limits(
+            max_connections=100,
+            max_keepalive_connections=20,
+            keepalive_expiry=KEEPALIVE_SECONDS,
+        ),
     )

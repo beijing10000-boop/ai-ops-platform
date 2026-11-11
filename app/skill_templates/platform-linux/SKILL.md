@@ -17,7 +17,7 @@ prefetch:
   schemas: [history_get, trend_get]
 - scopes: [alert]
   types: [disk]
-  ssh: [ssh_diagnose_disk, ssh_diagnose_mounts]
+  ssh: [ssh_diagnose_disk, ssh_diagnose_mounts, ssh_diagnose_directory_usage]
   zabbix_items: [vfs.fs]
   history: ["vfs.fs.*size[*,pused]", "vfs.fs.*inode[*,pfree]"]
   schemas: [history_get, trend_get]
@@ -35,7 +35,7 @@ prefetch:
   schemas: [history_get, trend_get]
 - scopes: [alert]
   types: [system, unreachable]
-  ssh: [ssh_diagnose_system, ssh_diagnose_failed_services]
+  ssh: [ssh_diagnose_system, ssh_diagnose_failed_services, ssh_diagnose_service_map]
   schemas: [history_get, event_get]
 - scopes: [qa, web]
   types: [cpu, bottleneck]
@@ -74,7 +74,8 @@ prefetch:
 
 ## 磁盘容量与 I/O
 
-- 容量看 pused 与 inode，结合 7 天趋势估算增长速度；目录占用按 platform-base 的 references/directory-analysis.md 逐层展开（`read_skill_resource` 的 name 填 platform-base），`ssh_diagnose_directory_usage` 每次只扫描下一层。
+- 容量看 pused 与 inode，结合 7 天趋势估算增长速度（按 GiB/天 换算还能撑几天）。
+- 目录占用：告警挂载点在 SSH MCP 可扫描范围内（/、/data、/var、/opt、/home、/root、/tmp、/usr 及其子目录）时，预采集已有该挂载点下一层的目录排行（`ssh_diagnose_directory_usage`，`-x` 只统计同一文件系统）；达到 8 秒上限时只含已扫完的子目录（`coverage.limited`）。结论写出占用最大的目录及大小；需要再深入时对排行里最大的 1–2 个子目录各调用一次同一工具（`root` 填该目录），按 platform-base 的 references/directory-analysis.md（`read_skill_resource` 的 name 填 platform-base）展开。建议具体到目录（如“/data/jumpserver/core 2232.86 GiB：核对录像保留期”），不要只写“用 du 逐层排查”。
 - 只读挂载（`ssh_diagnose_mounts`）、文件系统错误要用 `ssh_diagnose_syslog` 查 I/O error / EXT4-fs / XFS 记录确认。
 - I/O 告警看设备 util、await、`cpu_iowait_percent`、PSI io 与 D 状态进程；iostat 缺失时 diskstats 只是累计计数，不能换算速率。
 
@@ -85,7 +86,8 @@ prefetch:
 
 ## 系统与不可达
 
-- 不可达 / agent 不可用：预采集已有可用性监控项历史（何时由 1 变 0）、近 24 小时事件和该主机全部监控项的最近采集时间，`signals` 的 `collection_freshness` 已算好仍在更新的监控项数。全部停止更新按整机不可达或采集链路中断处理，部分仍在更新更可能是 agent 服务本身；SSH 仍能连通时用 `ssh_diagnose_system`（uptime 判断是否重启）与 `ssh_diagnose_service_detail`（zabbix-agent 单元）确认。没有 ICMP 监控项时写明无法区分整机宕机与 agent 停止。
+- 不可达 / agent 不可用：预采集已有可用性监控项历史（何时变为不可用、何时恢复）、近 7 天事件和该主机全部监控项的最近采集时间，`signals` 的 `collection_freshness` 已算好仍在更新的监控项数。`zabbix[host,agent,available]` 的取值是 0 不可用、1 可用、2 未知（以 `value_meanings` 为准，2 不是“可用”）。全部停止更新按整机不可达或采集链路中断处理，部分仍在更新更可能是 agent 服务本身；没有 ICMP 监控项时写明无法区分整机宕机与 agent 停止。
+- SSH 仍能连通时：`ssh_diagnose_system` 看 uptime 判断是否重启；agent 的 systemd 单元先看预采集的 `ssh_diagnose_service_map` 里监听 10050 端口的单元——Zabbix Agent 2 是 `zabbix-agent2.service`，经典 agent 是 `zabbix-agent.service`，不要猜 `zabbix_agentd`——再对该单元调 `ssh_diagnose_service_detail`（`minutes` 不超过 120）看告警时段的停止、启动与退出码。agent 进程在运行、端口在监听而 Zabbix 仍判定不可用时，问题在 Zabbix server / proxy 到该主机 10050 的连通或超时（防火墙、agent 配置的 Server 地址），建议写到这一层。
 - 重启类告警以 uptime、`ssh_diagnose_syslog` 的 boot 信息与内核日志判断是计划重启、崩溃还是断电。
 
-<!-- platform-template-version: 1 -->
+<!-- platform-template-version: 2 -->

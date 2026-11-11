@@ -155,6 +155,58 @@ def bounds(spec):
     return None, None
 
 
+def _types(spec):
+    """The JSON types a schema property accepts (its anyOf branches too)."""
+    found = set()
+    for part in (spec, *(spec.get("anyOf") or []), *(spec.get("oneOf") or [])):
+        if not isinstance(part, dict):
+            continue
+        kind = part.get("type")
+        found.update(kind if isinstance(kind, list) else [kind] if kind else [])
+    return found
+
+
+def fit_arguments(args, schema, ceilings=None):
+    """The model's arguments in the shapes the tool's schema asks for, and a
+    note per change, so a call that only had the wrong shape still runs
+    instead of costing a round: a Unix time given as a number where the
+    service takes text (the log tools' `around`), digits given as text where
+    it takes an integer, an integer outside the schema's (or the SSH
+    catalog's, `ceilings`) bounds moved to the nearest bound. Anything else
+    is left for the schema check to refuse."""
+    props = (schema or {}).get("properties") or {}
+    fitted, notes = dict(args), []
+    for key, value in args.items():
+        spec = props.get(key)
+        if not isinstance(spec, dict):
+            continue
+        kinds = _types(spec)
+        if kinds and "string" in kinds and not kinds & {"integer", "number"}:
+            if type(value) in (int, float):
+                fitted[key] = (
+                    str(int(value)) if float(value).is_integer() else str(value)
+                )
+                notes.append(f"{key} 按工具要求改为文本")
+            continue
+        if "integer" in kinds:
+            if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+                value = fitted[key] = int(value.strip())
+                notes.append(f"{key} 按工具要求改为整数")
+            if type(value) is not int:
+                continue
+            low, high = bounds(spec)
+            ceiling = (ceilings or {}).get(key)
+            if high is None and isinstance(ceiling, int):
+                high = ceiling
+            if isinstance(high, (int, float)) and value > high:
+                fitted[key] = int(high)
+                notes.append(f"{key} 超过上限 {int(high)}，已按上限查询")
+            elif isinstance(low, (int, float)) and value < low:
+                fitted[key] = int(low)
+                notes.append(f"{key} 低于下限 {int(low)}，已按下限查询")
+    return fitted, notes
+
+
 def validated(name, args, schema):
     """The remote schema's verdict on the model's arguments."""
     try:
@@ -572,6 +624,20 @@ class SkillMCP:
             raise RequestRejected("工具参数无效")
         args = dict(arguments)
         session, tool = self.sessions[provider], tools[name]
+        # Calls of one round run concurrently: the notes are this call's own.
+        adjusted = []
+        result = await self._call(
+            provider, name, args, session, tool, rows, answer_by, adjusted
+        )
+        if adjusted and isinstance(result, dict):
+            # What the call actually asked for, when it differs from the
+            # model's arguments (a shorter window, a value at its bound).
+            result = {**result, "adjusted": adjusted}
+        return result
+
+    async def _call(
+        self, provider, name, args, session, tool, rows, answer_by, adjusted
+    ):
         async with asyncio.timeout(max(0.1, self.deadline - time.monotonic())):
             if provider == "zabbix_mcp":
                 if name in {"history_get", "trend_get"} and (
@@ -579,6 +645,9 @@ class SkillMCP:
                     or any(str(x) not in self.item_scope for x in args["itemids"])
                 ):
                     raise RequestRejected("历史查询须先通过 item_get 核验监控项 ID")
+                args, note = zabbix.fit_window(name, args)
+                if note:
+                    adjusted.append(note)
                 response = await zabbix.call(
                     session,
                     name,
@@ -604,6 +673,8 @@ class SkillMCP:
                 # host); the log platform applies the token's tools and groups.
                 if set(args) - set(tool.inputSchema.get("properties", {})):
                     raise RequestRejected("日志工具参数不在实际 Schema 中")
+                args, notes = fit_arguments(args, tool.inputSchema)
+                adjusted.extend(notes)
                 validated(name, args, tool.inputSchema)
                 response = await asyncio.wait_for(
                     session.call_tool(name, args), timeout=log_mcp.TIMEOUT
@@ -639,7 +710,21 @@ class SkillMCP:
                 }
             properties = tool.inputSchema.get("properties", {})
             if set(args) - set(properties):
-                raise RequestRejected("SSH 工具参数不在实际 Schema 中")
+                raise RequestRejected(
+                    "SSH 工具参数不在实际 Schema 中（可用参数："
+                    + "、".join(sorted(properties))
+                    + "）"
+                )
+            # Classic SSH tools' schemas omit their limits; the catalog has them.
+            ceilings = {
+                param["name"]: param["maximum"]
+                for param in (self.ssh_entry(name) or {}).get("params") or []
+                if isinstance(param, dict)
+                and isinstance(param.get("name"), str)
+                and isinstance(param.get("maximum"), int)
+            }
+            args, notes = fit_arguments(args, tool.inputSchema, ceilings)
+            adjusted.extend(notes)
             timeout = min(120, int(self.read_setting("ssh_mcp_timeout_seconds") or 90))
             budget = properties.get("timeout_seconds")
             asked = args.get("timeout_seconds")

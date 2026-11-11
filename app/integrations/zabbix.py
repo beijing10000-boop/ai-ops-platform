@@ -26,6 +26,10 @@ READ_TOOLS = frozenset(
         "trend_get",
     }
 )
+# Diagnostic fields only: an item's or interface's collection state and error
+# (why a check stopped: timeout, unsupported, refused), its update interval and
+# check type, a trigger's expression and comments. Never credentials (SNMP
+# community, passwords, keys, PSK) nor macros.
 FIELDS = {
     "host_get": ["hostid", "host", "name", "status"],
     "hostgroup_get": ["groupid", "name"],
@@ -33,11 +37,15 @@ FIELDS = {
         "interfaceid",
         "hostid",
         "type",
+        "main",
         "ip",
         "dns",
         "useip",
         "port",
         "available",
+        "error",
+        "errors_from",
+        "disable_until",
     ],
     "event_get": [
         "eventid",
@@ -47,9 +55,34 @@ FIELDS = {
         "severity",
         "name",
         "r_eventid",
+        "acknowledged",
+        "suppressed",
+        "opdata",
     ],
-    "problem_get": ["eventid", "objectid", "clock", "severity", "name", "r_eventid"],
-    "trigger_get": ["triggerid", "description", "priority", "value", "lastchange"],
+    "problem_get": [
+        "eventid",
+        "objectid",
+        "clock",
+        "severity",
+        "name",
+        "r_eventid",
+        "acknowledged",
+        "suppressed",
+        "opdata",
+    ],
+    "trigger_get": [
+        "triggerid",
+        "description",
+        "expression",
+        "recovery_expression",
+        "comments",
+        "opdata",
+        "priority",
+        "value",
+        "lastchange",
+        "state",
+        "error",
+    ],
     "item_get": [
         "itemid",
         "hostid",
@@ -59,6 +92,12 @@ FIELDS = {
         "lastclock",
         "value_type",
         "units",
+        "type",
+        "delay",
+        "status",
+        "state",
+        "error",
+        "master_itemid",
     ],
     "history_get": ["itemid", "clock", "value", "ns"],
     "trend_get": ["itemid", "clock", "num", "value_min", "value_avg", "value_max"],
@@ -98,8 +137,16 @@ PARAMS = {
         "severities",
     },
     "problem_get": {"eventids", "hostids", "objectids", "recent", "severities"},
-    "trigger_get": {"triggerids", "hostids", "selectHosts", "selectItems"},
-    "item_get": {"itemids", "hostids", "triggerids", "value_type"},
+    "trigger_get": {
+        "triggerids",
+        "hostids",
+        "selectHosts",
+        "selectItems",
+        "expandExpression",
+        "expandDescription",
+        "expandComment",
+    },
+    "item_get": {"itemids", "hostids", "triggerids", "value_type", "selectValueMap"},
     "history_get": {"itemids", "hostids", "history", "time_from", "time_till"},
     "trend_get": {"itemids", "time_from", "time_till"},
 }
@@ -116,9 +163,39 @@ SORT_FIELDS = {
 # Zabbix trend.get takes no sort parameters; initMAX rejects them instead of ignoring.
 UNSORTED = frozenset({"trend_get"})
 HISTORY_WINDOW, TREND_WINDOW = 86400, 31 * 86400
+# What a call that names no output fields gets: an item's state and error
+# (why it stopped) but not its interval, type or master item, which only a
+# collection question needs and which would crowd a long item listing.
+DEFAULT_OUTPUT = {
+    **FIELDS,
+    "item_get": [
+        "itemid",
+        "hostid",
+        "name",
+        "key_",
+        "lastvalue",
+        "lastclock",
+        "value_type",
+        "units",
+        "state",
+        "error",
+    ],
+}
 
 SELECTS = {
-    "selectInterfaces": ["interfaceid", "type", "ip", "dns", "main", "useip", "port"],
+    "selectInterfaces": [
+        "interfaceid",
+        "type",
+        "ip",
+        "dns",
+        "main",
+        "useip",
+        "port",
+        "available",
+        "error",
+    ],
+    # What an item's raw values mean (0 Down / 1 Up, 6 Stopped, 2 Unknown).
+    "selectValueMap": ["valuemapid", "name", "mappings"],
     "selectHostGroups": ["groupid", "name"],
     "selectInventory": ["os", "type"],
     "selectTags": ["tag", "value"],
@@ -128,9 +205,58 @@ SELECTS = {
 }
 
 
+# Properties each *.get may filter or search on: Zabbix rejects another
+# object's property ("item.get filter: 'host' is not a item property"), which
+# cost the model a round; the host is scoped by hostids instead.
+SEARCH_FIELDS = {
+    "host_get": {"host", "name", "status"},
+    "hostgroup_get": {"name"},
+    "hostinterface_get": {"ip", "dns", "type", "main", "useip", "available"},
+    "item_get": {"name", "key_", "status", "state", "type", "value_type"},
+    "trigger_get": {"description", "priority", "value", "status", "state"},
+    "event_get": {"name", "value", "severity", "acknowledged"},
+    "problem_get": {"name", "severity", "acknowledged"},
+}
+FLAGS = {
+    "searchByAny",
+    "searchWildcardsEnabled",
+    "countOutput",
+    "recent",
+    "expandExpression",
+    "expandDescription",
+    "expandComment",
+}
+
+
 def search_fields(name):
-    fields = {"name", "host", "key_", "status", "value_type", "value"}
-    return fields | {"ip"} if name == "hostinterface_get" else fields
+    return SEARCH_FIELDS.get(name, {"name", "key_", "status", "value_type", "value"})
+
+
+def fit_window(name, arguments):
+    """History and trend windows the model asks for, made answerable: bounds
+    given in reverse are swapped, a window over the tool's span keeps its end
+    and starts span seconds before it. Returns (arguments, note or None); the
+    note tells the model which window it actually got."""
+    if name not in {"history_get", "trend_get"} or not isinstance(arguments, dict):
+        return arguments, None
+    start, end = arguments.get("time_from"), arguments.get("time_till")
+    if type(start) is not int or type(end) is not int:
+        return arguments, None
+    span = TREND_WINDOW if name == "trend_get" else HISTORY_WINDOW
+    notes = []
+    if start > end:
+        start, end = end, start
+        notes.append("time_from 晚于 time_till，已对调")
+    if end - start > span:
+        start = end - span
+        notes.append(
+            f"{name} 单次最多查询 {span // 86400} 天，已改为 time_till 之前的 "
+            f"{span // 86400} 天"
+            + ("；更长时间请用 trend_get（小时聚合）" if name == "history_get" else "")
+        )
+    if not notes:
+        return arguments, None
+    return {**arguments, "time_from": start, "time_till": end}, "；".join(notes)
 
 
 def input_schema(name):
@@ -174,7 +300,7 @@ def input_schema(name):
                     "items": {"type": "string", "maxLength": 80},
                 },
             }
-        elif key in {"searchByAny", "searchWildcardsEnabled", "countOutput", "recent"}:
+        elif key in FLAGS:
             value = {"type": "boolean"}
         elif key == "sortorder":
             value = {"type": "string", "enum": ["ASC", "DESC"]}
@@ -273,7 +399,7 @@ def validate_args(name, arguments, *, host_id=None, rows=None):
         not isinstance(output, list) or any(f not in FIELDS[name] for f in output)
     ):
         raise ValueError("output fields not authorized")
-    args["output"] = FIELDS[name] if output in (None, "extend") else output
+    args["output"] = DEFAULT_OUTPUT[name] if output in (None, "extend") else output
     for key in set(args) & set(SELECTS):
         if args[key] == "extend":
             args[key] = SELECTS[key]
@@ -281,6 +407,9 @@ def validate_args(name, arguments, *, host_id=None, rows=None):
             x not in SELECTS[key] for x in args[key]
         ):
             raise ValueError("select fields not authorized")
+    for key in FLAGS & set(args):
+        if not isinstance(args[key], bool):
+            raise ValueError(f"{key} 须为 true 或 false")
     for key, val in list(args.items()):
         if key.endswith("ids"):
             if (
