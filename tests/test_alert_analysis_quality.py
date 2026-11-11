@@ -425,6 +425,9 @@ def test_alert_history_lists_linked_alerts_and_earlier_conclusions(isolated):
     assert earlier["cause"] == "SNMP 报文被 CPCAR 限速丢弃，walk 超时。"
     assert earlier["actions"] == ["1. 调大采集间隔", "2. 提高 CPCAR"]
     assert "不能用证据编号引用" in found["notice"]
+    # Analysed as of a moment before that analysis concluded: not listed.
+    earlier_view = alert_history.context(current, now - 10 * 3600) or {}
+    assert "previous_analyses" not in earlier_view
 
 
 def test_a_resource_alert_lists_only_the_same_trigger_elsewhere(isolated):

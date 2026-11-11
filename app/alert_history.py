@@ -167,10 +167,20 @@ def context(event, clock):
                     "JOIN alert_events a ON a.event_id=t.event_id AND a.event_value='1' "
                     "WHERE t.kind='analysis' AND t.status IN ('success','partial') "
                     "AND t.event_id != ? AND t.completed_at >= datetime(?,'unixepoch') "
+                    # Concluded before this alert: an alert analysed later
+                    # (a click hours afterwards) is not told what came after.
+                    "AND t.completed_at <= datetime(?,'unixepoch') "
                     "AND json_extract(a.event_json,'$.host_id')=? "
                     "AND json_extract(a.event_json,'$.trigger_id')=? "
                     "ORDER BY t.completed_at DESC LIMIT ?",
-                    (event_id, clock - PREVIOUS_DAYS * 86400, host, trigger, PREVIOUS),
+                    (
+                        event_id,
+                        clock - PREVIOUS_DAYS * 86400,
+                        clock,
+                        host,
+                        trigger,
+                        PREVIOUS,
+                    ),
                 ).fetchall()
             else:
                 earlier = []
