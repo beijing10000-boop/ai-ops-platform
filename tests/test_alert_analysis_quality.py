@@ -130,6 +130,29 @@ def test_arguments_fit_the_remote_schema():
     assert skill_mcp.fit_arguments({"limit": 5}, schema) == ({"limit": 5}, [])
 
 
+def test_ssh_parameter_aliases_are_renamed_to_the_schema_names():
+    """Seen live: service_detail called with `unit`, directory usage with
+    `path`; each was refused and cost a round."""
+    detail = {"properties": {"host_id": {}, "service": {}, "minutes": {}}}
+    fitted, notes = skill_mcp.renamed_arguments(
+        {"host_id": 3, "unit": "zabbix-agent2.service"}, detail
+    )
+    assert fitted == {"host_id": 3, "service": "zabbix-agent2.service"} and notes
+    directory = {"properties": {"host_id": {}, "root": {}}}
+    assert skill_mcp.renamed_arguments({"path": "/data"}, directory)[0] == {
+        "root": "/data"
+    }
+    # A tool that really takes `path`, or a call already naming `service`,
+    # is left as it is.
+    taking_path = {"properties": {"path": {}, "root": {}}}
+    assert skill_mcp.renamed_arguments({"path": "/x"}, taking_path) == (
+        {"path": "/x"},
+        [],
+    )
+    both = {"unit": "a", "service": "b"}
+    assert skill_mcp.renamed_arguments(both, detail) == (both, [])
+
+
 # --- Value maps, recurrence, event age, device events ----------------------------
 
 

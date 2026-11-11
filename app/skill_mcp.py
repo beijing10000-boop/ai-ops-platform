@@ -166,6 +166,29 @@ def _types(spec):
     return found
 
 
+# Names models give an SSH tool's parameters, and the parameter meant: a
+# systemd `unit` is the tool's `service`, a directory `path` its `root`.
+# Renamed only when the tool takes the real name and not the given one.
+ALIASES = {"unit": "service", "path": "root"}
+
+
+def renamed_arguments(args, schema):
+    """`args` with known parameter aliases renamed to the schema's names, and
+    a note per rename."""
+    props = (schema or {}).get("properties") or {}
+    fitted, notes = dict(args), []
+    for alias, name in ALIASES.items():
+        if (
+            alias in fitted
+            and alias not in props
+            and name in props
+            and name not in fitted
+        ):
+            fitted[name] = fitted.pop(alias)
+            notes.append(f"参数 {alias} 按工具要求改为 {name}")
+    return fitted, notes
+
+
 def fit_arguments(args, schema, ceilings=None):
     """The model's arguments in the shapes the tool's schema asks for, and a
     note per change, so a call that only had the wrong shape still runs
@@ -709,6 +732,8 @@ class SkillMCP:
                     "device_type": "linux",
                 }
             properties = tool.inputSchema.get("properties", {})
+            args, notes = renamed_arguments(args, tool.inputSchema)
+            adjusted.extend(notes)
             if set(args) - set(properties):
                 raise RequestRejected(
                     "SSH 工具参数不在实际 Schema 中（可用参数："
