@@ -92,6 +92,25 @@ def test_history_window_is_fitted_not_refused():
     )
     assert (fitted["time_from"], fitted["time_till"]) == (end - 600, end)
     assert "对调" in note
+    # Seen live: history.get with search on key_ and trend.get with
+    # searchByAny, both refused by Zabbix. Dropped, the read runs by item id.
+    fitted, note = zabbix.fit_window(
+        "history_get",
+        {
+            "itemids": ["1"],
+            "search": {"key_": "icmpping"},
+            "filter": {"key_": ["icmpping"]},
+            "time_from": end - 600,
+            "time_till": end,
+        },
+    )
+    assert "search" not in fitted and "filter" not in fitted and "已忽略" in note
+    fitted, _ = zabbix.fit_window("trend_get", {"itemids": ["1"], "searchByAny": False})
+    assert fitted == {"itemids": ["1"]}
+    for name in ("history_get", "trend_get"):
+        assert not {"filter", "search", "searchByAny"} & set(
+            zabbix.input_schema(name)["properties"]
+        )
     same = {"itemids": ["1"], "time_from": end - 600, "time_till": end}
     assert zabbix.fit_window("history_get", same) == (same, None)
     assert zabbix.fit_window("trend_get", same) == (same, None)

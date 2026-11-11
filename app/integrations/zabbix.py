@@ -232,18 +232,33 @@ def search_fields(name):
     return SEARCH_FIELDS.get(name, {"name", "key_", "status", "value_type", "value"})
 
 
+# history.get and trend.get read by item id: Zabbix refuses search on key_
+# ("unexpected parameter"), a filter on anything but clock/itemid/ns/value,
+# and searchByAny on trend.get. Not offered, and dropped when the model sends
+# them (the item ids still say what to read).
+BY_ITEM = {"history_get", "trend_get"}
+NOT_BY_ITEM = {"filter", "search", "searchByAny", "searchWildcardsEnabled"}
+
+
 def fit_window(name, arguments):
-    """History and trend windows the model asks for, made answerable: bounds
-    given in reverse are swapped, a window over the tool's span keeps its end
-    and starts span seconds before it. Returns (arguments, note or None); the
-    note tells the model which window it actually got."""
-    if name not in {"history_get", "trend_get"} or not isinstance(arguments, dict):
+    """History and trend queries the model asks for, made answerable: keys
+    these reads do not take are dropped, bounds given in reverse are swapped,
+    a window over the tool's span keeps its end and starts span seconds
+    before it. Returns (arguments, note or None); the note tells the model
+    what it actually got."""
+    if name not in BY_ITEM or not isinstance(arguments, dict):
         return arguments, None
+    notes = []
+    dropped = sorted(NOT_BY_ITEM & set(arguments))
+    if dropped:
+        arguments = {k: v for k, v in arguments.items() if k not in NOT_BY_ITEM}
+        notes.append(
+            f"{name} 只按 itemids 读取，不支持 " + "、".join(dropped) + "，已忽略"
+        )
     start, end = arguments.get("time_from"), arguments.get("time_till")
     if type(start) is not int or type(end) is not int:
-        return arguments, None
+        return arguments, "；".join(notes) or None
     span = TREND_WINDOW if name == "trend_get" else HISTORY_WINDOW
-    notes = []
     if start > end:
         start, end = end, start
         notes.append("time_from 晚于 time_till，已对调")
@@ -262,8 +277,10 @@ def fit_window(name, arguments):
 def input_schema(name):
     """Curated schemas describe only arguments accepted by our local policy."""
     properties = {}
-    for key in (COMMON | PARAMS[name]) - (
-        {"sortfield", "sortorder"} if name in UNSORTED else set()
+    for key in (
+        (COMMON | PARAMS[name])
+        - ({"sortfield", "sortorder"} if name in UNSORTED else set())
+        - (NOT_BY_ITEM if name in BY_ITEM else set())
     ):
         if key.endswith("ids"):
             value = {
