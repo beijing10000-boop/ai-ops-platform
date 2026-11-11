@@ -68,8 +68,8 @@ def test_default_item_output_includes_state_and_error_only():
 
 def test_search_fields_follow_the_object():
     with pytest.raises(ValueError, match="invalid search fields"):
-        zabbix.validate_args("item_get", {"filter": {"host": "SZ-AC-M"}})
-    zabbix.validate_args("host_get", {"filter": {"host": "SZ-AC-M"}})
+        zabbix.validate_args("item_get", {"filter": {"host": "ac-01"}})
+    zabbix.validate_args("host_get", {"filter": {"host": "ac-01"}})
     zabbix.validate_args("trigger_get", {"search": {"description": "nodata"}})
     schema = zabbix.input_schema("item_get")
     assert "host" not in schema["properties"]["filter"]["propertyNames"]["enum"]
@@ -368,7 +368,7 @@ def alert(
     host="11187",
     trigger="81743",
     name="AP 指标 SNMP 采集中断",
-    host_name="SZ-AC-M",
+    host_name="ac-01",
 ):
     return {
         "event_id": event_id,
@@ -385,9 +385,9 @@ def test_alert_history_lists_linked_alerts_and_earlier_conclusions(isolated):
     now = int(time.time())
     current = alert("900")
     store(current, 0)
-    store(alert("901", host="11186", host_name="SZ-AC-B"), 3)  # another AC, same moment
+    store(alert("901", host="11186", host_name="ac-02"), 3)  # another AC, same moment
     store(
-        alert("902", host="11186", host_name="SZ-AC-B"), 3, value="0"
+        alert("902", host="11186", host_name="ac-02"), 3, value="0"
     )  # its recovery row
     store(alert("903", host="20000", host_name="far-away"), 120)  # outside ±15 min
     store(
@@ -419,7 +419,7 @@ def test_alert_history_lists_linked_alerts_and_earlier_conclusions(isolated):
             ),
         )
     found = alert_history.context(current, now)
-    assert [row["host"] for row in found["related_alerts"]] == ["SZ-AC-B"]
+    assert [row["host"] for row in found["related_alerts"]] == ["ac-02"]
     assert found["same_host_24h"][0]["alert"] == "Interface Gi0/0/1 down"
     earlier = found["previous_analyses"][0]
     assert earlier["cause"] == "SNMP 报文被 CPCAR 限速丢弃，walk 超时。"
