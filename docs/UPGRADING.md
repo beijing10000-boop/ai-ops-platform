@@ -42,7 +42,7 @@ git switch --detach 20abd96
 docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
 ```
 
-无数据库结构变化，但数据库里的托管 Skill v2 会留着，而 **v1.7.2 不接受 platform-linux v2 的预采集 `ssh_diagnose_directory_usage`**：不处理的话，回滚后告警分析会因 Skill 校验失败而无法开始。回滚后立即在 web 容器删除这三条托管 Skill，让 v1.7.2 重新安装 v1（这三条的启用状态、适用场景与优先级会恢复默认）：
+无数据库结构变化。数据库里的托管 Skill v2 会留着：v1.7.2 不接受 platform-linux v2 的预采集 `ssh_diagnose_directory_usage`，会保留那条记录、改用自己带的 v1（日志 `PLATFORM_SKILL_NEWER_UNREADABLE`），告警分析照常进行；platform-base 与 platform-network 的 v2 它能读，会继续使用（文中提到的平台记录与新信号 v1.7.2 不提供，不影响运行）。想让三条都回到 v1 文本时，在 web 容器删除这三条托管 Skill，让 v1.7.2 重新安装（这三条的启用状态、适用场景与优先级会恢复默认）：
 
 ```bash
 docker compose exec -T web python - <<'EOF'
