@@ -2,7 +2,9 @@
 
 ## 未发布
 
-告警 AI 分析的取证与建议质量（按 2026-11 对 80 条真实告警的分析结果逐条复核后改进）。无数据库迁移；平台维护的 Skill platform-base、platform-linux、platform-network 升到 v2。
+## 1.8.0 — 2026-11-11
+
+告警 AI 分析的取证与建议质量（按 2026-11 对真实告警的分析结果逐条复核后改进）。无数据库迁移；平台维护的 Skill platform-base、platform-linux、platform-network 升到 v2。建议先升级 SSH MCP v0.10.3 与日志分析平台 v0.15.0，步骤与回滚（回滚前须删除三条托管 Skill 的 v2）见[升级说明](docs/UPGRADING.md)。
 
 - **告警本身的定义与采集状态**：预采集新增告警触发器的定义（`trigger_get`：展开后的表达式、恢复表达式、说明与操作数据），触发器监控项新增类型、采集间隔、启用状态、`state`（不支持）、`error`（Zabbix 记录的采集错误原文）、主监控项与值映射。此前 Zabbix 字段白名单不含这些字段，模型几次要查都被拒绝（“output fields not authorized”），只能按标题猜：例如 AC 的「AP 指标 SNMP 采集中断超过10分钟」一周 16 次，分析从未看到它是 `nodata(...,10m)`、整张 AP 表的 SNMP walk 每 10 秒采一次。
 - **Zabbix 只读字段白名单扩充**（仍不含任何凭据、团体名、宏）：监控项 `type`、`delay`、`status`、`state`、`error`、`master_itemid` 与 `selectValueMap`；触发器 `expression`、`recovery_expression`、`comments`、`opdata`、`state`、`error` 与 `expandExpression` / `expandDescription` / `expandComment`；事件与问题 `acknowledged`、`suppressed`、`opdata`；主机接口 `available`、`error`、`errors_from`、`disable_until`。未指定 output 的监控项查询默认带 `state` 与 `error`。filter / search 只接受各对象自己的属性（例如 item.get 不再接受 `host`，此前会被 Zabbix 拒绝而浪费一轮）；history_get / trend_get 的参数结构不再列出 Zabbix 不接受的 filter、search、searchByAny，模型传了也会去掉后按 itemids 照常查询并注明。

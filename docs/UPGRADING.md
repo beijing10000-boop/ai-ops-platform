@@ -1,5 +1,58 @@
 # 升级说明
 
+## v1.7.2 → v1.8.0
+
+没有数据库迁移，没有新增或改名的配置项，`docker-compose.yml`、依赖与控制台静态资源都没有改动。平台维护的 Skill platform-base、platform-linux、platform-network 升到 v2（容器启动后第一次分析或打开 Skill 管理时自动替换；管理员停用的仍保持停用）。变化明细见 CHANGELOG 的 1.8.0 一节。
+
+### 1. 升级顺序
+
+1. SSH MCP 升到 v0.10.3（服务深度诊断在旧版 systemd 上不再误报“部分完成”）。未升级时本平台照常工作，只是这些主机上的服务诊断仍会被标为部分完成。
+2. 日志分析平台升到 v0.15.0（网络设备事件新增 CPCAR 限速丢弃、SNMP 认证失败与源 IP 锁定、无线终端上下线三类，见其升级说明）。未升级时本平台照常工作，只是告警分析的设备事件里没有这三类。
+3. 升级本平台。
+
+### 2. 备份
+
+先在“分析历史”确认没有“等待执行”或“执行中”的任务，再备份数据卷 `appdata`（数据库与主密钥）和 `redisdata`，命令与 v1.4.5 → v1.5.0 相同。回滚不需要恢复备份。
+
+### 3. 升级平台
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://服务器IP:8088/healthz
+```
+
+healthz 应返回 version 1.8.0。确认托管 Skill 已更新：Skill 管理中 platform-base、platform-linux、platform-network 显示 v2（或在 web 容器执行 `python -c "from app import skill_store; skill_store.rows()"` 后查看）。
+
+### 4. 行为变化
+
+- 告警分析预采集多读一次触发器定义（`trigger_get`，不占预采集次数），触发器事件从近 24 小时扩到近 7 天（最多 100 条）；磁盘告警多一次目录排行（挂载点在 SSH MCP 可扫描范围内时，SSH MCP 令牌须授权 `directory` 动作），Linux 系统 / 不可达告警多一次端口与服务映射（须授权 `service_map`）。未授权时只在“跳过”里注明，不影响分析。
+- 告警分析的开场上下文多了平台记录 `alert_history`（联动告警、本机 24 小时告警、同一触发器此前的两次结论），单次分析的输入约增加 1–3 千字符。
+- Zabbix 只读字段白名单扩充（监控项采集状态与错误、触发器表达式与说明、接口可用性与错误等，均不含凭据）。使用自定义 Zabbix MCP 时它需要接受这些字段；initMAX MCP 与 Zabbix 7.4 已验证。
+- 飞书卡片的处理建议每条最多 60 字（此前 50 字），卡片显示规则不变（最多 4 条、每条截到 80 字）。
+
+### 5. 回滚
+
+```bash
+cd /data/ai-ops-platform
+git switch --detach 20abd96
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+```
+
+无数据库结构变化，但数据库里的托管 Skill v2 会留着，而 **v1.7.2 不接受 platform-linux v2 的预采集 `ssh_diagnose_directory_usage`**：不处理的话，回滚后告警分析会因 Skill 校验失败而无法开始。回滚后立即在 web 容器删除这三条托管 Skill，让 v1.7.2 重新安装 v1（这三条的启用状态、适用场景与优先级会恢复默认）：
+
+```bash
+docker compose exec -T web python - <<'EOF'
+from app.main import connection
+with connection() as db:
+    db.execute("DELETE FROM platform_skills WHERE name IN ('platform-base','platform-linux','platform-network')")
+from app import skill_store; skill_store.rows()
+EOF
+```
+
 ## v1.7.1 → v1.7.2
 
 没有数据库迁移，没有新增或改名的配置项，`docker-compose.yml`、依赖、平台维护的 Skill 与控制台静态资源都没有改动。变化明细见 CHANGELOG 的 1.7.2 一节。
