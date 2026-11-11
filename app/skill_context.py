@@ -31,6 +31,13 @@ STATE_KEYS = re.compile(
 # Counters that only grow until a restart: neither a ratio to the baseline nor
 # "the same level before and after the alert" says anything about them.
 MONOTONIC_KEYS = re.compile(r"^system\.(hw\.|net\.)?uptime|^system\.boottime")
+# Value-map entries kept per item (a Windows service map has about ten).
+MEANINGS = 12
+# A trigger that fired this often in a week is a recurring problem.
+RECURRING_WEEK, RECURRING_DAY = 3, 3
+# An alert analysed this long after its event (an escalation step resending
+# it, a click on "AI分析" later) is about an old problem: say how old.
+OLD_EVENT_SECONDS = 3600
 
 # A schema cut mid-JSON cannot be called correctly; discovery gets its own budget
 # and drops whole tools instead (four Zabbix schemas are roughly 14k characters).
@@ -650,6 +657,8 @@ def model_view(provider, tool, outcome, max_chars=None, event_clock=None):
             if _fits(result, max_chars):
                 break
     else:
+        if tool == "item_get":
+            records = [_with_meanings(row) for row in records]
         for limit in RECORD_LIMITS:
             result["records"] = records[:limit]
             if len(records) > limit:
@@ -684,8 +693,65 @@ def _state(raw):
     return int(value) if value.is_integer() else value
 
 
-def _state_signal(evidence_id, ident, key, rows, event_clock):
-    """When an availability or status item changed state in the window."""
+def value_meanings(collected):
+    """{itemid: {raw value: meaning}} from the value maps item_get returned
+    (selectValueMap): what 0 / 1 / 2 or 6 means for that item."""
+    found = {}
+    for provider, tool, outcome, _ in collected:
+        if provider != "zabbix_mcp" or tool != "item_get":
+            continue
+        if not isinstance(outcome, dict):
+            continue
+        for row in outcome.get("records") or []:
+            if not isinstance(row, dict) or row.get("itemid") is None:
+                continue
+            meanings = _meanings(row.get("valuemap"))
+            if meanings:
+                found[str(row["itemid"])] = meanings
+    return found
+
+
+def _meanings(valuemap):
+    """A Zabbix value map's exact-value mappings, at most MEANINGS of them."""
+    if not isinstance(valuemap, dict) or not isinstance(valuemap.get("mappings"), list):
+        return {}
+    meanings = {}
+    for row in valuemap["mappings"]:
+        # type 0 is "equals"; ranges and regex mappings do not name one value.
+        if isinstance(row, dict) and str(row.get("type", "0")) == "0":
+            value, text = str(row.get("value", "")), str(row.get("newvalue", ""))
+            if value != "" and text:
+                meanings[value] = text[:60]
+        if len(meanings) >= MEANINGS:
+            break
+    return meanings
+
+
+def _meaning(meanings, value):
+    """The text a raw value maps to ("1" and 1.0 alike), or None."""
+    if not meanings or value is None:
+        return None
+    return meanings.get(str(value)) or meanings.get(str(_state(value)))
+
+
+def _with_meanings(row):
+    """An item row with its value map compacted to {value: meaning} and the
+    meaning of its latest value spelled out (lastvalue_text)."""
+    if not isinstance(row, dict) or "valuemap" not in row:
+        return row
+    meanings = _meanings(row.get("valuemap"))
+    row = {key: value for key, value in row.items() if key != "valuemap"}
+    if meanings:
+        row["value_meanings"] = meanings
+        text = _meaning(meanings, row.get("lastvalue"))
+        if text:
+            row["lastvalue_text"] = text
+    return row
+
+
+def _state_signal(evidence_id, ident, key, rows, event_clock, meanings=None):
+    """When an availability or status item changed state in the window;
+    `meanings` (its value map) spells the states out."""
     points = sorted(
         (clock, value)
         for clock, value in ((_clock(row), _state(row.get("value"))) for row in rows)
@@ -706,6 +772,13 @@ def _state_signal(evidence_id, ident, key, rows, event_clock):
         "latest": last,
         "latest_at": _local(last_clock),
     }
+
+    def named(raw):
+        text = _meaning(meanings, raw)
+        return f"{raw}（{text}）" if text else str(raw)
+
+    if _meaning(meanings, last):
+        value["latest_text"] = _meaning(meanings, last)
     # agent.ping reports 1 or nothing: no value after the alert is the outage.
     silent = (
         "；告警时刻之后没有新数据（只在可用时上报的监控项如 agent.ping，断数即不可用）"
@@ -713,15 +786,18 @@ def _state_signal(evidence_id, ident, key, rows, event_clock):
         else ""
     )
     if not changes:
-        hint = f"监控项 {key}（{ident}）在查询窗口内的值一直为 {last}" + (
+        hint = f"监控项 {key}（{ident}）在查询窗口内的值一直为 {named(last)}" + (
             silent or "，状态没有变化"
         )
     else:
         clock, old, new = changes[-1]
         value["last_change"] = {"from": old, "to": new, "local_time": _local(clock)}
+        if _meaning(meanings, old) and _meaning(meanings, new):
+            value["last_change"]["from_text"] = _meaning(meanings, old)
+            value["last_change"]["to_text"] = _meaning(meanings, new)
         hint = (
             f"监控项 {key}（{ident}）窗口内状态变化 {len(changes)} 次，最近一次在 "
-            f"{_local(clock)} 由 {old} 变为 {new}"
+            f"{_local(clock)} 由 {named(old)} 变为 {named(new)}"
             + (f"（告警时刻 {_local(event_clock)}）" if event_clock else "")
             + "：以状态变化的时刻判断故障开始与恢复，不按均值或倍数解读"
             + silent
@@ -733,15 +809,16 @@ def _state_signal(evidence_id, ident, key, rows, event_clock):
 LOWER_IS_WORSE = "；对空闲率、可用内存、剩余空间、可用性这类越低越差的指标意味着恶化"
 
 
-def _history_signals(collected, event_clock, keys=None):
+def _history_signals(collected, event_clock, keys=None, meanings=None):
     """Alert window versus 7-day baseline and before/after the alert moment.
 
     Both directions count: a fall in idle CPU, available memory or free space
     is the anomaly, not a sign that all is normal. State items (`keys` maps
-    item ids to keys) report when their state changed; counters that only
-    grow (uptime) are left out.
+    item ids to keys; an item with a value map, `meanings`, is one too) report
+    when their state changed; counters that only grow (uptime) are left out.
     """
     keys = keys or {}
+    meanings = meanings or {}
     signals = []
     history = {}
     trend = {}
@@ -761,8 +838,10 @@ def _history_signals(collected, event_clock, keys=None):
         key = keys.get(ident, "")
         if MONOTONIC_KEYS.match(key):
             continue
-        if STATE_KEYS.match(key):
-            signal = _state_signal(item["evidence_id"], ident, key, rows, event_clock)
+        if STATE_KEYS.match(key) or ident in meanings:
+            signal = _state_signal(
+                item["evidence_id"], ident, key, rows, event_clock, meanings.get(ident)
+            )
             if signal:
                 signals.append(signal)
             continue
@@ -869,27 +948,133 @@ def _history_signals(collected, event_clock, keys=None):
     return signals
 
 
-def _event_signals(collected):
+def _event_clock(row):
+    stamp = str(row.get("clock", "")) if isinstance(row, dict) else ""
+    return int(stamp) if stamp.isdigit() else None
+
+
+def _age(seconds):
+    """A duration as people say it: 13 天 4 小时, 5 小时 20 分钟, 12 分钟."""
+    minutes = int(seconds // 60)
+    days, hours = minutes // 1440, minutes % 1440 // 60
+    if days:
+        return f"{days} 天" + (f" {hours} 小时" if hours else "")
+    if hours:
+        return f"{hours} 小时" + (f" {minutes % 60} 分钟" if minutes % 60 else "")
+    return f"{minutes} 分钟"
+
+
+def _event_signals(collected, event_clock=None, event_id=None, now=None):
+    """The alert trigger's week (prefetch's event_get): how often it fired in
+    the last 24 hours and the whole window, how long its problems lasted when
+    they recovered (`recurrence`); and, for an alert analysed long after its
+    event, how old the problem is and whether it recovered (`event_age`)."""
+    now = now or int(time.time())
+    signals, problems, recoveries, source = [], [], {}, None
     for provider, tool, outcome, evidence_id in collected:
         if provider != "zabbix_mcp" or tool != "event_get":
             continue
         if not isinstance(outcome, dict) or outcome.get("is_error"):
             continue
+        rows = [row for row in outcome.get("records") or [] if isinstance(row, dict)]
         problems = [
-            row
-            for row in outcome.get("records") or []
-            if isinstance(row, dict) and str(row.get("value")) == "1"
+            row for row in rows if str(row.get("value")) == "1" and _event_clock(row)
         ]
-        if len(problems) >= 3:
-            return [
-                _zabbix_signal(
-                    evidence_id,
-                    "recurrence",
-                    {"problem_events_24h": len(problems)},
-                    f"该触发器近 24 小时触发了 {len(problems)} 次：反复抖动或阈值贴近常态，应核对基线与阈值而不只是本次峰值",
+        recoveries = {
+            str(row.get("eventid")): _event_clock(row)
+            for row in rows
+            if str(row.get("value")) == "0" and _event_clock(row)
+        }
+        source = evidence_id
+        day = [row for row in problems if _event_clock(row) >= now - 86400]
+        durations = sorted(
+            recoveries[str(row.get("r_eventid"))] - _event_clock(row)
+            for row in problems
+            if recoveries.get(str(row.get("r_eventid")), -1) >= _event_clock(row)
+        )
+        if len(problems) >= RECURRING_WEEK or len(day) >= RECURRING_DAY:
+            value = {"problem_events_24h": len(day), "problem_events_7d": len(problems)}
+            hint = f"该触发器近 7 天触发 {len(problems)} 次（近 24 小时 {len(day)} 次）"
+            if len(rows) >= 100:
+                value["limit_reached"] = True
+                hint += "（只取了最近 100 条事件，实际更多）"
+            if durations:
+                middle = durations[len(durations) // 2]
+                value.update(
+                    recovered=len(durations),
+                    median_duration_minutes=round(middle / 60, 1),
+                    max_duration_minutes=round(durations[-1] / 60, 1),
                 )
-            ]
-    return []
+                hint += (
+                    f"，其中 {len(durations)} 次已恢复，持续时间中位数 {_age(middle)}、"
+                    f"最长 {_age(durations[-1])}"
+                )
+            hint += (
+                "：这是反复出现的问题。结论要写明它反复出现及其规律；建议在本次处置之外"
+                "给出根治措施，并核对阈值、持续时间或采集参数是否合理"
+            )
+            signals.append(_zabbix_signal(evidence_id, "recurrence", value, hint))
+        break
+    if event_id and event_clock and now - event_clock >= OLD_EVENT_SECONDS:
+        own = next(
+            (
+                row
+                for row in problems
+                if event_id and str(row.get("eventid")) == event_id
+            ),
+            None,
+        )
+        value = {
+            "event_age_hours": round((now - event_clock) / 3600, 1),
+            "event_local_time": _local(event_clock),
+        }
+        hint = f"本次告警的事件发生在 {_age(now - event_clock)} 前（{_local(event_clock)}）"
+        recovered = recoveries.get(str(own.get("r_eventid"))) if own else None
+        if recovered:
+            value["recovered_at"] = _local(recovered)
+            hint += f"，已于 {_local(recovered)} 恢复"
+        elif own is not None:
+            value["recovered"] = False
+            hint += "，至今没有恢复事件"
+        hint += (
+            "：分析时看到的是现在的状态，告警时刻的情况以告警时间前后的历史为准；"
+            "结论要写明问题已持续多久，长期未恢复的设备先确认是否已下线、搬迁或更换地址"
+        )
+        signals.append(_zabbix_signal(source, "event_age", value, hint, level="info"))
+    return signals
+
+
+def _device_event_signal(outcome, evidence_id):
+    """The problem categories a network device logged around the alert
+    (log_network_events: port flaps, neighbor changes, CPCAR drops, SNMP
+    authentication failures...): the device's own account of what happened,
+    which SNMP metrics only show the effect of."""
+    data = outcome.get("data") if isinstance(outcome, dict) else None
+    if not isinstance(data, dict) or outcome.get("is_error"):
+        return None
+    found = [
+        row
+        for row in data.get("categories") or []
+        if isinstance(row, dict) and row.get("problem") is True and row.get("c")
+    ]
+    if not found:
+        return None
+    counts = {str(row.get("category")): row.get("c") for row in found[:6]}
+    names = "、".join(
+        f"{row.get('name') or row.get('category')} {row.get('c')} 条"
+        for row in found[:6]
+    )
+    return {
+        "source": "logs",
+        "evidence_id": evidence_id,
+        "level": "warning",
+        "metric": "device_problem_events",
+        "value": counts,
+        "hint": f"设备日志在告警前后记录了问题事件：{names}。"
+        "核对它们与告警指标的时间先后：先于或同时于指标异常的事件可能是原因"
+        "（如上送 CPU 的 SNMP 报文被 CPCAR 限速丢弃会让 SNMP 采集超时、中断），"
+        "之后才出现的多是结果",
+    }
 
 
 def _log_signals(collected):
@@ -897,6 +1082,11 @@ def _log_signals(collected):
     and error templates first seen in the window (from log_overview)."""
     signals = []
     for provider, tool, outcome, evidence_id in collected:
+        if provider == "logs" and tool == "log_network_events":
+            signal = _device_event_signal(outcome, evidence_id)
+            if signal:
+                signals.append(signal)
+            continue
         if provider != "logs" or tool != "log_overview":
             continue
         data = outcome.get("data") if isinstance(outcome, dict) else None
@@ -947,13 +1137,14 @@ def _log_signals(collected):
     return signals
 
 
-def derive_signals(collected, event_clock=None, diagnostic_type=None):
+def derive_signals(collected, event_clock=None, diagnostic_type=None, event_id=None):
     """Deterministic cross-checks over prefetched evidence for the model.
 
     `collected` holds (provider, tool, raw outcome, evidence id). Uses the raw
     outcome, not the size-limited view, so trimmed rows still count.
     `diagnostic_type` limits the collection-freshness check to availability
-    alerts; without it (None) every task gets it.
+    alerts; without it (None) every task gets it. `event_id`: the alert's own
+    event, whose recovery the trigger's event history may hold.
     """
     signals, ssh, latest, keys = [], [], {}, {}
     clocks, clock_evidence = {}, None
@@ -1096,8 +1287,12 @@ def derive_signals(collected, event_clock=None, diagnostic_type=None):
                     "文件系统使用率超过 90%：核对增长来源与目录占用",
                 )
             )
-    signals.extend(_history_signals(collected, event_clock, keys))
-    signals.extend(_event_signals(collected))
+    signals.extend(
+        _history_signals(collected, event_clock, keys, value_meanings(collected))
+    )
+    signals.extend(
+        _event_signals(collected, event_clock, str(event_id) if event_id else None)
+    )
     signals.extend(_log_signals(collected))
     # SSH MCP writes a finding per process (heap_max_unset for each JVM without
     # -Xmx): repeated ones become one signal with a count, and SSH takes at most

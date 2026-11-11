@@ -153,10 +153,10 @@ def applies(skill, diagnostic_type=None, device=None):
 
 
 # SSH tools whose required argument the platform cannot derive from a task
-# (a directory root or a JVM pid) cannot be pre-collected. `service` tools can:
-# the Web form or the alert's trigger items may name the unit.
+# (a JVM pid) cannot be pre-collected. `service` tools can: the Web form or
+# the alert's trigger items may name the unit; so can the directory scan, whose
+# root is a disk alert's mount point (skipped when the alert names none).
 PARAMETRIZED_SSH = {
-    "ssh_diagnose_directory_usage",
     "ssh_diagnose_jvm",
 }
 SSH_TOOL = re.compile(r"ssh_diagnose_[a-z_]{1,40}|ssh_collect")

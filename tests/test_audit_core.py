@@ -69,8 +69,9 @@ def budgets(**profiles):
 
 def charged(zbx, ssh):
     """Prefetch evidence calls: every Zabbix query and SSH diagnostic, not the
-    identity lookup that binds the SSH asset."""
-    return len(zbx.calls) + len(
+    identity lookup that binds the SSH asset nor the alert trigger's own
+    definition (trigger_get), which describe the alert rather than collect."""
+    return len([name for name, _ in zbx.calls if name != "trigger_get"]) + len(
         [name for name, _ in ssh_calls(ssh) if name != "ssh_resolve_host"]
     )
 

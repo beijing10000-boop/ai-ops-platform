@@ -2,6 +2,21 @@
 
 ## 未发布
 
+告警 AI 分析的取证与建议质量（按 2026-11 对 80 条真实告警的分析结果逐条复核后改进）。无数据库迁移；平台维护的 Skill platform-base、platform-linux、platform-network 升到 v2。
+
+- **告警本身的定义与采集状态**：预采集新增告警触发器的定义（`trigger_get`：展开后的表达式、恢复表达式、说明与操作数据），触发器监控项新增类型、采集间隔、启用状态、`state`（不支持）、`error`（Zabbix 记录的采集错误原文）、主监控项与值映射。此前 Zabbix 字段白名单不含这些字段，模型几次要查都被拒绝（“output fields not authorized”），只能按标题猜：例如 AC 的「AP 指标 SNMP 采集中断超过10分钟」一周 16 次，分析从未看到它是 `nodata(...,10m)`、整张 AP 表的 SNMP walk 每 10 秒采一次。
+- **Zabbix 只读字段白名单扩充**（仍不含任何凭据、团体名、宏）：监控项 `type`、`delay`、`status`、`state`、`error`、`master_itemid` 与 `selectValueMap`；触发器 `expression`、`recovery_expression`、`comments`、`opdata`、`state`、`error` 与 `expandExpression` / `expandDescription` / `expandComment`；事件与问题 `acknowledged`、`suppressed`、`opdata`；主机接口 `available`、`error`、`errors_from`、`disable_until`。未指定 output 的监控项查询默认带 `state` 与 `error`。filter / search 只接受各对象自己的属性（例如 item.get 不再接受 `host`，此前会被 Zabbix 拒绝而浪费一轮）；history_get / trend_get 的参数结构不再列出 Zabbix 不接受的 filter、search、searchByAny，模型传了也会去掉后按 itemids 照常查询并注明。
+- **取值含义**：监控项的值映射整理为 `value_meanings`，最新值附 `lastvalue_text`；有值映射的监控项按状态解读，`state_change` 信号写出状态的含义（`latest_text`、`from_text` / `to_text`）。此前模型把 `zabbix[host,agent,available]` 的 2（未知）读成“可用”。
+- **反复出现与事件年龄**：触发器事件从近 24 小时扩到近 7 天（最多 100 条，含恢复事件），信号 `recurrence` 给出近 24 小时与 7 天的次数、已恢复问题的持续时间中位数与最长值；新信号 `event_age` 说明告警事件发生在多久之前、是否已恢复（升级通知重发或事后分析的告警，此前把 13 天前开始的不可达当作刚发生）。
+- **平台记录（alert_history）**：告警分析的开场上下文新增平台自己的记录——告警前后 15 分钟收到的其它主机告警（联动告警）、本主机近 24 小时的其它告警、近 7 天对同一主机同一触发器的前两次 AI 分析结论与建议。它们不是工具证据、不能用证据编号引用；Skill 要求用本次证据重新核对此前的结论。
+- **设备日志信号**：日志 MCP 的网络设备事件（`log_network_events`）里的问题类别成为信号 `device_problem_events`，例如上送 CPU 的 SNMP 报文被 CPCAR 限速丢弃（需要日志分析平台把这类日志归类，见其同期版本）。
+- **磁盘告警预采集目录排行**：告警挂载点在 SSH MCP 可扫描范围内（/、/data、/var、/opt、/home、/root、/tmp、/usr 及其子目录）时，预采集该挂载点下一层的目录占用；8 秒内没扫完的只列已扫完的子目录，记为取证限制而不是采集失败。此前磁盘告警的建议多是“用 du 逐层排查”。
+- **agent 不可用**：Linux 主机的系统 / 不可达类告警预采集端口与服务映射，Skill 写明 Agent 2 的单元是 `zabbix-agent2.service`（此前模型反复查不存在的 `zabbix-agent`、`zabbix_agentd` 单元而部分失败）。
+- **模型参数按工具要求修正而不是拒绝**：日志工具的 `around` 传成数字时改为文本、整数参数超过上限时按上限查询（如 SSH 日志窗口 `minutes` 最多 120）、Zabbix 历史查询超过 1 天时改为截止时间前 1 天并提示用 trend_get、起止时间写反时对调；每次修正都写在结果的 `adjusted` 里。SSH 工具的 `unit` 改为 `service`、`path` 改为 `root`（工具只接受后者时）；其它参数名写错时错误信息列出可用参数。
+- **连接复用导致的分析失败**：调用 MCP 服务的 HTTP 连接空闲 2 秒即弃用（此前 5 秒，与服务端 uvicorn 的 5 秒空闲关闭相同）。模型一轮恰好约 5 秒时，下一次调用会复用服务端刚关闭的连接而 ReadError，整次分析失败。
+- **处理建议的要求**：输出约定与 platform-base 要求每条建议落到具体对象（命令、监控项 key、进程与 PID、目录、配置项及调整值），反复出现的告警至少一条是根治措施，不让人工再查平台本次已查过的内容；每条不超过 60 字（此前 50 字）。platform-network 新增 SNMP 采集中断 / SNMP 不可用的排查顺序（范围 → Zabbix 采集错误与间隔 → 设备日志中的 CPCAR 限速与 SNMP 源 IP 锁定 → 规律），uptime 恒为 0 的监控项不用于判断重启，长期不可达先确认是否已下线。
+- CPU 告警预载 `ssh_diagnose_java` 的参数结构（模型曾两次给它传不存在的 `pid` 参数）；Skill 写明告警之后才启动的进程（`elapsed` 短于告警至今）不能当作告警时段的占用者。
+
 ## 1.7.2 — 2026-11-04
 
 飞书问答回复不再露出 Markdown 标记（`#` 标题、反引号、代码块、表格）。无数据库迁移，只需升级本平台，步骤见[升级说明](docs/UPGRADING.md)。

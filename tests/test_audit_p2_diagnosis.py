@@ -582,24 +582,24 @@ def test_a_mixed_quote_needs_every_number_and_moment():
 # comment, or containers keep the stored copy, then record the new pair.
 TEMPLATE_LOCK = {
     "platform-base": (
-        1,
-        "14b5c28feb0a4e9d74975eb7307b586b63abc82fb352f708c20a087dc1117260",
+        2,
+        "57e30766d04ed4a957f943c18736bac0c83d787f45e79ff33ec6bbb657d0f689",
     ),
     "platform-logs": (
         4,
         "490d5c83b84469181b81855c61d2da24d113c2ad29d029f9bb93c0c6c3b11040",
     ),
     "platform-linux": (
-        1,
-        "b790238d205aa5bec26dfbe966f68bccced25fa49c82bc83fcf9a6ca8887a58e",
+        2,
+        "b7e122ec4407bda4b50294812dcf3f43041249f4fef1f76e07412e6915c2a7a4",
     ),
     "platform-windows": (
         1,
         "e2fbb741c8dd44ece6ae17e388f668cfd28be9e925111c003d0a0346640f1738",
     ),
     "platform-network": (
-        1,
-        "dbef1983a9a494b850528afd7de5ca2ad93b45d55b047e18ac7b505552f7283e",
+        2,
+        "ce54d4efab39b4ab2410cea044b82fd978f8e77da780a3057dd68a45a42c5bae",
     ),
     "platform-service": (
         1,
