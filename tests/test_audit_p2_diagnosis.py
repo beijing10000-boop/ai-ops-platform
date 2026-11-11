@@ -583,7 +583,7 @@ def test_a_mixed_quote_needs_every_number_and_moment():
 TEMPLATE_LOCK = {
     "platform-base": (
         2,
-        "2c6f50ca79ed5dea7d69c93b466b31a8b060fcb9a9bc9c2ee1a0c008d63db72d",
+        "57e30766d04ed4a957f943c18736bac0c83d787f45e79ff33ec6bbb657d0f689",
     ),
     "platform-logs": (
         4,

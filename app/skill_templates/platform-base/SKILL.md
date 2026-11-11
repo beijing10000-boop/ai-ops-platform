@@ -9,9 +9,6 @@ prefetch:
 - scopes: [alert, web]
   types: ["*"]
   schemas: [history_get, trend_get]
-- scopes: [alert]
-  types: ["*"]
-  schemas: [item_get]
 ---
 
 # 平台基础诊断规则

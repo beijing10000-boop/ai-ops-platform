@@ -1336,13 +1336,8 @@ async def run(
                             "object": 0,
                             "time_from": now - EVENT_DAYS * 86400,
                             "time_till": now,
-                            "output": [
-                                "eventid",
-                                "clock",
-                                "value",
-                                "name",
-                                "r_eventid",
-                            ],
+                            # Every row is this trigger: no name per row.
+                            "output": ["eventid", "clock", "value", "r_eventid"],
                             "sortfield": "clock",
                             "sortorder": "DESC",
                             "limit": 100,

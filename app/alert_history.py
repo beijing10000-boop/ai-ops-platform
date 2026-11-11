@@ -25,7 +25,7 @@ AVAILABILITY = re.compile(
 RELATED_SECONDS, RELATED = 900, 12
 # Earlier analyses of the same host and trigger: this many days, at most PREVIOUS.
 PREVIOUS_DAYS, PREVIOUS = 7, 2
-CAUSE_CHARS, ACTION_ROWS, ACTION_CHARS = 300, 4, 100
+CAUSE_CHARS, ACTION_ROWS, ACTION_CHARS = 240, 4, 80
 NOTICE = (
     "平台自己的记录，不是工具证据，不能用证据编号引用：related_alerts 是平台在本次告警前后 "
     "15 分钟收到的其它主机的同名告警（本次是可用性 / 采集类告警时还包括其它主机的可用性告警），"
