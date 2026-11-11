@@ -583,7 +583,7 @@ def test_a_mixed_quote_needs_every_number_and_moment():
 TEMPLATE_LOCK = {
     "platform-base": (
         2,
-        "8e6663066c66186b5f64498d0578c67845e971b939199641ab0feebd010e04dd",
+        "2c6f50ca79ed5dea7d69c93b466b31a8b060fcb9a9bc9c2ee1a0c008d63db72d",
     ),
     "platform-logs": (
         4,
@@ -591,7 +591,7 @@ TEMPLATE_LOCK = {
     ),
     "platform-linux": (
         2,
-        "c00150dea49b9b33c804ead2e2d412c58b0b0b10d4200639fb0e9e1feb4852fd",
+        "b7e122ec4407bda4b50294812dcf3f43041249f4fef1f76e07412e6915c2a7a4",
     ),
     "platform-windows": (
         1,

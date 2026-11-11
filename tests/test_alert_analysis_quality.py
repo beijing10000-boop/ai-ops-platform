@@ -427,6 +427,52 @@ def test_alert_history_lists_linked_alerts_and_earlier_conclusions(isolated):
     assert "不能用证据编号引用" in found["notice"]
 
 
+def test_a_resource_alert_lists_only_the_same_trigger_elsewhere(isolated):
+    """Other hosts' memory or disk alerts say nothing about this host's CPU;
+    the same CPU alert on several hosts at once does, and so does a storm."""
+    now = int(time.time())
+    cpu = "Linux: Load average is too high"
+    current = alert("920", host="1", trigger="11", name=cpu, host_name="app-1")
+    store(current, 0)
+    store(alert("921", host="2", trigger="12", name=cpu, host_name="app-2"), 2)
+    for n in range(3, 8):
+        store(
+            alert(
+                f"92{n}",
+                host=str(n),
+                trigger="13",
+                name="Linux: High memory",
+                host_name=f"db-{n}",
+            ),
+            1,
+        )
+    found = alert_history.context(current, now)
+    assert [row["host"] for row in found["related_alerts"]] == ["app-2"]
+    assert found["other_hosts_alerting"] == 6
+    # An availability alert also lists other hosts' availability alerts.
+    down = alert(
+        "930",
+        host="40",
+        trigger="41",
+        name="Huawei VRP: Unavailable by ICMP ping",
+        host_name="sw-1",
+    )
+    store(down, 0)
+    store(
+        alert(
+            "931",
+            host="42",
+            trigger="43",
+            name="Linux: Zabbix agent is not available",
+            host_name="vm-9",
+        ),
+        1,
+    )
+    linked = alert_history.context(down, now)
+    assert "vm-9" in [row["host"] for row in linked["related_alerts"]]
+    assert "db-3" not in [row["host"] for row in linked["related_alerts"]]
+
+
 def test_alert_history_is_left_out_without_records(isolated):
     current = alert("910")
     store(current, 0)

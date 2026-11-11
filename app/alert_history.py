@@ -10,8 +10,16 @@ cite, the earlier conclusions least of all.
 """
 
 import logging
+import re
 
 log = logging.getLogger(__name__)
+# Alerts about reaching a host or collecting from it: when the alert is one,
+# other hosts' alerts of this kind at the same moment point at a shared
+# cause (a switch, a link, a proxy); for a CPU or disk alert they are noise.
+AVAILABILITY = re.compile(
+    r"(?i)unavailable|not available|unreachable|icmp|no ?data|snmp|link down"
+    r"|采集中断|不可达|不可用|中断"
+)
 
 # Other alerts within this many seconds of the alert, at most RELATED of them.
 RELATED_SECONDS, RELATED = 900, 12
@@ -20,8 +28,9 @@ PREVIOUS_DAYS, PREVIOUS = 7, 2
 CAUSE_CHARS, ACTION_ROWS, ACTION_CHARS = 300, 4, 100
 NOTICE = (
     "平台自己的记录，不是工具证据，不能用证据编号引用：related_alerts 是平台在本次告警前后 "
-    "15 分钟收到的其它告警（含其它主机），用来判断是否为同一原因引起的联动告警；"
-    "same_host_24h 是本主机近 24 小时的其它告警；previous_analyses 是此前对同一主机、"
+    "15 分钟收到的其它主机的同名告警（本次是可用性 / 采集类告警时还包括其它主机的可用性告警），"
+    "用来判断是否为同一原因引起的联动告警；other_hosts_alerting 是同一时段有告警的其它主机数"
+    "（告警风暴）；same_host_24h 是本主机近 24 小时的其它告警；previous_analyses 是此前对同一主机、"
     "同一触发器的 AI 分析结论，只能作为线索，必须用本次证据重新核对，"
     "本次证据不支持时不要沿用，支持时说明与上次一致并侧重根治措施"
 )
@@ -81,6 +90,16 @@ def context(event, clock):
     event_id = str(event.get("event_id") or "")
     if not (host.isdigit() and event_id and clock):
         return None
+    own_name = str(event.get("event_name") or "")
+    availability = bool(AVAILABILITY.search(own_name))
+
+    def linked(name):
+        """Another host's alert worth the model's attention: the same
+        trigger (several hosts at once), or, for an availability alert,
+        another availability alert."""
+        name = str(name or "")
+        return name == own_name or (availability and bool(AVAILABILITY.search(name)))
+
     result = {}
     try:
         with connection() as db:
@@ -97,12 +116,15 @@ def context(event, clock):
                     clock - RELATED_SECONDS,
                     clock + RELATED_SECONDS,
                     clock,
-                    RELATED * 3,
+                    200,
                 ),
             ).fetchall()
-            related, seen = [], set()
+            related, seen, others = [], set(), set()
             for name, host_name, severity, received, host_id, recovered in rows:
                 if str(host_id) == host:
+                    continue
+                others.add(host_name)
+                if not linked(name):
                     continue
                 key = (host_name, name)
                 if key in seen:
@@ -121,6 +143,10 @@ def context(event, clock):
                     break
             if related:
                 result["related_alerts"] = related
+            if len(others) >= 5:
+                # Many hosts alerting at once (of any kind) is an alert storm
+                # worth knowing even when none is listed.
+                result["other_hosts_alerting"] = len(others)
             same = db.execute(
                 "SELECT event_name, COUNT(*), MAX(received_at) FROM alert_events "
                 "WHERE event_value='1' AND event_id != ? "

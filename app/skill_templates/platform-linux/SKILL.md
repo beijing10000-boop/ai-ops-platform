@@ -8,7 +8,7 @@ prefetch:
   ssh: [ssh_diagnose_cpu, ssh_diagnose_processes, ssh_diagnose_pressure]
   zabbix_items: [system.cpu.load, system.cpu.util, system.cpu.num]
   history: ["system.cpu.load[all,avg5]", system.cpu.util, "system.cpu.util[,iowait]", "system.cpu.load[all,avg1]", "system.cpu.util[,steal]", "system.cpu.util[,system]", "system.cpu.load[all,avg15]", "system.cpu.util[,idle]"]
-  schemas: [history_get, trend_get]
+  schemas: [history_get, trend_get, ssh_diagnose_java]
 - scopes: [alert]
   types: [memory]
   ssh: [ssh_diagnose_memory, ssh_diagnose_memory_processes, ssh_diagnose_pressure, ssh_diagnose_oom, ssh_diagnose_java]
@@ -62,7 +62,8 @@ prefetch:
 
 - 对比“每核负载”与触发器阈值，同时看 CPU 利用率与 `cpu_idle_percent`：负载高不等于 CPU 打满。
 - `load_cpu_divergence`（负载高但 CPU 空闲）时，优先核查 `procs_blocked`、D 状态进程（`uninterruptible` 的 wchan）、`cpu_iowait_percent` 与 PSI（`ssh_diagnose_pressure` 的 io/cpu），再结合 `ssh_diagnose_io` 与 Zabbix 的 `vfs.dev.*` 判断是否为存储等待；不要只看 CPU 占用排行。
-- 当前谁在占 CPU 以 `cpu_interval`（最近 1 秒增量）为准；`cpu_percent` 是进程生命周期平均值，不能代表告警时段。占用高的是 Java 进程时调用 `ssh_diagnose_java`（必要时 `ssh_diagnose_jvm` 看 GC）。
+- 当前谁在占 CPU 以 `cpu_interval`（最近 1 秒增量）为准；`cpu_percent` 是进程生命周期平均值，不能代表告警时段。占用高的是 Java 进程时调用 `ssh_diagnose_java`（参数结构已预载，它列出全部 Java 进程，不接受 PID；必要时 `ssh_diagnose_jvm` 按 PID 看 GC）。
+- 进程的 `elapsed`（已运行时长）短于“现在 − 告警时间”的，是告警之后才启动的进程，不能当作告警时段的占用者；SSH 快照与告警相隔较久时，告警时段的占用以 Zabbix 历史为准。
 - VMware 等虚拟机的 steal 通常为 0，不能据此排除宿主机 CPU 争抢；需要时建议在虚拟化平台查看 CPU Ready。
 
 ## 内存
