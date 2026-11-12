@@ -200,6 +200,8 @@ LOG_TOOLS = {
         "network_events os_events search context trace"
         # log analysis platform v0.8
         " nginx_report"
+        # the application board
+        " apps"
     ).split()
 }
 
