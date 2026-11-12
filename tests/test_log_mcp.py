@@ -80,6 +80,17 @@ SERVER_TOOLS = [
         },
     ),
     tool("log_java_exceptions", {**WINDOW, "service": {"type": "string"}}),
+    tool(
+        "log_apps",
+        {
+            "application": {"type": "string", "default": ""},
+            "host": {"type": "string", "default": ""},
+            "site": {"type": "string", "default": ""},
+            "start": {"type": "string", "default": "last_24h"},
+            "end": {"type": "string", "default": ""},
+            "limit": {"type": "integer", "default": 20},
+        },
+    ),
     tool("log_network_events", {**WINDOW, "timeline": {"type": "integer"}}),
     tool("log_search", {**WINDOW, "query": {"type": "string"}, "limit": {}}),
     tool("log_trace", {"trace_id": {"type": "string"}}, ["trace_id"]),
@@ -101,6 +112,7 @@ ALLOWED = {
     "log_nginx_summary",
     "log_nginx_report",
     "log_java_exceptions",
+    "log_apps",
     "log_network_events",
     "log_search",
     "log_trace",
@@ -916,13 +928,62 @@ def test_log_questions_get_the_site_tools_schemas_up_front(logs):
         plan = skills.prefetch_plan(
             [skills.managed_package("platform-logs")], "qa", kind, None
         )
-        assert plan["schemas"] == ["log_resolve_target", "log_nginx_report"]
+        assert plan["schemas"] == [
+            "log_resolve_target",
+            "log_nginx_report",
+            "log_apps",
+        ]
         assert plan["logs"] == []
     # Other questions do not carry them.
     plan = skills.prefetch_plan(
         [skills.managed_package("platform-logs")], "qa", "cpu", "linux"
     )
     assert plan["schemas"] == []
+
+
+APP_QUESTION = "订单服务今天的访问量和 5xx 是多少"
+
+
+def test_questions_about_an_application_get_the_board_tool_up_front(logs):
+    """ "How many requests and 5xx did the order service get today" is answered
+    by the log platform's application board, whichever way the question is
+    filed (a site problem, a Java or service one, or none of them)."""
+    task, sent = ask(APP_QUESTION)
+    assert "platform-logs" in sent["applied_skills"]
+    preloaded = {
+        (item["provider"], item["name"]) for item in sent["preloaded_tool_schemas"]
+    }
+    assert ("logs", "log_apps") in preloaded
+    board = next(t for t in sent["preloaded_tool_schemas"] if t["name"] == "log_apps")
+    assert {"application", "host", "site"} <= set(board["parameters"]["properties"])
+    # A schema only: the board is read when the model asks for it.
+    assert [name for name, _ in logs.session.calls] == ["log_list_tool_catalog"]
+    package = [skills.managed_package("platform-logs")]
+    for kind in ("java", "service", "bottleneck"):
+        assert skills.prefetch_plan(package, "qa", kind, None)["schemas"] == [
+            "log_apps"
+        ]
+    # Alert analysis does not carry it: it is a question's tool.
+    assert (
+        "log_apps"
+        not in skills.prefetch_plan(package, "alert", "java", "linux")["schemas"]
+    )
+    body = package[0]["instructions"]
+    assert "问的是应用" in body and "不能写成“没有人访问”" in body
+    assert "工具目录里没有 `log_apps`" in body
+
+
+def test_a_log_platform_without_the_board_tool_answers_as_before(logs):
+    # Capability discovery: an older log platform, or a token without the
+    # grant, simply does not get the schema; nothing fails.
+    logs.session.granted = ["log_overview", "log_nginx_report", "log_search"]
+    task, sent = ask(APP_QUESTION)
+    preloaded = {
+        (item["provider"], item["name"])
+        for item in sent.get("preloaded_tool_schemas", [])
+    }
+    assert ("logs", "log_apps") not in preloaded
+    assert task["status"] == "success"
 
 
 def test_platform_logs_skill_says_a_domain_is_a_site_not_a_log_source():

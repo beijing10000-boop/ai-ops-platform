@@ -312,7 +312,10 @@ def prefetch_plan(skills, scope, diagnostic_type, device=None):
                     # Snapshots taken before `history` / `logs` existed lack them.
                     plan[key].extend(x for x in rule.get(key, []) if x not in plan[key])
     plan["ssh"] = plan["ssh"][:6]
-    plan["schemas"] = plan["schemas"][:4]
+    # Five, not a rule's four: a question about a web site's application gets
+    # the Nginx Skill's two Zabbix tools, the log Skill's two site tools and
+    # its application board. The model view still bounds their total size.
+    plan["schemas"] = plan["schemas"][:5]
     plan["zabbix_items"] = plan["zabbix_items"][:8]
     plan["history"] = plan["history"][:8]
     plan["logs"] = plan["logs"][:6]
