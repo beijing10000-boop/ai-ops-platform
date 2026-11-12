@@ -1,5 +1,49 @@
 # 升级说明
 
+## v1.8.0 → v1.8.1
+
+没有数据库迁移，没有新增或改名的配置项，`docker-compose.yml`、依赖与控制台静态资源都没有改动。平台维护的 Skill platform-logs 升到 v5（容器启动后第一次分析或打开 Skill 管理时自动替换；管理员停用的仍保持停用）。变化明细见 CHANGELOG 的 1.8.1 一节。
+
+### 1. 升级顺序
+
+1. SSH MCP 升到 v0.11.0（新增只读动作「Java 应用清单」，日志分析平台的应用看板用它采集）。
+2. 日志分析平台升到 v0.16.0（专题分析的「应用」看板与 MCP 工具 `log_apps`，见其升级说明）。未升级时本平台照常工作，只是问答不能按应用统计，仍按域名回答。
+3. 升级本平台。
+4. 在日志分析平台「MCP 接入」里给本平台使用的令牌勾选 `log_apps`（它不随已有授权自动获得）。没有勾选时同第 2 条。
+
+### 2. 备份
+
+先在“分析历史”确认没有“等待执行”或“执行中”的任务，再备份数据卷 `appdata`（数据库与主密钥）和 `redisdata`，命令与 v1.4.5 → v1.5.0 相同。回滚不需要恢复备份。
+
+### 3. 升级平台
+
+```bash
+cd /data/ai-ops-platform
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+curl -fsS http://服务器IP:8088/healthz
+```
+
+healthz 应返回 version 1.8.1。确认托管 Skill 已更新：Skill 管理中 platform-logs 显示 v5（或在 web 容器执行 `python -c "from app import skill_store; skill_store.rows()"` 后查看）。
+
+### 4. 行为变化
+
+- 飞书问答与 Web 提问：归为日志、Nginx、Java、服务或未归类的问题，开场多带一个工具 `log_apps` 的参数说明（日志平台提供且令牌已授权时），输入约增加几百字符；模型按 Skill 的指引用它回答某个应用的访问量、4xx、5xx，某台主机上的应用，或某个域名后面的应用。
+- 一次分析预先带上的工具参数说明上限从 4 个提到 5 个。
+- 告警分析不受影响：预采集与结论格式都没有变化。
+
+### 5. 回滚
+
+```bash
+cd /data/ai-ops-platform
+git switch --detach 823a5de
+docker compose --profile feishu up -d --build --remove-orphans --wait --wait-timeout 180
+```
+
+无数据库结构变化。数据库里的 platform-logs v5 会留着，v1.8.0 能读它并继续使用（多出的“问的是应用”一节只是文字指引；预先带的工具说明仍按 4 个的上限）。
+
 ## v1.7.2 → v1.8.0
 
 没有数据库迁移，没有新增或改名的配置项，`docker-compose.yml`、依赖与控制台静态资源都没有改动。平台维护的 Skill platform-base、platform-linux、platform-network 升到 v2（容器启动后第一次分析或打开 Skill 管理时自动替换；管理员停用的仍保持停用）。变化明细见 CHANGELOG 的 1.8.0 一节。
